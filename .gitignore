@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .env
 campaign-poc-data/
+.venv/
+*.log
