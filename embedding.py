@@ -19,11 +19,29 @@ def embed(text: str) -> list[float]:
     text = (text or "").strip()
     if not text:
         raise ValueError("cannot embed empty text")
-    if config.EMBED_PROVIDER == "voyage":
-        return _embed_voyage(text)
     if config.EMBED_PROVIDER == "ollama":
         return _embed_ollama(text)
+    if config.EMBED_PROVIDER == "voyage":
+        return _embed_voyage(text)
+    if config.EMBED_PROVIDER == "hash":
+        return _embed_hash(text)
     raise ValueError(f"unknown embed provider {config.EMBED_PROVIDER!r}")
+
+
+def _embed_hash(text: str) -> list[float]:
+    """
+    Dependency-free deterministic embedding — NO external service. A bag-of-words hashing
+    vectorizer: NOT semantically meaningful, only for smoke-testing the pipeline offline.
+    For real semantic search set CAMPAIGN_POC_EMBED_PROVIDER=ollama (local + free).
+    """
+    import hashlib
+    dim = config.EMBED_DIM
+    vec = [0.0] * dim
+    for tok in text.lower().split():
+        h = int.from_bytes(hashlib.md5(tok.encode()).digest()[:4], "big")
+        vec[h % dim] += 1.0
+    norm = math.sqrt(sum(x * x for x in vec))
+    return [x / norm for x in vec] if norm else vec
 
 
 def _embed_voyage(text: str) -> list[float]:
