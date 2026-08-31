@@ -2,8 +2,20 @@
 import os
 from pathlib import Path
 
+
+def _default_data_dir() -> Path:
+    """Platform-appropriate default data location. Windows → %LOCALAPPDATA%, else ~."""
+    override = os.getenv("CAMPAIGN_POC_DATA")
+    if override:
+        return Path(override)
+    if os.name == "nt":  # Windows
+        base = os.getenv("LOCALAPPDATA") or str(Path.home())
+        return Path(base) / "CampaignIntelligence"
+    return Path.home() / "campaign-poc-data"
+
+
 # ── storage ──────────────────────────────────────────────────────────────────
-DATA_DIR = Path(os.getenv("CAMPAIGN_POC_DATA", Path.home() / "campaign-poc-data"))
+DATA_DIR = _default_data_dir()
 DB_PATH = Path(os.getenv("CAMPAIGN_POC_DB", DATA_DIR / "campaigns.db"))
 ASSET_DIR = DATA_DIR / "assets"          # stored original decks
 UPLOAD_DIR = DATA_DIR / "uploads"        # staging for over-the-wire uploads
