@@ -23,6 +23,10 @@ def main() -> None:
 
     sub.add_parser("stdio", help="run over stdio for a local Claude Desktop connector")
 
+    c = sub.add_parser("configure-desktop", help="add this server to Claude Desktop's config (merges, backs up)")
+    c.add_argument("--http", metavar="URL", default=None,
+                   help="wire via mcp-remote to a running HTTP server (e.g. http://localhost:8086/mcp)")
+
     args = p.parse_args()
     cmd = args.cmd or "serve"
 
@@ -39,8 +43,57 @@ def main() -> None:
         config.ensure_dirs()
         store.init_db()
         mcp.run(transport="stdio")
+    elif cmd == "configure-desktop":
+        _configure_desktop(http_url=args.http)
     else:
         p.print_help()
+
+
+def _desktop_config_path():
+    """Claude Desktop config location, per OS."""
+    import sys
+    from pathlib import Path
+    if sys.platform == "win32":
+        base = Path(os.getenv("APPDATA", Path.home()))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return base / "Claude" / "claude_desktop_config.json"
+
+
+def _configure_desktop(http_url=None):
+    """Merge a 'campaign-intelligence' connector into Claude Desktop's config (backs up first)."""
+    import json
+    import shutil
+    import sys
+    from pathlib import Path
+
+    cfg = _desktop_config_path()
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    data = {}
+    if cfg.exists():
+        shutil.copy2(cfg, str(cfg) + ".bak")
+        try:
+            data = json.loads(cfg.read_text() or "{}")
+        except json.JSONDecodeError:
+            print(f"warning: {cfg} is not valid JSON; leaving it alone.")
+            return
+
+    if http_url:
+        entry = {"command": "npx", "args": ["mcp-remote", http_url]}
+    elif getattr(sys, "frozen", False):
+        # packaged binary → launch it directly over stdio
+        entry = {"command": sys.executable, "args": ["stdio"]}
+    else:
+        # source checkout → python + stdio_server.py
+        entry = {"command": sys.executable,
+                 "args": [str(Path(__file__).resolve().parent / "stdio_server.py")]}
+
+    data.setdefault("mcpServers", {})["campaign-intelligence"] = entry
+    cfg.write_text(json.dumps(data, indent=2))
+    print(f"Configured Claude Desktop connector in {cfg}")
+    print("Restart Claude Desktop (fully quit + reopen) to load it.")
 
 
 if __name__ == "__main__":

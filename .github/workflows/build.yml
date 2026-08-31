@@ -39,22 +39,39 @@ jobs:
       - name: Build bundle
         run: pyinstaller --clean --noconfirm campaign-poc.spec
 
-      - name: Package (Linux/macOS)
+      - name: Package (Linux/macOS) — bundle + install scripts
         if: runner.os != 'Windows'
-        run: tar -C dist -czf "${{ matrix.asset }}" campaign-intelligence
+        run: |
+          cp installer/linux/install.sh installer/linux/uninstall.sh dist/campaign-intelligence/
+          chmod +x dist/campaign-intelligence/install.sh dist/campaign-intelligence/uninstall.sh
+          tar -C dist -czf "${{ matrix.asset }}" campaign-intelligence
 
-      - name: Package (Windows)
+      - name: Package (Windows) — zip bundle
         if: runner.os == 'Windows'
+        shell: pwsh
         run: Compress-Archive -Path dist/campaign-intelligence/* -DestinationPath "${{ matrix.asset }}"
 
-      - name: Upload build artifact
+      - name: Build Windows installer (Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\windows\campaign-intelligence.iss
+          Copy-Item installer\windows\Output\CampaignIntelligence-Setup.exe .
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}
+            CampaignIntelligence-Setup.exe
+          if-no-files-found: warn
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.asset }}
+          files: |
+            ${{ matrix.asset }}
+            CampaignIntelligence-Setup.exe

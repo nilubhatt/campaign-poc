@@ -1,8 +1,20 @@
 # Running on Windows
 
-Phase-1 packaging for developers: a PowerShell launcher (`run.ps1`) that sets everything up
-(including auto-installing Ollama), and runs the server either **on demand** or as a
-**background service**. Works with both **Claude Desktop** and **Claude Web**.
+Three ways, easiest first: a **one-click installer**, a **prebuilt bundle**, or a **source
+install** via the PowerShell launcher. All work with both **Claude Desktop** and **Claude Web**.
+
+## Option 0 — one-click installer (end users)
+
+Download `CampaignIntelligence-Setup.exe` from the repo's Releases (built by CI). It installs
+the app, and via checkboxes: installs **Ollama** + pulls the model, **wires Claude Desktop
+automatically**, and optionally runs the server in the background at logon. Uninstall from
+*Add/Remove Programs*. Build it yourself with `installer\windows\campaign-intelligence.iss`
+(Inno Setup 6, after `build.ps1`).
+
+## Source install (developers): `run.ps1`
+
+A PowerShell launcher that sets everything up (including auto-installing Ollama), and runs the
+server either **on demand** or as a **background service**.
 
 ## Prerequisites
 

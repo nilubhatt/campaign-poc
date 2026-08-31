@@ -19,12 +19,21 @@ Data lives in `~/campaign-poc-data`. Service logs: `journalctl --user -u campaig
 
 ## Option B — prebuilt bundle (no Python)
 
-Grab `campaign-intelligence-linux-x86_64.tar.gz` from the repo's Releases (built by CI), then:
+Grab `campaign-intelligence-linux-x86_64.tar.gz` from the repo's Releases (built by CI), then
+either run it directly, or use the bundled **installer** (recommended — it wires Claude Desktop
+and Ollama for you):
 
 ```bash
 tar xzf campaign-intelligence-linux-x86_64.tar.gz
-./campaign-intelligence/campaign-intelligence serve            # HTTP (Web + Desktop)
-./campaign-intelligence/campaign-intelligence stdio            # stdio (local Desktop)
+cd campaign-intelligence
+
+./install.sh                 # install to ~/.local + wire Claude Desktop + ensure Ollama
+./install.sh --service       # also run in the background (systemd --user)
+./uninstall.sh               # remove it (--purge also deletes data)
+
+# ...or run in place without installing:
+./campaign-intelligence serve            # HTTP (Web + Desktop)
+./campaign-intelligence stdio            # stdio (local Desktop)
 ```
 
 You still need **Ollama** for real semantic search: `curl -fsSL https://ollama.com/install.sh | sh`
