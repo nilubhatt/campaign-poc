@@ -4,3 +4,6 @@ __pycache__/
 campaign-poc-data/
 .venv/
 *.log
+build/
+dist/
+*.spec.bak

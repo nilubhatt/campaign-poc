@@ -72,7 +72,24 @@ core.py          ingest + semantic retrieval + evidence packaging (LLM-first)
 mcp_server.py    MCPServer tools (the API Claude calls)
 http_app.py      Streamable-HTTP app (/mcp) + /upload + /healthz
 auth.py          no-op auth seam (OAuth goes here)
+main.py          unified binary entry (serve | stdio)
+stdio_server.py  stdio entrypoint for a local Claude Desktop connector
 ```
+
+## Install / packaging
+
+Run from source, or ship a self-contained bundle (no Python on the target):
+
+- **Windows** — `run.ps1 -Setup` (venv + deps + **auto-installs Ollama** + pulls the model),
+  then `run.ps1` (on demand) or `run.ps1 -Mode service` (background). See **[WINDOWS.md](WINDOWS.md)**.
+- **Linux / macOS** — `./run.sh --setup`, then `./run.sh` or `./run.sh --service` (systemd
+  `--user`). See **[LINUX.md](LINUX.md)**.
+- **Prebuilt bundles** — `campaign-poc.spec` builds a one-folder bundle via PyInstaller
+  (the `sqlite-vec` native lib is bundled). `build.sh` / `build.ps1` build for the current OS;
+  CI (`.github/workflows/build.yml`) builds Linux + Windows + macOS bundles on a `v*` tag.
+
+Both **Claude Web** (custom connector → `<tunnel-url>/mcp`) and **Claude Desktop** (stdio, or
+`mcp-remote` to the local HTTP server) are supported.
 
 ## Status
 

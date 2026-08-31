@@ -1,0 +1,60 @@
+name: build-bundles
+
+# Cross-platform bundles can't be cross-compiled — each is built on its own runner.
+# Triggers on a version tag (v*), or manually. Artifacts attach to a GitHub Release on tag.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: campaign-intelligence-linux-x86_64.tar.gz
+          - os: windows-latest
+            asset: campaign-intelligence-windows-amd64.zip
+          - os: macos-latest
+            asset: campaign-intelligence-macos-arm64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller typer
+
+      - name: Build bundle
+        run: pyinstaller --clean --noconfirm campaign-poc.spec
+
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: tar -C dist -czf "${{ matrix.asset }}" campaign-intelligence
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist/campaign-intelligence/* -DestinationPath "${{ matrix.asset }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}
