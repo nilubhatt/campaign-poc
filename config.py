@@ -50,7 +50,11 @@ VOYAGE_MODEL = os.getenv("CAMPAIGN_POC_VOYAGE_MODEL", "voyage-3.5")
 HTTP_HOST = os.getenv("CAMPAIGN_POC_HOST", "0.0.0.0")
 HTTP_PORT = int(os.getenv("CAMPAIGN_POC_PORT", "8080"))
 PUBLIC_BASE_URL = os.getenv("CAMPAIGN_POC_BASE_URL", f"http://localhost:{HTTP_PORT}").rstrip("/")
-AUTH_MODE = os.getenv("CAMPAIGN_POC_AUTH_MODE", "none").lower()  # none | oauth (later)
+AUTH_MODE = os.getenv("CAMPAIGN_POC_AUTH_MODE", "none").lower()  # legacy display value
+# Pluggable auth: names the registered AuthProvider that handles requests (see auth.py).
+# 'none' (default) = no enforcement. Future: 'entra' (Azure AD / Entra ID), 'oidc' (generic),
+# 'okta', 'google', … — deploy for a different org by registering a provider + setting this.
+AUTH_PROVIDER = os.getenv("CAMPAIGN_POC_AUTH_PROVIDER", AUTH_MODE if AUTH_MODE != "none" else "none").lower()
 
 
 def ensure_dirs() -> None:

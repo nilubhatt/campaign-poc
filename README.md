@@ -91,6 +91,14 @@ Run from source, or ship a self-contained bundle (no Python on the target):
 Both **Claude Web** (custom connector → `<tunnel-url>/mcp`) and **Claude Desktop** (stdio, or
 `mcp-remote` to the local HTTP server) are supported.
 
+## Roadmap
+
+This is being extended into the full product — a central multi-user server (Postgres + pgvector,
+chunked text + CLIP image vectors + perceptual-hash creative-reuse detection, region-scoped
+metadata, pluggable OAuth). Current priority is local end-to-end; production/OAuth/deploy is
+captured in **[docs/PRODUCTION-ROADMAP.md](docs/PRODUCTION-ROADMAP.md)**. Auth is already a
+**pluggable provider** (`auth.py`) — no-op today, drop in Azure AD / any OIDC without touching call sites.
+
 ## Status
 
 End-to-end verified against a live server with the real `sqlite-vec` backend: full

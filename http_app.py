@@ -66,7 +66,7 @@ async def healthz(request: Request):
             "status": "ok",
             "vector_backend": vectorstore.backend_name(conn),
             "embed_provider": config.EMBED_PROVIDER,
-            "auth_mode": config.AUTH_MODE,
+            "auth_provider": config.AUTH_PROVIDER,
         })
     finally:
         conn.close()
