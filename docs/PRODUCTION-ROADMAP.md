@@ -152,6 +152,33 @@ images work). **Audio later** = audio fingerprint + embedding, same shape.
 Trim `find_similar` payload (summary by default, full detail on request); fix `&` stored as
 `&amp;`; **align the port** (binary/config default 8080 vs `run.ps1` default 8086 — make them match).
 
+### 6.9 Conversational intake + confirm-before-write (uploads & feedback)
+Users are **non-technical marketers**, not people filling out a form. Both entry points —
+uploading a campaign and recording feedback/outcomes — should be a guided conversation, not a
+schema dump. Mostly a tool-description / system-prompt change (Claude already sits in front of
+every MCP tool as the conversational layer); the new part is a **confirm-before-write step** so a
+non-technical user can actually verify what got saved, rather than trusting the parse silently.
+
+**Upload flow (`upload_campaign`).** Guide with questions like: is this a **finished campaign or
+a future/proposed one**? What do you **like** about it? What do you **not like** / what's
+missing? What are you trying to **achieve** (the goal)? Map answers onto the structured fields
+from §6.2/§6.3 (`status`/`record_type`, `region`/`market`, `tags`, goal/notes) as the conversation
+goes.
+
+**Feedback flow (evaluation/outcome capture).** Guide with: **which campaign** (look it up /
+disambiguate by name+region if ambiguous — ties to §6.4 lifecycle so the right record gets
+updated), **how did it go**, **how was the response**, and **what metrics do you have** —
+impressions, likes/engagement, footfall, sales, etc. (feeds §6.5 metrics-as-first-class).
+
+**Both flows share one pattern:** if the user answers with a free-text paragraph instead of
+answering field-by-field, **parse it into the structured breakdown** and **present it back**
+("Here's what I got: type=future, goal=awareness, likes=X, concerns=Y, metrics={impressions: …,
+footfall: …} — anything to fix?"). Only call the write tool (`upload_campaign` / `save_evaluation`
+/ `add_metrics`) **after** the user confirms or edits. Never write silently from a raw parse.
+
+Depends on §6.2/6.3 (structured fields to map onto) and §6.5 (metrics fields) landing first, or
+at least in the same pass — the conversation needs somewhere structured to put the answers.
+
 ---
 
 ## 7. The data gap no code fixes
@@ -175,7 +202,10 @@ is the highest-value non-engineering action.
 
 ## 9. Sequence
 
-1. **Now:** local Windows end-to-end green (Desktop + server + Ollama), campaigns loaded.
-2. **v0.2:** the §6 features (chunking, filters, schema, CRUD, metrics, image pHash + CLIP) — data reloaded fresh.
+1. **Now:** local Windows end-to-end green (Desktop + server + Ollama), campaigns loaded. **Done**
+   (2026-09-08) — ran end-to-end locally; §6 below is the feedback from that run.
+2. **v0.2:** the §6 features (chunking, filters, schema, CRUD, metrics, image pHash + CLIP,
+   conversational intake) — data reloaded fresh. **§6.1–6.9 together are considered the bar for a
+   complete v1 product** — not a partial cut of them.
 3. **Central deploy:** Postgres, Docker on the VM, TLS (Front Door / App Gateway), **Entra OAuth**
    via the pluggable provider, access scoping via group claims.
