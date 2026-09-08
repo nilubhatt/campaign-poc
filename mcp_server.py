@@ -23,11 +23,25 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
                     record_type: str = "campaign", status: Optional[str] = None,
                     tags: Optional[list] = None, region: Optional[str] = None,
                     market: Optional[str] = None, supersedes: Optional[str] = None,
-                    asset_ref: Optional[dict] = None) -> dict:
-    """Store a past or proposed campaign in the memory. From Claude Web, pass deck_text (the
-    text you read from the attached PDF/PPTX) plus any freeform detail you have (brief,
-    audience, budget, channel, timeline). The server chunks and embeds it per slide/section
-    for search.
+                    asset_ref: Optional[dict] = None, confirm: bool = False) -> dict:
+    """Store a past or proposed campaign in the memory.
+
+    The user is a non-technical marketer, not someone filling out a form — have a
+    conversation, don't demand structured fields. Ask things like: is this a *finished
+    campaign or a future/proposed one* (record_type/status)? What do you *like* about it,
+    what don't you like, what are you trying to *achieve* (fold into detail)? Where does it
+    run (region/market)? Any tags that fit? If they answer in one free-text paragraph instead
+    of field-by-field, parse it into these fields yourself rather than asking again.
+
+    Then call this tool with confirm=False (the default) to get a PREVIEW — nothing is
+    stored yet. Show the user the breakdown you parsed ("Here's what I got: type=future,
+    region=APAC, ... — anything to fix?"), let them correct it, then call again with
+    confirm=True (same or corrected fields) to actually save. Never go straight to
+    confirm=True from a free-text answer without showing the breakdown first.
+
+    From Claude Web, pass deck_text (the text you read from the attached PDF/PPTX) plus any
+    freeform detail you have (brief, audience, budget, channel, timeline). The server chunks
+    and embeds it per slide/section for search.
 
     record_type is 'campaign' (default), 'reference' (background material, not itself a
     campaign), or 'stub' (a placeholder record). status is 'proposed', 'in_flight', or
@@ -40,7 +54,7 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
     deck) — the old record is then excluded from future search evidence, so it stops
     confusing retrieval, without being deleted.
 
-    Add results later with add_metrics. Returns the campaign_id plus
+    Add results later with add_metrics. On confirm=True, returns the campaign_id plus
     chunks_total/chunks_embedded (partial embedding failures are reported per-chunk in
     warnings, not silently)."""
     conn = store.connect()
@@ -48,7 +62,7 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
         return core.ingest_campaign(conn, title=title, detail=detail, deck_text=deck_text,
                                     record_type=record_type, status=status, tags=tags,
                                     region=region, market=market, supersedes=supersedes,
-                                    asset_ref=asset_ref)
+                                    asset_ref=asset_ref, confirm=confirm)
     finally:
         conn.close()
 
@@ -118,18 +132,29 @@ def check_image_provenance(asset_ref: dict, campaign_id: Optional[str] = None) -
 
 
 @mcp.tool()
-def add_metrics(campaign_id: str, detail: str, structured: Optional[dict] = None,
-                metric_type: str = "actual") -> dict:
-    """Attach outcomes to a campaign. Pass whatever you have as freeform detail (CTR, ROI,
-    conversions, qualitative learnings) and optionally a structured object for
-    machine-readable numbers. metric_type is 'actual' (post-conclusion results, the default)
-    or 'predicted' (a forecast/target set before launch) — reconcile_evaluation only pulls
-    'actual' metrics automatically."""
+def add_metrics(campaign_id: str, detail: Optional[str] = None,
+                structured: Optional[dict] = None, metric_type: str = "actual",
+                confirm: bool = False) -> dict:
+    """Record feedback/outcomes for a campaign — this is the feedback conversation, not a
+    form. Ask: *which campaign* (look it up with find_similar_campaigns/list_campaigns if the
+    user doesn't give an exact id/title — disambiguate rather than guessing), *how did it
+    go*, *how was the response*, *what metrics do you have* — impressions, likes/engagement,
+    footfall, sales, whatever they tracked. If they give you one free-text paragraph, break
+    it down into detail/structured yourself instead of asking again field-by-field.
+
+    Call with confirm=False (the default) first — this PREVIEWS the breakdown without
+    storing anything. Show it to the user ("Here's what I got: ... — anything to add or
+    fix?"), let them fine-tune it, then call again with confirm=True to actually save.
+
+    detail is freeform (CTR, ROI, conversions, qualitative learnings, or just what the user
+    said); structured is an optional machine-readable object for numbers you extracted.
+    metric_type is 'actual' (post-conclusion results, the default) or 'predicted' (a
+    forecast/target set before launch) — reconcile_evaluation only pulls 'actual' metrics
+    automatically."""
     conn = store.connect()
     try:
-        mid = store.add_metrics(conn, campaign_id, detail=detail, structured=structured,
-                               metric_type=metric_type)
-        return {"metrics_id": mid, "campaign_id": campaign_id, "status": "stored"}
+        return core.add_metrics(conn, campaign_id, detail=detail, structured=structured,
+                                metric_type=metric_type, confirm=confirm)
     finally:
         conn.close()
 

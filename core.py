@@ -33,7 +33,8 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                     deck_text: Optional[str] = None, record_type: str = "campaign",
                     status: Optional[str] = None, tags: Optional[list[str]] = None,
                     region: Optional[str] = None, market: Optional[str] = None,
-                    supersedes: Optional[str] = None, asset_ref: Optional[dict] = None) -> dict:
+                    supersedes: Optional[str] = None, asset_ref: Optional[dict] = None,
+                    confirm: bool = True) -> dict:
     """
     Store a past/proposed campaign, chunk it, and embed each chunk for search (§6.1).
 
@@ -46,7 +47,23 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
     ({asset_id} from POST /upload, {path} local, or {filename,base64} inline) and the
     server extracts the text itself — that path also preserves per-page/slide boundaries
     as the natural chunks. Returns the stored campaign summary.
+
+    §6.9: confirm=False previews the fields as given WITHOUT writing anything — for a
+    conversational, non-technical intake flow: ask the guided questions (or parse a free-text
+    answer into these fields), show the user the preview, then call again with confirm=True
+    once they've reviewed/edited it. Default is True (write immediately) for backward
+    compatibility with direct/programmatic callers that already know what they want stored.
     """
+    if not confirm:
+        return {
+            "preview": True, "title": title, "record_type": record_type,
+            "status": status if status is not None else ("concluded" if record_type == "campaign" else None),
+            "tags": tags or [], "region": region, "market": market, "supersedes": supersedes,
+            "detail": detail,
+            "note": "Nothing has been stored yet. Show this to the user for confirmation or "
+                    "edits, then call upload_campaign again with confirm=True to save it.",
+        }
+
     warnings: list[str] = []
     stored_path = None
     units: list[str] = []  # natural per-page/slide units, when extraction ran
@@ -97,6 +114,27 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         "chunks_total": len(chunk_texts), "chunks_embedded": embedded_count,
         "warnings": warnings,
     }
+
+
+def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
+                structured: Optional[dict] = None, metric_type: str = "actual",
+                confirm: bool = True) -> dict:
+    """
+    Record an outcome/metric on a campaign (§6.5), with the same §6.9 confirm-before-write
+    gate as ingest_campaign: confirm=False previews what would be recorded — for a
+    conversational feedback flow (which campaign, how did it go, what metrics) where a
+    free-text answer gets parsed into detail/structured and shown back before saving.
+    """
+    if not confirm:
+        return {
+            "preview": True, "campaign_id": campaign_id, "metric_type": metric_type,
+            "detail": detail, "structured": structured,
+            "note": "Nothing has been stored yet. Show this to the user, then call "
+                    "add_metrics again with confirm=True to save it.",
+        }
+    mid = store.add_metrics(conn, campaign_id, detail=detail, structured=structured,
+                           metric_type=metric_type)
+    return {"metrics_id": mid, "campaign_id": campaign_id, "status": "stored"}
 
 
 # ── retrieval / evidence for Claude ──────────────────────────────────────────

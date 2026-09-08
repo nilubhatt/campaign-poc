@@ -247,7 +247,7 @@ Trim `find_similar` payload (summary by default, full detail on request); fix `&
   it may be a source-file artifact (a PPTX whose own XML has literal `&amp;` text) or from a
   display layer outside this repo, not a code defect here.
 
-### 6.9 Conversational intake + confirm-before-write (uploads & feedback)
+### 6.9 Conversational intake + confirm-before-write (uploads & feedback) — **Done (2026-09-08)**
 Users are **non-technical marketers**, not people filling out a form. Both entry points —
 uploading a campaign and recording feedback/outcomes — should be a guided conversation, not a
 schema dump. Mostly a tool-description / system-prompt change (Claude already sits in front of
@@ -273,6 +273,21 @@ footfall: …} — anything to fix?"). Only call the write tool (`upload_campaig
 
 Depends on §6.2/6.3 (structured fields to map onto) and §6.5 (metrics fields) landing first, or
 at least in the same pass — the conversation needs somewhere structured to put the answers.
+
+**Implemented as two things:** (1) tool docstrings on `upload_campaign` and `add_metrics`
+rewritten to explicitly instruct the guided-conversation + parse-free-text + show-the-breakdown
+pattern — this is genuinely a prompt-engineering change, since Claude *is* the conversational
+layer, there's no separate Python "conversation engine" to build. (2) **A structural
+confirm-before-write gate**, not just a prompted convention: both tools take `confirm` (MCP
+tool default `False`); `confirm=False` returns a preview of exactly what would be stored/recorded
+— echoing back the parsed fields — **without writing anything**, and only `confirm=True` (a
+second, explicit call) commits. This makes "don't write silently from a raw parse" enforceable
+rather than something an LLM could skip under time pressure. `core.ingest_campaign`/
+`core.add_metrics` default `confirm=True` instead (backward-compatible for direct/programmatic
+callers, e.g. tests, that already know what they want stored) — only the MCP tool layer defaults
+to the safe preview-first behavior. Scoped to `upload_campaign`/`add_metrics` only — not
+`bulk_import_metrics` (already-structured tabular data, not a free-text answer to parse) or
+`save_evaluation`/`save_reconciliation` (Claude's own judgment, not the user's answer).
 
 ---
 
@@ -301,6 +316,9 @@ is the highest-value non-engineering action.
    (2026-09-08) — ran end-to-end locally; §6 below is the feedback from that run.
 2. **v0.2:** the §6 features (chunking, filters, schema, CRUD, metrics, image pHash + CLIP,
    conversational intake) — data reloaded fresh. **§6.1–6.9 together are considered the bar for a
-   complete v1 product** — not a partial cut of them.
+   complete v1 product** — not a partial cut of them. **Status (2026-09-08): §6.1–6.5, 6.8, 6.9
+   done; §6.6/6.7 done for the pHash/generic-asset half, CLIP (asset_vectors, aesthetic/regional
+   similarity) intentionally not started pending a decision on the torch/model-size dependency —
+   see §6.6.** 114 tests passing (`tests/`), CI (`test.yml`) runs them on every push/PR.
 3. **Central deploy:** Postgres, Docker on the VM, TLS (Front Door / App Gateway), **Entra OAuth**
    via the pluggable provider, access scoping via group claims.
