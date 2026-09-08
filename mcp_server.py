@@ -90,6 +90,34 @@ def delete_campaign(campaign_id: str) -> dict:
 
 
 @mcp.tool()
+def upload_image_asset(campaign_id: str, asset_ref: dict) -> dict:
+    """Attach an image (hero shot, creative asset) to a campaign and fingerprint it
+    (perceptual hash) for creative-reuse detection. asset_ref is {asset_id} from POST
+    /upload, {path} local, or {filename, base64} inline. Consider calling
+    check_image_provenance first if you want to flag reuse before attaching it."""
+    conn = store.connect()
+    try:
+        return core.ingest_image_asset(conn, campaign_id=campaign_id, asset_ref=asset_ref)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def check_image_provenance(asset_ref: dict, campaign_id: Optional[str] = None) -> dict:
+    """Check whether an image matches one already in the memory — same/near-same photo,
+    even after resize/recompress/light crop (perceptual hashing; catches exact reuse, not
+    aesthetic similarity). Works before the image is stored. Pass campaign_id (the campaign
+    this image is headed for) to exclude that campaign's own assets and get a flag when a
+    match comes from a *different* region — the real question is usually not "does this image
+    exist" but "does this image belong to a different region than where it's being used.\""""
+    conn = store.connect()
+    try:
+        return core.check_image_provenance(conn, asset_ref=asset_ref, campaign_id=campaign_id)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
 def add_metrics(campaign_id: str, detail: str, structured: Optional[dict] = None,
                 metric_type: str = "actual") -> dict:
     """Attach outcomes to a campaign. Pass whatever you have as freeform detail (CTR, ROI,

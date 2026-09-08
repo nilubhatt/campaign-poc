@@ -17,6 +17,7 @@ import chunking
 import config
 import embedding
 import extract
+import images
 import store
 import vectorstore
 
@@ -234,6 +235,66 @@ def reconcile_evaluation(conn, *, evaluation_id: str, actual: Optional[str] = No
         "actual": actual,
         "note": "Compare predictions to actual, then call save_reconciliation with the lesson.",
     }
+
+
+# ── image assets / creative-reuse detection (§6.6) ───────────────────────────
+
+def ingest_image_asset(conn, *, campaign_id: str, asset_ref: dict) -> dict:
+    """Attach an image to a campaign and fingerprint it (perceptual hash) for creative-reuse
+    detection. Storage still succeeds even if fingerprinting fails (e.g. a corrupt image) —
+    the failure is reported, not swallowed."""
+    path, warnings = _resolve_asset(asset_ref)
+    if not path:
+        return {"error": "; ".join(warnings) or "could not resolve asset_ref"}
+
+    stored_name = _keep_asset(path)
+    aid = store.insert_asset(conn, campaign_id, file_path=stored_name)
+    try:
+        h = images.phash(config.ASSET_DIR / stored_name)
+        store.set_asset_fingerprint(conn, aid, h)
+        return {"asset_id": aid, "campaign_id": campaign_id, "fingerprinted": True,
+                "warnings": warnings}
+    except Exception as exc:
+        warnings.append(f"asset stored but not fingerprinted (reuse detection will miss it): {exc}")
+        return {"asset_id": aid, "campaign_id": campaign_id, "fingerprinted": False,
+                "warnings": warnings}
+
+
+def check_image_provenance(conn, *, asset_ref: dict, campaign_id: Optional[str] = None,
+                           threshold: Optional[int] = None) -> dict:
+    """
+    Check whether an image matches one already in the memory (§6.6 — the SVP's creative-reuse
+    question). Works on an image that isn't stored yet — call this before upload_campaign's
+    asset, or before ingest_image_asset, to flag reuse up front. If campaign_id is given
+    (the campaign this image is headed for), its own assets are excluded from matching, and
+    a region mismatch against a matched campaign is flagged explicitly — the point isn't just
+    "this image exists," it's "this image's look belongs to a *different* region."
+    """
+    path, warnings = _resolve_asset(asset_ref)
+    if not path:
+        return {"error": "; ".join(warnings) or "could not resolve asset_ref"}
+
+    query_hash = images.phash(path)
+    threshold = config.PHASH_MATCH_THRESHOLD if threshold is None else threshold
+    current = store.get_campaign(conn, campaign_id) if campaign_id else None
+
+    matches = []
+    for cand in store.get_all_fingerprints(conn, exclude_campaign_id=campaign_id):
+        dist = images.hamming_distance(query_hash, cand["phash"])
+        if dist > threshold:
+            continue
+        c = store.get_campaign(conn, cand["campaign_id"])
+        if not c:
+            continue
+        flag = None
+        if current and current["region"] and c["region"] and current["region"].lower() != c["region"].lower():
+            flag = f"used in a different region ({c['region']} vs {current['region']})"
+        matches.append({
+            "campaign_id": cand["campaign_id"], "title": c["title"], "region": c["region"],
+            "asset_id": cand["asset_id"], "hamming_distance": dist, "flag": flag,
+        })
+    matches.sort(key=lambda m: m["hamming_distance"])
+    return {"query_hash": query_hash, "matches": matches, "warnings": warnings}
 
 
 # ── asset resolution (secondary path) ────────────────────────────────────────

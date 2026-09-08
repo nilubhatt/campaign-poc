@@ -192,7 +192,7 @@ unmatched titles are per-row errors, never guessed, and valid rows still import 
 isn't passed explicitly — this is the actual fix that makes it functional; before, the user had
 to retype numbers that were already on file every time they wanted to reconcile.
 
-### 6.6 Image vectorization + creative-reuse detection  *(the SVP question)*
+### 6.6 Image vectorization + creative-reuse detection  *(the SVP question)* — **pHash done (2026-09-08); CLIP not started**
 Two techniques, two problems:
 - **Perceptual hashing (pHash/dHash — `imagehash` + Pillow):** catches the **same/near-same photo**
   (reused, incl. across regions) even after resize/recompress/light crop. Cheap, no ML. **Ship
@@ -204,7 +204,25 @@ Two techniques, two problems:
 - Tool: `check_image_provenance(image)` + auto-flag on proposal upload.
 - **Boundary:** internal reuse ✅; unknown web stock photo ❌ (needs external reverse-image API — skipped).
 
-### 6.7 Extensible asset pipeline (audio/video pluggable later)
+**pHash layer implemented:** `images.py` (phash + Hamming distance, wrapped to plain Python
+types — imagehash returns numpy scalars, which don't JSON-serialize cleanly through an MCP tool
+response, caught in testing). New `upload_image_asset` and `check_image_provenance` tools;
+`check_image_provenance` works on an image **before** it's stored (checked pre-upload, as the
+doc asks), excludes the target campaign's own assets, and flags a match whose campaign has a
+*different* `region` than the one passed in — delivering the actual SVP demo without needing
+CLIP, since exact/near-duplicate reuse is a pHash match by definition. New deps: `Pillow` +
+`imagehash` (pulls in `numpy`/`scipy`/`PyWavelets` transitively) — small, no GPU/ML, matches the
+doc's own "cheap, no ML, ship first" framing, added to `requirements.txt` without a separate
+confirmation gate.
+
+**CLIP is NOT implemented and was not started without checking in first** — it needs
+`torch`/a CLIP model (hundreds of MB to a few GB), which cuts directly against this product's
+"lean, local, free, no heavy ML" positioning and would significantly change PyInstaller bundle
+size across all three OS installers. This needs an explicit decision (and likely a design pass
+on whether it ships in the default bundle or as an optional extra) before writing any code
+against it.
+
+### 6.7 Extensible asset pipeline (audio/video pluggable later) — **assets/asset_fingerprints done (2026-09-08) as part of §6.6; asset_vectors (CLIP) not started**
 Generic `assets` (modality) + `asset_fingerprints` (pHash) + `asset_vectors` (CLIP), keyed by
 asset. **Video = keyframes → the image pipeline** (reused clips share keyframes — nearly free once
 images work). **Audio later** = audio fingerprint + embedding, same shape.

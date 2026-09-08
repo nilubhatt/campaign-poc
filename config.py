@@ -27,6 +27,9 @@ MAX_PPTX_SLIDES = int(os.getenv("CAMPAIGN_POC_MAX_PPTX_SLIDES", "120"))
 # Chunk size for embedding (§6.1): well under the ~6.8k-9k char point where a whole-deck
 # embed() call started silently failing against real providers.
 MAX_CHUNK_CHARS = int(os.getenv("CAMPAIGN_POC_MAX_CHUNK_CHARS", "1800"))
+# Perceptual-hash Hamming distance below which two images count as a match (§6.6). imagehash's
+# default phash is 64 bits; 8 tolerates resize/recompress/light crop without matching unrelated images.
+PHASH_MATCH_THRESHOLD = int(os.getenv("CAMPAIGN_POC_PHASH_THRESHOLD", "8"))
 # POC accepts only presentation/document formats — the use case is decks + briefs.
 ALLOWED_MIME = {
     "application/pdf",

@@ -46,6 +46,18 @@ CREATE TABLE IF NOT EXISTS campaign_chunks (
     embedded      INTEGER NOT NULL DEFAULT 0,
     created_at    REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS assets (
+    id            TEXT PRIMARY KEY,
+    campaign_id   TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    modality      TEXT NOT NULL DEFAULT 'image',   -- image today; video/audio later (§6.7)
+    file_path     TEXT NOT NULL,    -- relative to ASSET_DIR
+    created_at    REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS asset_fingerprints (
+    asset_id      TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+    phash         TEXT NOT NULL,
+    created_at    REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS metrics (
     id            TEXT PRIMARY KEY,
     campaign_id   TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -71,6 +83,7 @@ CREATE TABLE IF NOT EXISTS reconciliations (
     created_at    REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chunks_campaign_idx   ON campaign_chunks(campaign_id);
+CREATE INDEX IF NOT EXISTS assets_campaign_idx   ON assets(campaign_id);
 CREATE INDEX IF NOT EXISTS metrics_campaign_idx ON metrics(campaign_id);
 CREATE INDEX IF NOT EXISTS evals_campaign_idx   ON evaluations(campaign_id);
 CREATE INDEX IF NOT EXISTS recon_eval_idx       ON reconciliations(evaluation_id);
@@ -341,6 +354,44 @@ def map_chunks_to_campaigns(conn, chunk_ids: list[str]) -> dict[str, str]:
         chunk_ids,
     ).fetchall()
     return {r["id"]: r["campaign_id"] for r in rows}
+
+
+# ── assets (§6.6/6.7: images today, other modalities keyed the same way later) ──
+
+def insert_asset(conn, campaign_id: str, *, file_path: str, modality: str = "image") -> str:
+    aid = _id("asset")
+    conn.execute(
+        "INSERT INTO assets (id, campaign_id, modality, file_path, created_at) VALUES (?,?,?,?,?)",
+        (aid, campaign_id, modality, file_path, _now()),
+    )
+    conn.commit()
+    return aid
+
+
+def set_asset_fingerprint(conn, asset_id: str, phash: str) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO asset_fingerprints (asset_id, phash, created_at) VALUES (?,?,?)",
+        (asset_id, phash, _now()),
+    )
+    conn.commit()
+
+
+def get_assets_for_campaign(conn, campaign_id: str) -> list[dict]:
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM assets WHERE campaign_id = ? ORDER BY created_at", (campaign_id,)
+    ).fetchall()]
+
+
+def get_all_fingerprints(conn, *, exclude_campaign_id: Optional[str] = None) -> list[dict]:
+    """[{asset_id, campaign_id, phash}] for a provenance check, optionally excluding one
+    campaign's own assets (so an image doesn't "match" itself)."""
+    sql = """SELECT af.asset_id AS asset_id, a.campaign_id AS campaign_id, af.phash AS phash
+             FROM asset_fingerprints af JOIN assets a ON a.id = af.asset_id"""
+    params: list = []
+    if exclude_campaign_id:
+        sql += " WHERE a.campaign_id != ?"
+        params.append(exclude_campaign_id)
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
 # ── metrics ──────────────────────────────────────────────────────────────────
