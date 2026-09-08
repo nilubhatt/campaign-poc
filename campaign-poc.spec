@@ -13,21 +13,24 @@
 #     find_similar_images/upload_image_asset's CLIP path in every packaged build (review
 #     caught this). collect_all is used for torch/open_clip/timm like sqlite_vec, since they
 #     ship compiled binaries and data files PyInstaller's static analysis misses.
-#     VERIFIED BROKEN (2026-09-08): the build succeeds (717MB bundle, torch/open_clip/timm
-#     genuinely present under dist/.../_internal/) but the packaged binary CRASHES on
-#     startup: `RuntimeError: operator torchvision::nms does not exist`. Root cause:
-#     torchvision 0.29.0 ships its compiled extension as `_C_stable.so` (a newer ABI-stable
-#     naming scheme); PyInstaller 6.22.2's bundling hooks don't recognize that name (build
-#     log: "Hidden import torchvision._C not found!"), so the extension that registers the
-#     `nms` custom op isn't wired up in the frozen build, and open_clip's package init
-#     imports coca_model.py -> torchvision.ops -> triggers that registration unconditionally.
-#     This is a packaging-only bug — running from source (python -m http_app / run.sh /
-#     run.ps1) has CLIP fully working, verified extensively against the real model earlier
-#     this session. NOT fixed here — needs dedicated packaging work: pin an older
-#     torchvision known to work with PyInstaller's hooks, or a newer PyInstaller with an
-#     updated torchvision hook, or a custom hook mapping `_C_stable.so`. Until one of those
-#     lands, the shipped bundle's find_similar_images/upload_image_asset's CLIP step will
-#     not work — pHash (check_image_provenance) is unaffected (no torch dependency).
+#     FIXED (2026-09-08), root cause confirmed by direct inspection rather than guessed:
+#     torchvision 0.29.0 loads its compiled ops extension by an explicit runtime path
+#     (`torch.ops.load_library(...)`, in torchvision/extension.py), not a Python `import` —
+#     so PyInstaller's import-graph analysis never sees it, and neither collect_all's
+#     collect_dynamic_libs (only picks up torchvision/.dylibs/*, its vendored transitive
+#     deps) nor collect_data_files (excludes binary-looking files) picks up the extension
+#     itself (`_C_stable.so`, `image_stable.so`, sitting directly in the `torchvision/`
+#     package dir). The bundled `_pyinstaller_hooks_contrib` hook for torchvision is stale —
+#     it declares `hiddenimports = ['torchvision._C']`, the pre-0.29 name, which is a no-op
+#     against a name that no longer exists (hence the build's "Hidden import torchvision._C
+#     not found!" warning) and, being a hiddenimport not a binary collection, wouldn't have
+#     copied the file even if the name were right. Fixed below by explicitly globbing
+#     torchvision's own top-level *.so files into `binaries` at the exact same relative path
+#     torchvision's own extension-path lookup expects (`os.path.dirname(__file__)`, i.e.
+#     right alongside `torchvision/__init__.py`) — confirmed by an actual built-and-run
+#     bundle: `/healthz` responds and find_similar_images produces a real CLIP embedding.
+
+from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
@@ -42,6 +45,15 @@ for pkg in ("sqlite_vec",):
 for pkg in ("torch", "open_clip", "timm"):
     d, b, h = collect_all(pkg)
     datas += d; binaries += b; hiddenimports += h
+
+# torchvision's own extension modules (_C_stable.so, image_stable.so) are dlopen'd by
+# explicit path at runtime, never `import`ed — collect_all/collect_dynamic_libs both miss
+# them (see the long comment above). Glob them directly into the same relative path
+# torchvision's own lookup expects: right next to torchvision/__init__.py.
+import torchvision
+_tv_dir = Path(torchvision.__file__).parent
+for so_file in _tv_dir.glob("*.so"):
+    binaries.append((str(so_file), "torchvision"))
 
 # Server stack — collect submodules PyInstaller commonly under-detects.
 for pkg in ("uvicorn", "mcp", "starlette", "anyio", "fastapi", "pptx", "pypdf"):

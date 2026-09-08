@@ -242,22 +242,34 @@ output, confirmed JSON-serializable through the MCP tool layer) — not exercise
 README/requirements.txt updated — the "no CLIP/torch" line is gone; replaced with the actual
 size tradeoff stated plainly.
 
-**Packaging: verified BROKEN, not yet fixed.** Ran an actual PyInstaller build with torch
-included (removed the earlier blanket `excludes=["torch"]`, added `collect_all` for
-torch/open_clip/timm) — it builds (717MB bundle, torch/open_clip genuinely present) but the
-packaged binary **crashes on startup**: `RuntimeError: operator torchvision::nms does not
-exist`. Root cause, confirmed by inspection: torchvision 0.29.0 ships its compiled extension
-as `_C_stable.so` (a newer ABI-stable naming scheme); PyInstaller 6.22.2's hooks don't
-recognize that name, so the custom-op registration open_clip's package init triggers
-(via `coca_model.py` → `torchvision.ops`, even though we only use the plain ViT-B-32
-model, not CoCa) fails in the frozen build. This is **packaging-only** — running from
-source (`python -m http_app` / `run.sh` / `run.ps1`) has CLIP fully working, verified
-repeatedly against the real model this session. `check_image_provenance` (pHash, no torch)
-is unaffected either way. **Not fixed** — needs dedicated packaging work (pin a torchvision
-version compatible with PyInstaller's hooks, a newer PyInstaller with an updated hook, or a
-custom hook for `_C_stable.so`) before the next tagged release; ship pHash-only or hold the
-release until this is resolved, don't ship a bundle whose `find_similar_images` silently
-doesn't work.
+**Packaging: was BROKEN, now FIXED and verified (2026-09-08).** An actual PyInstaller build
+with torch included (removed the earlier blanket `excludes=["torch"]`, added `collect_all`
+for torch/open_clip/timm) built (717MB) but the packaged binary crashed on startup:
+`RuntimeError: operator torchvision::nms does not exist`.
+
+Root cause, confirmed by direct inspection (not guessed): torchvision loads its ops
+extension via `torch.ops.load_library(explicit_path)` (`torchvision/extension.py`) — a
+runtime `dlopen`-by-path, not a Python `import` — so PyInstaller's static import-graph
+analysis never sees it needs bundling. Neither `collect_all`'s `collect_dynamic_libs` (only
+picks up `torchvision/.dylibs/*`, its vendored transitive deps like libpng/libjpeg) nor
+`collect_data_files` (excludes binary-looking files) collects the extension itself
+(`_C_stable.so`, sitting directly in the `torchvision/` package dir — confirmed empty-handed
+by calling both directly). The bundled `_pyinstaller_hooks_contrib` hook for torchvision is
+stale: it declares `hiddenimports = ['torchvision._C']`, the pre-0.29 name (torchvision
+renamed the extension to `_C_stable.so` under a newer ABI-stable scheme) — a no-op against a
+name that no longer exists (hence the build's "Hidden import torchvision._C not found!"
+warning), and wouldn't have copied the binary even if the name were current, since
+hiddenimports only affects the import-graph, not binary collection.
+
+**Fix:** `campaign-poc.spec` now explicitly globs torchvision's own top-level `*.so` files
+and adds them to `binaries` at the exact relative path torchvision's own extension-loader
+expects (`os.path.dirname(__file__)` — right alongside `torchvision/__init__.py`).
+Verified with an actual rebuild-and-run: `/healthz` responds with `clip_provider: openclip`
+(proving the model loaded — `warm_up()` runs the exact `open_clip.create_model_and_transforms`
+call that used to crash the whole process before startup), and a full MCP round-trip through
+the live packaged binary (`upload_campaign` → `upload_image_asset` → `find_similar_images`,
+via a real `mcp` streamable-HTTP client) returned `visually_embedded: true` and a real CLIP
+similarity match. Source/dev usage was never affected either way.
 
 ### 6.7 Extensible asset pipeline (audio/video pluggable later) — **Done (2026-09-08) for image; audio/video not started**
 Generic `assets` (modality) + `asset_fingerprints` (pHash) + `asset_vectors` (CLIP), keyed by
@@ -373,8 +385,7 @@ accepted.
 
 **Deferred, not fixed** (real observations, judged lower-value or higher-risk to fix
 reactively than to plan properly):
-- **PyInstaller + torchvision packaging is verified broken** (§6.6) — needs dedicated
-  packaging work, not a rushed fix.
+- ~~PyInstaller + torchvision packaging~~ — **fixed same session, see §6.6.**
 - `asset_fingerprints` is a 1:1 table with one column — neither a plain column on `assets`
   nor a proper multi-fingerprint table `(asset_id, kind, value)` that audio fingerprints
   (§6.7) would eventually want. Revisit when audio is actually built.
