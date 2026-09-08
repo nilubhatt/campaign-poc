@@ -55,6 +55,22 @@ def test_add_same_id_twice_replaces_not_duplicates():
     assert hits[0][1] > 0.99
 
 
+def test_get_many_roundtrips_and_skips_missing():
+    conn = _conn()
+    vectorstore.init(conn)
+    vectorstore.add(conn, "a", [1.0, 2.0, 3.0])
+    vectorstore.add(conn, "b", [4.0, 5.0, 6.0])
+
+    out = vectorstore.get_many(conn, ["a", "b", "missing"])
+    assert out == {"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}
+
+
+def test_get_many_empty_input_returns_empty_dict():
+    conn = _conn()
+    vectorstore.init(conn)
+    assert vectorstore.get_many(conn, []) == {}
+
+
 def test_backend_name_reports_something_sane():
     conn = _conn()
     vectorstore.init(conn)

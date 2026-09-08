@@ -20,17 +20,29 @@ mcp = MCPServer("campaign-intelligence")
 
 @mcp.tool()
 def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optional[str] = None,
-                    kind: str = "concluded", asset_ref: Optional[dict] = None) -> dict:
+                    record_type: str = "campaign", status: Optional[str] = None,
+                    tags: Optional[list] = None, region: Optional[str] = None,
+                    market: Optional[str] = None, asset_ref: Optional[dict] = None) -> dict:
     """Store a past or proposed campaign in the memory. From Claude Web, pass deck_text (the
     text you read from the attached PDF/PPTX) plus any freeform detail you have (brief,
     audience, budget, channel, timeline). The server chunks and embeds it per slide/section
-    for search. Add results later with add_metrics. kind is 'concluded' or 'proposal'.
-    Returns the campaign_id plus chunks_total/chunks_embedded (partial embedding failures
-    are reported per-chunk in warnings, not silently)."""
+    for search.
+
+    record_type is 'campaign' (default), 'reference' (background material, not itself a
+    campaign), or 'stub' (a placeholder record). status is 'proposed', 'in_flight', or
+    'concluded' — defaults to 'concluded' for record_type='campaign', otherwise unset.
+    tags is a freeform list of strings (no fixed taxonomy); region/market are freeform too
+    (e.g. region='APAC', market='Philippines'). These structured fields let
+    find_similar_campaigns / prepare_evaluation filter before ranking by similarity.
+
+    Add results later with add_metrics. Returns the campaign_id plus
+    chunks_total/chunks_embedded (partial embedding failures are reported per-chunk in
+    warnings, not silently)."""
     conn = store.connect()
     try:
         return core.ingest_campaign(conn, title=title, detail=detail, deck_text=deck_text,
-                                    kind=kind, asset_ref=asset_ref)
+                                    record_type=record_type, status=status, tags=tags,
+                                    region=region, market=market, asset_ref=asset_ref)
     finally:
         conn.close()
 
@@ -49,13 +61,16 @@ def add_metrics(campaign_id: str, detail: str, structured: Optional[dict] = None
 
 
 @mcp.tool()
-def list_campaigns(kind: Optional[str] = None) -> dict:
-    """List campaigns in the memory. Optionally filter by kind ('concluded' or 'proposal')."""
+def list_campaigns(record_type: Optional[str] = None, status: Optional[str] = None) -> dict:
+    """List records in the memory. Optionally filter by record_type ('campaign', 'reference',
+    'stub') and/or status ('proposed', 'in_flight', 'concluded')."""
     conn = store.connect()
     try:
-        rows = store.list_campaigns(conn, kind=kind)
+        rows = store.list_campaigns(conn, record_type=record_type, status=status)
         return {"count": len(rows), "campaigns": [
-            {"campaign_id": r["id"], "title": r["title"], "kind": r["kind"], "embedded": r["embedded"]}
+            {"campaign_id": r["id"], "title": r["title"], "record_type": r["record_type"],
+             "status": r["status"], "region": r["region"], "market": r["market"],
+             "embedded": r["embedded"]}
             for r in rows]}
     finally:
         conn.close()
@@ -74,29 +89,45 @@ def get_campaign(campaign_id: str) -> dict:
 
 @mcp.tool()
 def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str] = None,
-                           top_k: int = 5) -> dict:
+                           top_k: int = 5, record_type: Optional[str] = None,
+                           status: Optional[str] = None, tags: Optional[list] = None,
+                           region: Optional[str] = None, market: Optional[str] = None) -> dict:
     """Semantic search: find prior campaigns most similar to a description (text) or to an
     existing campaign (campaign_id). Matches at the slide/section level and rolls up to the
-    best-matching campaign, so long decks match on the relevant part. Returns ranked
-    evidence — title, similarity, detail, the matched excerpt, and metrics — for you to
-    reason over."""
+    best-matching campaign, so long decks match on the relevant part.
+
+    Pass record_type/status/tags/region/market to filter to that criteria FIRST, then rank
+    by similarity within it — e.g. status='concluded', region='APAC' to only weigh concluded
+    APAC precedent instead of everything in the memory. Returns ranked evidence — title,
+    status/tags/region/market, similarity, detail, the matched excerpt, and metrics — for
+    you to reason over."""
     conn = store.connect()
     try:
-        return {"matches": core.find_similar(conn, text=text, campaign_id=campaign_id, top_k=top_k)}
+        return {"matches": core.find_similar(conn, text=text, campaign_id=campaign_id,
+                                             top_k=top_k, record_type=record_type,
+                                             status=status, tags=tags, region=region,
+                                             market=market)}
     finally:
         conn.close()
 
 
 @mcp.tool()
-def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5) -> dict:
+def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
+                       record_type: Optional[str] = None, status: Optional[str] = None,
+                       tags: Optional[list] = None, region: Optional[str] = None,
+                       market: Optional[str] = None) -> dict:
     """Evaluate a NEW campaign proposal against the memory. Returns the most similar prior
-    campaigns WITH their outcomes as an evidence package. Read it, then produce your judgment
-    (predicted CTR/ROI ranges, risks, proceed/revise/reject) CITING specific campaign_ids, and
-    call save_evaluation. This tool gathers evidence; the judgment is yours."""
+    campaigns WITH their outcomes as an evidence package. Optionally narrow to structured
+    criteria first (e.g. region='APAC') so only relevant precedent is weighed. Read it, then
+    produce your judgment (predicted CTR/ROI ranges, risks, proceed/revise/reject) CITING
+    specific campaign_ids, and call save_evaluation. This tool gathers evidence; the
+    judgment is yours."""
     conn = store.connect()
     try:
         return core.prepare_evaluation(conn, subject_title=subject_title,
-                                       proposal_text=proposal_text, top_k=top_k)
+                                       proposal_text=proposal_text, top_k=top_k,
+                                       record_type=record_type, status=status, tags=tags,
+                                       region=region, market=market)
     finally:
         conn.close()
 

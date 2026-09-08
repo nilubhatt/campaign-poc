@@ -109,5 +109,25 @@ def search(conn: sqlite3.Connection, query_vec: list[float], *,
     return scored[:top_k]
 
 
+def get_many(conn: sqlite3.Connection, vector_ids: list[str]) -> dict[str, list[float]]:
+    """Fetch raw vectors for specific ids (§6.2: filtered search brute-forces cosine over a
+    small pre-filtered candidate set instead of an unrestricted ANN query)."""
+    if not vector_ids:
+        return {}
+    placeholders = ",".join("?" * len(vector_ids))
+    if _try_load_vec(conn):
+        rows = conn.execute(
+            f"SELECT vector_id, embedding FROM campaign_vectors WHERE vector_id IN ({placeholders})",
+            vector_ids,
+        ).fetchall()
+        dim = config.EMBED_DIM
+        return {r["vector_id"]: list(struct.unpack(f"{dim}f", r["embedding"])) for r in rows}
+    rows = conn.execute(
+        f"SELECT vector_id, embedding FROM campaign_vectors_fallback WHERE vector_id IN ({placeholders})",
+        vector_ids,
+    ).fetchall()
+    return {r["vector_id"]: json.loads(r["embedding"]) for r in rows}
+
+
 def backend_name(conn: sqlite3.Connection) -> str:
     return "sqlite-vec" if _try_load_vec(conn) else "python-cosine-fallback"

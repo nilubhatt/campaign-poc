@@ -24,7 +24,11 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS campaigns (
     id            TEXT PRIMARY KEY,
     title         TEXT NOT NULL,
-    kind          TEXT NOT NULL DEFAULT 'concluded',   -- concluded | proposal
+    record_type   TEXT NOT NULL DEFAULT 'campaign',   -- campaign | reference | stub
+    status        TEXT,            -- proposed | in_flight | concluded (campaigns only)
+    tags          TEXT NOT NULL DEFAULT '[]',   -- JSON array of freeform strings, no fixed taxonomy
+    region        TEXT,            -- freeform, e.g. "APAC"
+    market        TEXT,            -- freeform, e.g. "Philippines"
     detail        TEXT,            -- freeform: brief, audience, budget, channel, timeline, anything
     deck_text     TEXT,            -- extracted PDF/PPTX text
     asset_path    TEXT,            -- stored original file (relative to ASSET_DIR)
@@ -96,15 +100,18 @@ def _id(prefix: str) -> str:
 
 # ── campaigns ────────────────────────────────────────────────────────────────
 
-def insert_campaign(conn, *, title, kind="concluded", detail=None, deck_text=None,
-                    asset_path=None) -> str:
+def insert_campaign(conn, *, title, record_type="campaign", status=None, detail=None,
+                    deck_text=None, asset_path=None, tags=None, region=None, market=None) -> str:
     cid = _id("camp")
     now = _now()
+    if status is None and record_type == "campaign":
+        status = "concluded"  # reference/stub records have no lifecycle status by default
     conn.execute(
-        """INSERT INTO campaigns (id, title, kind, detail, deck_text, asset_path,
-                                  created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?)""",
-        (cid, title, kind, detail, deck_text, asset_path, now, now),
+        """INSERT INTO campaigns (id, title, record_type, status, tags, region, market,
+                                  detail, deck_text, asset_path, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (cid, title, record_type, status, json.dumps(tags or []), region, market,
+         detail, deck_text, asset_path, now, now),
     )
     conn.commit()
     return cid
@@ -125,6 +132,7 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
     if not row:
         return None
     d = dict(row)
+    d["tags"] = json.loads(d["tags"]) if d["tags"] else []
     d["metrics"] = [dict(m) for m in conn.execute(
         "SELECT * FROM metrics WHERE campaign_id = ? ORDER BY created_at", (campaign_id,)
     ).fetchall()]
@@ -136,12 +144,62 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
     return d
 
 
-def list_campaigns(conn, *, kind: Optional[str] = None) -> list[dict]:
-    if kind:
-        rows = conn.execute("SELECT * FROM campaigns WHERE kind = ? ORDER BY created_at", (kind,)).fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM campaigns ORDER BY created_at").fetchall()
+def list_campaigns(conn, *, record_type: Optional[str] = None,
+                   status: Optional[str] = None) -> list[dict]:
+    clauses, params = [], []
+    if record_type:
+        clauses.append("record_type = ?")
+        params.append(record_type)
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    sql = "SELECT * FROM campaigns"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY created_at"
+    rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
+
+
+def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Optional[str] = None,
+                        tags: Optional[list[str]] = None, region: Optional[str] = None,
+                        market: Optional[str] = None, exclude_campaign_id: Optional[str] = None
+                        ) -> list[str]:
+    """
+    Structured filtering BEFORE similarity ranking (§6.2) — on a single-brand corpus, pure
+    vector search returns noise; narrow to the matching campaigns first (e.g. "concluded
+    seeding campaigns in APAC"), then rank what's left by similarity. region/market are
+    freeform and matched case-insensitively; tags matches if the campaign has ANY of the
+    given tags (no fixed taxonomy — §6.3 decision).
+    """
+    clauses, params = [], []
+    if record_type:
+        clauses.append("record_type = ?")
+        params.append(record_type)
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    if region:
+        clauses.append("LOWER(region) = LOWER(?)")
+        params.append(region)
+    if market:
+        clauses.append("LOWER(market) = LOWER(?)")
+        params.append(market)
+    if exclude_campaign_id:
+        clauses.append("id != ?")
+        params.append(exclude_campaign_id)
+
+    sql = "SELECT id, tags FROM campaigns"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY created_at"
+    rows = conn.execute(sql, params).fetchall()
+
+    if tags:
+        wanted = {t.lower() for t in tags}
+        rows = [r for r in rows if wanted & {t.lower() for t in json.loads(r["tags"] or "[]")}]
+
+    return [r["id"] for r in rows]
 
 
 # ── campaign chunks (§6.1: one vector per chunk, not per campaign) ───────────
@@ -176,6 +234,20 @@ def get_chunk_ids_for_campaign(conn, campaign_id: str) -> list[str]:
         "SELECT id FROM campaign_chunks WHERE campaign_id = ?", (campaign_id,)
     ).fetchall()
     return [r["id"] for r in rows]
+
+
+def get_chunk_ids_for_campaigns(conn, campaign_ids: list[str]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {cid: [] for cid in campaign_ids}
+    if not campaign_ids:
+        return out
+    placeholders = ",".join("?" * len(campaign_ids))
+    rows = conn.execute(
+        f"SELECT id, campaign_id FROM campaign_chunks WHERE campaign_id IN ({placeholders})",
+        campaign_ids,
+    ).fetchall()
+    for r in rows:
+        out[r["campaign_id"]].append(r["id"])
+    return out
 
 
 def map_chunks_to_campaigns(conn, chunk_ids: list[str]) -> dict[str, str]:

@@ -31,7 +31,7 @@ def test_ingest_via_asset_ref_uses_natural_slide_units(conn, tmp_path):
     pptx_path = tmp_path / "deck.pptx"
     _make_pptx(pptx_path, ["Audience: young adults", "Channel: social + OOH", "Budget: 500k"])
 
-    r = core.ingest_campaign(conn, title="From Deck", kind="concluded",
+    r = core.ingest_campaign(conn, title="From Deck", status="concluded",
                              asset_ref={"path": str(pptx_path)})
 
     assert r["chunks_total"] >= 1  # small slides may merge into one chunk via pack()

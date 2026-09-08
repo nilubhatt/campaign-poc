@@ -3,10 +3,11 @@ import store
 
 
 def test_insert_and_get_campaign_roundtrip(conn):
-    cid = store.insert_campaign(conn, title="X", kind="proposal", detail="d", deck_text="dt")
+    cid = store.insert_campaign(conn, title="X", status="proposed", detail="d", deck_text="dt")
     c = store.get_campaign(conn, cid)
     assert c["title"] == "X"
-    assert c["kind"] == "proposal"
+    assert c["record_type"] == "campaign"
+    assert c["status"] == "proposed"
     assert c["detail"] == "d"
     assert c["metrics"] == []
     assert c["chunks_total"] == 0  # no chunks inserted via this low-level call
@@ -16,14 +17,33 @@ def test_get_campaign_missing_returns_none(conn):
     assert store.get_campaign(conn, "does-not-exist") is None
 
 
-def test_list_campaigns_filters_by_kind(conn):
-    store.insert_campaign(conn, title="A", kind="proposal")
-    store.insert_campaign(conn, title="B", kind="concluded")
-    store.insert_campaign(conn, title="C", kind="concluded")
+def test_list_campaigns_filters_by_record_type_and_status(conn):
+    store.insert_campaign(conn, title="A", status="proposed")
+    store.insert_campaign(conn, title="B", status="concluded")
+    store.insert_campaign(conn, title="C", status="concluded")
+    store.insert_campaign(conn, title="D", record_type="reference")
 
-    assert len(store.list_campaigns(conn)) == 3
-    assert len(store.list_campaigns(conn, kind="concluded")) == 2
-    assert len(store.list_campaigns(conn, kind="proposal")) == 1
+    assert len(store.list_campaigns(conn)) == 4
+    assert len(store.list_campaigns(conn, status="concluded")) == 2
+    assert len(store.list_campaigns(conn, status="proposed")) == 1
+    assert len(store.list_campaigns(conn, record_type="campaign")) == 3
+    assert len(store.list_campaigns(conn, record_type="reference")) == 1
+    assert len(store.list_campaigns(conn, record_type="campaign", status="concluded")) == 2
+
+
+def test_reference_and_stub_records_have_no_status_by_default(conn):
+    ref = store.insert_campaign(conn, title="Brand guidelines", record_type="reference")
+    stub = store.insert_campaign(conn, title="Placeholder", record_type="stub")
+    campaign = store.insert_campaign(conn, title="Real campaign")  # default record_type
+
+    assert store.get_campaign(conn, ref)["status"] is None
+    assert store.get_campaign(conn, stub)["status"] is None
+    assert store.get_campaign(conn, campaign)["status"] == "concluded"
+
+
+def test_explicit_status_overrides_default_even_for_non_campaign_record_type(conn):
+    cid = store.insert_campaign(conn, title="X", record_type="reference", status="proposed")
+    assert store.get_campaign(conn, cid)["status"] == "proposed"
 
 
 def test_mark_embedded_flips_flag(conn):

@@ -128,16 +128,39 @@ gained a `test.yml` workflow (pytest on push/PR — there was no test workflow b
 existing local `campaigns.db` from before this change needs to be deleted/reloaded (consistent
 with the locked "reload OK" decision above), not migrated.
 
-### 6.2 Filter **before** similarity  *(fixes "can't discriminate")*
+### 6.2 Filter **before** similarity  *(fixes "can't discriminate")* — **Done (2026-09-08)**
 On a single-brand corpus, pure vector search returns noise (observed band 0.67–0.84, everything
-"similar"). Add structured fields and filter first, then rank: `market`/`region`, `channel`,
-`campaign_type`, `brand_stage`, `tags`, `status`. Query becomes "concluded seeding events in APAC"
-→ then similarity.
+"similar"). Add structured fields and filter first, then rank: `market`/`region`, `tags`, `status`.
+Query becomes "concluded seeding events in APAC" → then similarity.
 
-### 6.3 Schema: split `kind`, add tags & region
+Implemented alongside §6.3 (same commit — filtering needs the fields §6.3 adds). `store.py` gains
+`filter_campaign_ids()` (record_type/status/tags-any-match/region/market, region+market matched
+case-insensitively, tags freeform no fixed taxonomy per the locked decision below). `core.find_similar`
+branches: no filters → the existing fast ANN `vectorstore.search`; any filter given → restrict to
+the matching campaigns' chunks first (`vectorstore.get_many`, new) and brute-force-rank only that
+candidate set (`embedding.rank`, already existed, now used) — correct at POC scale, no ANN
+infrastructure needed for an already-narrow set. `find_similar_campaigns` and `prepare_evaluation`
+both expose the filter params. `channel`/`campaign_type`/`brand_stage` from the original idea list
+were **not** added as separate columns — folded into freeform `tags` instead (see §6.3).
+
+### 6.3 Schema: split `kind`, add tags & region — **Done (2026-09-08)**
 `kind` (concluded|proposal) is too binary — doesn't fit reference docs, stubs, finished campaigns
-without results. Split into **`status`** + **`record_type`**, add a **`tags[]`** array (the
-four-category taxonomy currently lives in prose), and **`region`/`market`** as first-class.
+without results. Split into **`status`** + **`record_type`**, add a **`tags[]`** array, and
+**`region`/`market`** as first-class.
+
+**Decisions confirmed when building this:** `record_type` ∈ `campaign | reference | stub`;
+`status` ∈ `proposed | in_flight | concluded`, defaulting to `concluded` only when
+`record_type='campaign'` (reference/stub records have no lifecycle status unless explicitly set —
+a `reference` record with status stuck at "concluded" made no sense). `tags[]` is **freeform, no
+fixed taxonomy** — the "four-category taxonomy" mentioned in earlier notes wasn't available to
+build against, so tags are just strings the user types; a controlled vocabulary can be added
+later once real tag values are seen. `region`/`market` are freeform text, not a controlled list,
+matching the conversational-intake style (§6.9) — a fixed region list can be added later too.
+
+Schema change: `campaigns.kind` column removed entirely, replaced by `record_type`/`status`/
+`tags` (JSON array)/`region`/`market`. No back-compat shim — consistent with the "reload OK"
+decision; this was already true after §6.1's chunk-table change, so the same local DB reload
+covers both.
 
 ### 6.4 Lifecycle: CRUD + supersede
 `delete_campaign`, `update_campaign`, and a **`supersedes`** field. Today every mistake is

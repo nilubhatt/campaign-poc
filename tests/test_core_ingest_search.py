@@ -4,7 +4,7 @@ import store
 
 
 def test_ingest_short_campaign_yields_one_chunk(conn):
-    r = core.ingest_campaign(conn, title="Short Brief", kind="proposal",
+    r = core.ingest_campaign(conn, title="Short Brief", status="proposed",
                              detail="A small proposal with no deck.")
     assert r["chunks_total"] == 1
     assert r["chunks_embedded"] == 1
@@ -13,7 +13,7 @@ def test_ingest_short_campaign_yields_one_chunk(conn):
 
 
 def test_ingest_empty_campaign_embeds_nothing(conn):
-    r = core.ingest_campaign(conn, title="", kind="proposal")
+    r = core.ingest_campaign(conn, title="", status="proposed")
     assert r["chunks_total"] == 0
     assert r["chunks_embedded"] == 0
     assert r["embedded"] is False
@@ -25,7 +25,7 @@ def test_ingest_long_flat_deck_text_splits_into_multiple_chunks(conn):
     # chunk-worthy units once packed past MAX_CHUNK_CHARS.
     paragraph = "word " * 500  # ~2500 chars, one paragraph
     deck_text = "\n\n".join([paragraph] * 4)
-    r = core.ingest_campaign(conn, title="Long Deck", kind="concluded", deck_text=deck_text)
+    r = core.ingest_campaign(conn, title="Long Deck", status="concluded", deck_text=deck_text)
     assert r["chunks_total"] > 1
     assert r["chunks_embedded"] == r["chunks_total"]
     chunks = store.get_chunk_ids_for_campaign(conn, r["campaign_id"])
@@ -46,7 +46,7 @@ def test_partial_embedding_failure_is_reported_per_chunk_not_swallowed(conn, mon
 
     paragraph = "word " * 500
     deck_text = "\n\n".join([paragraph] * 4)
-    r = core.ingest_campaign(conn, title="Flaky Deck", kind="concluded", deck_text=deck_text)
+    r = core.ingest_campaign(conn, title="Flaky Deck", status="concluded", deck_text=deck_text)
 
     assert r["chunks_total"] > 1
     assert r["chunks_embedded"] == r["chunks_total"] - 1
@@ -58,9 +58,9 @@ def test_partial_embedding_failure_is_reported_per_chunk_not_swallowed(conn, mon
 
 
 def test_find_similar_excludes_query_campaigns_own_chunks(conn):
-    r1 = core.ingest_campaign(conn, title="APAC Summer Launch", kind="concluded",
+    r1 = core.ingest_campaign(conn, title="APAC Summer Launch", status="concluded",
                               detail="Region APAC, social + OOH, awareness goal.")
-    core.ingest_campaign(conn, title="Mexico Spring Push", kind="concluded",
+    core.ingest_campaign(conn, title="Mexico Spring Push", status="concluded",
                          detail="Region LATAM, social, awareness goal.")
 
     hits = core.find_similar(conn, campaign_id=r1["campaign_id"], top_k=5)
@@ -70,11 +70,11 @@ def test_find_similar_excludes_query_campaigns_own_chunks(conn):
 def test_find_similar_dedupes_multi_chunk_campaign_to_best_match(conn):
     paragraph = "APAC summer awareness social OOH launch targeting young adults. " * 40
     deck_text = "\n\n".join([paragraph] * 5)
-    r1 = core.ingest_campaign(conn, title="APAC Summer Launch", kind="concluded",
+    r1 = core.ingest_campaign(conn, title="APAC Summer Launch", status="concluded",
                               deck_text=deck_text)
     assert r1["chunks_total"] > 1  # multiple chunks from the same campaign
 
-    core.ingest_campaign(conn, title="Unrelated Winter Sale", kind="concluded",
+    core.ingest_campaign(conn, title="Unrelated Winter Sale", status="concluded",
                          detail="Completely different: B2B enterprise software renewal push.")
 
     hits = core.find_similar(conn, text="APAC summer awareness social OOH launch", top_k=5)
@@ -83,7 +83,7 @@ def test_find_similar_dedupes_multi_chunk_campaign_to_best_match(conn):
 
 
 def test_get_campaign_reports_chunk_counts(conn):
-    r = core.ingest_campaign(conn, title="X", kind="proposal", detail="Some detail text.")
+    r = core.ingest_campaign(conn, title="X", status="proposed", detail="Some detail text.")
     c = store.get_campaign(conn, r["campaign_id"])
     assert c["chunks_total"] == r["chunks_total"]
     assert c["chunks_embedded"] == r["chunks_embedded"]

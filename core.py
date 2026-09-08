@@ -29,10 +29,16 @@ _SEARCH_OVERFETCH = 4
 # ── ingest ───────────────────────────────────────────────────────────────────
 
 def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
-                    deck_text: Optional[str] = None, kind: str = "concluded",
+                    deck_text: Optional[str] = None, record_type: str = "campaign",
+                    status: Optional[str] = None, tags: Optional[list[str]] = None,
+                    region: Optional[str] = None, market: Optional[str] = None,
                     asset_ref: Optional[dict] = None) -> dict:
     """
     Store a past/proposed campaign, chunk it, and embed each chunk for search (§6.1).
+
+    record_type distinguishes an actual campaign from background reference material or a
+    placeholder stub (§6.3); status tracks a campaign's own lifecycle. tags/region/market
+    are structured fields used to filter BEFORE similarity ranking (§6.2).
 
     LLM-first: from Claude Web, pass `deck_text` (the text Claude already read from the
     attached PDF/PPTX) plus freeform `detail`. Alternatively pass `asset_ref`
@@ -54,7 +60,8 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
             stored_path = _keep_asset(path)
 
     cid = store.insert_campaign(
-        conn, title=title, kind=kind, detail=detail, deck_text=deck_text, asset_path=stored_path
+        conn, title=title, record_type=record_type, status=status, tags=tags, region=region,
+        market=market, detail=detail, deck_text=deck_text, asset_path=stored_path,
     )
 
     if not units and deck_text:
@@ -67,8 +74,8 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
 
     if not chunk_texts:
         warnings.append("nothing to embed (no title/detail/deck_text)")
-        return {"campaign_id": cid, "title": title, "kind": kind, "embedded": False,
-                "chunks_total": 0, "chunks_embedded": 0, "warnings": warnings}
+        return {"campaign_id": cid, "title": title, "record_type": record_type,
+                "embedded": False, "chunks_total": 0, "chunks_embedded": 0, "warnings": warnings}
 
     chunk_ids = store.insert_chunks(conn, cid, chunk_texts)
     embedded_count = 0
@@ -83,7 +90,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
 
     store.mark_embedded(conn, cid, embedded_count > 0)
     return {
-        "campaign_id": cid, "title": title, "kind": kind,
+        "campaign_id": cid, "title": title, "record_type": record_type,
         "embedded": embedded_count > 0,
         "chunks_total": len(chunk_texts), "chunks_embedded": embedded_count,
         "warnings": warnings,
@@ -93,26 +100,46 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
 # ── retrieval / evidence for Claude ──────────────────────────────────────────
 
 def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str] = None,
-                 top_k: int = 5) -> list[dict]:
+                 top_k: int = 5, record_type: Optional[str] = None, status: Optional[str] = None,
+                 tags: Optional[list[str]] = None, region: Optional[str] = None,
+                 market: Optional[str] = None) -> list[dict]:
     """
     Rank prior campaigns by semantic similarity to `text` (or to an existing campaign's
     own content). Searches at chunk level (§6.1 — one vector per slide/section) and rolls
     up to the best-matching chunk per campaign, so a long deck can still match on the one
-    section that's actually relevant. Returns evidence rows — id, title, similarity,
-    detail, the matched excerpt, and metrics — for Claude to reason over. Excludes the
-    query campaign's own chunks.
+    section that's actually relevant. Excludes the query campaign's own chunks.
+
+    §6.2: if any of record_type/status/tags/region/market is given, campaigns are filtered
+    to that structured criteria FIRST, then ranked by similarity only within that set —
+    otherwise pure vector search on a single-brand corpus returns everything as "similar."
+    Returns evidence rows — id, title, similarity, detail, the matched excerpt, and
+    metrics — for Claude to reason over.
     """
-    exclude_chunks: set[str] = set()
     if campaign_id:
         row = conn.execute("SELECT detail, deck_text FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
         text = "\n\n".join(p for p in ((row["detail"] if row else None),
                                        (row["deck_text"] if row else None)) if p)
-        exclude_chunks = set(store.get_chunk_ids_for_campaign(conn, campaign_id))
     if not text or not text.strip():
         raise ValueError("provide text (or a campaign_id that has content) to search by")
 
     qvec = embedding.embed(text)
-    hits = vectorstore.search(conn, qvec, top_k=top_k * _SEARCH_OVERFETCH, exclude=exclude_chunks)
+    filters_given = any([record_type, status, tags, region, market])
+
+    if filters_given:
+        candidate_ids = store.filter_campaign_ids(
+            conn, record_type=record_type, status=status, tags=tags, region=region,
+            market=market, exclude_campaign_id=campaign_id,
+        )
+        if not candidate_ids:
+            return []
+        chunk_map = store.get_chunk_ids_for_campaigns(conn, candidate_ids)
+        candidate_chunk_ids = [chid for chids in chunk_map.values() for chid in chids]
+        vecs = vectorstore.get_many(conn, candidate_chunk_ids)
+        hits = embedding.rank(qvec, list(vecs.items()), top_k=top_k * _SEARCH_OVERFETCH)
+    else:
+        exclude_chunks = set(store.get_chunk_ids_for_campaign(conn, campaign_id)) if campaign_id else set()
+        hits = vectorstore.search(conn, qvec, top_k=top_k * _SEARCH_OVERFETCH, exclude=exclude_chunks)
+
     chunk_to_campaign = store.map_chunks_to_campaigns(conn, [chunk_id for chunk_id, _ in hits])
 
     best: dict[str, tuple[float, str]] = {}
@@ -132,7 +159,11 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
         evidence.append({
             "campaign_id": cid,
             "title": c["title"],
-            "kind": c["kind"],
+            "record_type": c["record_type"],
+            "status": c["status"],
+            "tags": c["tags"],
+            "region": c["region"],
+            "market": c["market"],
             "similarity": round(sim, 4),
             "detail": c["detail"],
             "matched_excerpt": matched["text"] if matched else "",
@@ -141,13 +172,18 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
     return evidence
 
 
-def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: int = 5) -> dict:
+def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: int = 5,
+                       record_type: Optional[str] = None, status: Optional[str] = None,
+                       tags: Optional[list[str]] = None, region: Optional[str] = None,
+                       market: Optional[str] = None) -> dict:
     """
     Package the evidence Claude needs to judge a new proposal: the most similar prior
     campaigns WITH their outcomes. Claude reads this, produces its analysis citing specific
-    priors, then calls save_evaluation. This tool does NOT itself judge.
+    priors, then calls save_evaluation. This tool does NOT itself judge. Optionally narrow
+    to structured criteria first (§6.2), e.g. region="APAC" to only weigh APAC precedent.
     """
-    evidence = find_similar(conn, text=proposal_text, top_k=top_k)
+    evidence = find_similar(conn, text=proposal_text, top_k=top_k, record_type=record_type,
+                            status=status, tags=tags, region=region, market=market)
     concluded = [e for e in evidence if e["metrics"]]
     return {
         "subject_title": subject_title,
