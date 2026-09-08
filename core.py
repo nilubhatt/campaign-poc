@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 import chunking
+import clip_embed
 import config
 import embedding
 import extract
@@ -21,10 +22,13 @@ import images
 import store
 import vectorstore
 
-# Over-fetch factor for chunk-level search before rolling up to campaigns (§6.1): several
-# chunks from the same campaign can rank highly, so fetch more than top_k chunks to still
-# surface top_k *distinct* campaigns.
-_SEARCH_OVERFETCH = 4
+# Over-fetch factor for the unfiltered ANN path only (§6.1) — the filtered path ranks its
+# full candidate set directly, no cap needed. Several chunks from the same campaign can rank
+# highly, so fetch more than top_k chunks to still surface top_k *distinct* campaigns; a
+# large deck with many highly-ranked chunks can otherwise starve every other campaign out of
+# the result entirely (review found this at the old value of 4 — bumped, and still well
+# under sqlite-vec's k limit for realistic top_k).
+_SEARCH_OVERFETCH = 20
 
 
 # ── ingest ───────────────────────────────────────────────────────────────────
@@ -170,8 +174,14 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
 
     qvec = embedding.embed(text)
     filters_given = any([record_type, status, tags, region, market])
+    superseded_ids = store.get_superseded_campaign_ids(conn)
 
     if filters_given:
+        # filter_campaign_ids already excludes superseded + self; the full candidate set is
+        # already in memory, so rank all of it (no per-chunk over-fetch cap) rather than
+        # truncating before the rollup below — a chunk-heavy campaign truncating the field
+        # before rollup is exactly the starvation bug review found (one deck filling every
+        # slot, starving every other campaign out of the result entirely).
         candidate_ids = store.filter_campaign_ids(
             conn, record_type=record_type, status=status, tags=tags, region=region,
             market=market, exclude_campaign_id=campaign_id,
@@ -181,13 +191,13 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
         chunk_map = store.get_chunk_ids_for_campaigns(conn, candidate_ids)
         candidate_chunk_ids = [chid for chids in chunk_map.values() for chid in chids]
         vecs = vectorstore.get_many(conn, candidate_chunk_ids)
-        hits = embedding.rank(qvec, list(vecs.items()), top_k=top_k * _SEARCH_OVERFETCH)
+        hits = embedding.rank(qvec, list(vecs.items()), top_k=len(vecs))
     else:
+        # Only self-exclusion goes into the ANN `exclude` set — folding every superseded
+        # campaign's chunks in here inflates sqlite-vec's `k` parameter and can crash past
+        # its limit as the corpus grows (review found this). Superseded campaigns are
+        # filtered out below, after fetching, alongside the rollup instead.
         exclude_chunks = set(store.get_chunk_ids_for_campaign(conn, campaign_id)) if campaign_id else set()
-        superseded_ids = store.get_superseded_campaign_ids(conn)
-        if superseded_ids:
-            for chids in store.get_chunk_ids_for_campaigns(conn, list(superseded_ids)).values():
-                exclude_chunks.update(chids)
         hits = vectorstore.search(conn, qvec, top_k=top_k * _SEARCH_OVERFETCH, exclude=exclude_chunks)
 
     chunk_to_campaign = store.map_chunks_to_campaigns(conn, [chunk_id for chunk_id, _ in hits])
@@ -195,7 +205,7 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
     best: dict[str, tuple[float, str]] = {}
     for chunk_id, sim in hits:
         cid = chunk_to_campaign.get(chunk_id)
-        if cid is None or (cid in best and sim <= best[cid][0]):
+        if cid is None or cid in superseded_ids or (cid in best and sim <= best[cid][0]):
             continue
         best[cid] = (sim, chunk_id)
     ranked = sorted(best.items(), key=lambda kv: kv[1][0], reverse=True)[:top_k]
@@ -276,7 +286,19 @@ def reconcile_evaluation(conn, *, evaluation_id: str, actual: Optional[str] = No
         if not actual_metrics:
             return {"error": "no actual metrics on file for this campaign — pass actual= "
                               "or record them first with add_metrics/bulk_import_metrics"}
-        actual = "\n".join(m["detail"] or "" for m in actual_metrics if m["detail"])
+        # A metrics row can carry `structured` with no freeform `detail` at all (exactly
+        # what bulk_import_metrics produces from a KPI workbook) — include both, not just
+        # detail, or a structured-only row silently contributed nothing (review found this).
+        parts = []
+        for m in actual_metrics:
+            if m["detail"]:
+                parts.append(m["detail"])
+            if m["structured"]:
+                parts.append(m["structured"])  # already a JSON string from the DB row
+        actual = "\n".join(parts)
+        if not actual:
+            return {"error": "actual metrics on file for this campaign have no readable "
+                              "detail or structured data"}
 
     return {
         "evaluation_id": ev["id"],
@@ -292,24 +314,38 @@ def reconcile_evaluation(conn, *, evaluation_id: str, actual: Optional[str] = No
 # ── image assets / creative-reuse detection (§6.6) ───────────────────────────
 
 def ingest_image_asset(conn, *, campaign_id: str, asset_ref: dict) -> dict:
-    """Attach an image to a campaign and fingerprint it (perceptual hash) for creative-reuse
-    detection. Storage still succeeds even if fingerprinting fails (e.g. a corrupt image) —
-    the failure is reported, not swallowed."""
+    """Attach an image to a campaign and process it two ways: a perceptual hash (exact/
+    near-duplicate reuse detection, §6.6) and a CLIP visual embedding (aesthetic/regional
+    similarity, the heavier follow-on). Storage always succeeds even if one or both
+    processing steps fail (e.g. a corrupt image, or CLIP unavailable) — failures are
+    reported per-step, not swallowed, and don't block each other."""
     path, warnings = _resolve_asset(asset_ref)
     if not path:
         return {"error": "; ".join(warnings) or "could not resolve asset_ref"}
 
     stored_name = _keep_asset(path)
+    full_path = config.ASSET_DIR / stored_name
     aid = store.insert_asset(conn, campaign_id, file_path=stored_name)
+
+    fingerprinted = False
     try:
-        h = images.phash(config.ASSET_DIR / stored_name)
+        h = images.phash(full_path)
         store.set_asset_fingerprint(conn, aid, h)
-        return {"asset_id": aid, "campaign_id": campaign_id, "fingerprinted": True,
-                "warnings": warnings}
+        fingerprinted = True
     except Exception as exc:
         warnings.append(f"asset stored but not fingerprinted (reuse detection will miss it): {exc}")
-        return {"asset_id": aid, "campaign_id": campaign_id, "fingerprinted": False,
-                "warnings": warnings}
+
+    visually_embedded = False
+    try:
+        vec = clip_embed.embed_image(full_path)
+        vectorstore.add(conn, aid, vec, space="asset")
+        store.mark_asset_embedded(conn, aid)
+        visually_embedded = True
+    except Exception as exc:
+        warnings.append(f"asset stored but not visually embedded (aesthetic similarity will miss it): {exc}")
+
+    return {"asset_id": aid, "campaign_id": campaign_id, "fingerprinted": fingerprinted,
+            "visually_embedded": visually_embedded, "warnings": warnings}
 
 
 def check_image_provenance(conn, *, asset_ref: dict, campaign_id: Optional[str] = None,
@@ -338,15 +374,62 @@ def check_image_provenance(conn, *, asset_ref: dict, campaign_id: Optional[str] 
         c = store.get_campaign(conn, cand["campaign_id"])
         if not c:
             continue
-        flag = None
-        if current and current["region"] and c["region"] and current["region"].lower() != c["region"].lower():
-            flag = f"used in a different region ({c['region']} vs {current['region']})"
         matches.append({
             "campaign_id": cand["campaign_id"], "title": c["title"], "region": c["region"],
-            "asset_id": cand["asset_id"], "hamming_distance": dist, "flag": flag,
+            "asset_id": cand["asset_id"], "hamming_distance": dist,
+            "flag": _region_mismatch_flag(current, c),
         })
     matches.sort(key=lambda m: m["hamming_distance"])
     return {"query_hash": query_hash, "matches": matches, "warnings": warnings}
+
+
+def find_similar_images(conn, *, asset_ref: dict, campaign_id: Optional[str] = None,
+                        top_k: int = 5, region: Optional[str] = None) -> dict:
+    """
+    Aesthetic/regional visual similarity (CLIP) — catches "same product, different photo,"
+    "looks like the APAC shoot," NOT exact/near-duplicate reuse (that's
+    check_image_provenance's pHash job). Works on an image that isn't stored yet. Pass
+    region to filter to that region FIRST (§6.2's pattern, applied to images); pass
+    campaign_id (the campaign this image is headed for) to exclude its own assets and get a
+    region-mismatch flag on matches from elsewhere.
+    """
+    path, warnings = _resolve_asset(asset_ref)
+    if not path:
+        return {"error": "; ".join(warnings) or "could not resolve asset_ref"}
+
+    qvec = clip_embed.embed_image(path)
+    current = store.get_campaign(conn, campaign_id) if campaign_id else None
+
+    if region:
+        candidate_ids = store.filter_campaign_ids(conn, region=region, exclude_campaign_id=campaign_id)
+        assets = store.list_assets(conn, campaign_ids=candidate_ids)
+    else:
+        assets = store.list_assets(conn, exclude_campaign_id=campaign_id)
+
+    asset_to_campaign = {a["id"]: a["campaign_id"] for a in assets}
+    vecs = vectorstore.get_many(conn, list(asset_to_campaign), space="asset")
+    hits = embedding.rank(qvec, list(vecs.items()), top_k=top_k)
+
+    matches = []
+    for asset_id, sim in hits:
+        cid = asset_to_campaign.get(asset_id)
+        c = store.get_campaign(conn, cid) if cid else None
+        if not c:
+            continue
+        matches.append({
+            "campaign_id": cid, "title": c["title"], "region": c["region"],
+            "asset_id": asset_id, "similarity": round(sim, 4),
+            "flag": _region_mismatch_flag(current, c),
+        })
+    return {"matches": matches, "warnings": warnings}
+
+
+def _region_mismatch_flag(current: Optional[dict], other: dict) -> Optional[str]:
+    """Shared by check_image_provenance and find_similar_images: the point isn't "this image
+    exists elsewhere," it's "this image/look belongs to a *different* region" (§6.6)."""
+    if current and current["region"] and other["region"] and current["region"].lower() != other["region"].lower():
+        return f"used in a different region ({other['region']} vs {current['region']})"
+    return None
 
 
 # ── asset resolution (secondary path) ────────────────────────────────────────
@@ -378,10 +461,13 @@ def _resolve_asset(ref: dict) -> tuple[Optional[Path], list[str]]:
 
 
 def _keep_asset(src: Path) -> str:
-    """Copy an ingested original into the asset store; return its stored name."""
+    """Copy an ingested original into the asset store under a unique name; return its
+    stored name. NOT the original filename — campaigns commonly reuse generic names
+    (hero.png, IMG_1234.jpg), which let two campaigns silently overwrite each other's stored
+    original on disk (found in review)."""
     import shutil
+    import uuid
     config.ensure_dirs()
-    dest = config.ASSET_DIR / src.name
-    if src.resolve() != dest.resolve():
-        shutil.copy2(src, dest)
+    dest = config.ASSET_DIR / f"{uuid.uuid4().hex[:16]}{src.suffix}"
+    shutil.copy2(src, dest)
     return dest.name

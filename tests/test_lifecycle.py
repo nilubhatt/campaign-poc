@@ -4,6 +4,7 @@ from the live one). update_campaign edits metadata (not deck_text/chunks - re-up
 content changes); delete_campaign removes a record + its chunks/vectors; supersedes links a
 new record to the one it replaces, and the replaced one is excluded from search evidence.
 """
+import config
 import core
 import store
 import vectorstore
@@ -58,6 +59,31 @@ def test_delete_campaign_cascades_chunks_and_vectors(conn):
     assert vectorstore.get_many(conn, chunk_ids) == {}  # vectors purged, not orphaned
 
 
+def test_delete_campaign_purges_image_asset_vectors_and_files(conn, tmp_path):
+    """Adversarial review finding: delete_campaign only purged chunk (text) vectors — the
+    asset (CLIP image) vector space and the actual files on disk (deck + images) were left
+    behind, a leak (and a GDPR-erasure gap, per the roadmap's own compliance section)."""
+    import numpy as np
+    from PIL import Image
+    img_path = tmp_path / "hero.png"
+    rng = np.random.default_rng(1)
+    small = rng.integers(0, 256, size=(8, 8, 3), dtype="uint8")
+    Image.fromarray(small, mode="RGB").resize((64, 64), Image.BICUBIC).save(img_path)
+
+    cid = store.insert_campaign(conn, title="X", detail="brief")
+    r = core.ingest_image_asset(conn, campaign_id=cid, asset_ref={"path": str(img_path)})
+    asset_id = r["asset_id"]
+    stored_file = store.get_assets_for_campaign(conn, cid)[0]["file_path"]
+    stored_path = config.ASSET_DIR / stored_file
+    assert stored_path.exists()
+    assert vectorstore.get_many(conn, [asset_id], space="asset", dim=config.CLIP_EMBED_DIM) != {}
+
+    store.delete_campaign(conn, cid)
+
+    assert vectorstore.get_many(conn, [asset_id], space="asset", dim=config.CLIP_EMBED_DIM) == {}
+    assert not stored_path.exists()
+
+
 def test_delete_campaign_cascades_metrics_and_detaches_evaluations(conn):
     cid = store.insert_campaign(conn, title="X")
     store.add_metrics(conn, cid, detail="did well")
@@ -70,12 +96,16 @@ def test_delete_campaign_cascades_metrics_and_detaches_evaluations(conn):
     assert ev["campaign_id"] is None  # FK ON DELETE SET NULL
 
 
-def test_insert_with_supersedes_sets_reverse_pointer(conn):
+def test_insert_with_supersedes_is_reflected_as_superseded_by(conn):
+    """`superseded_by` is DERIVED (queried live), not a maintained reverse-pointer column —
+    review found the maintained version breaks on chains and fan-in (see below)."""
     old = store.insert_campaign(conn, title="Mexico Push (draft)")
     new = store.insert_campaign(conn, title="Mexico Push (final)", supersedes=old)
 
     assert store.get_campaign(conn, new)["supersedes"] == old
-    assert store.get_campaign(conn, old)["superseded_by"] == new
+    assert store.get_campaign(conn, old)["superseded_by"] == [new]
+    assert store.get_campaign(conn, old)["is_superseded"] is True
+    assert store.get_campaign(conn, new)["is_superseded"] is False
 
 
 def test_insert_with_supersedes_nonexistent_target_is_a_harmless_noop(conn):
@@ -83,13 +113,14 @@ def test_insert_with_supersedes_nonexistent_target_is_a_harmless_noop(conn):
     assert store.get_campaign(conn, new)["supersedes"] == "does-not-exist"  # kept for traceability
 
 
-def test_delete_campaign_clears_superseded_by_on_whatever_pointed_to_it(conn):
+def test_deleting_the_newer_record_un_supersedes_the_older_one(conn):
     old = store.insert_campaign(conn, title="Old")
     new = store.insert_campaign(conn, title="New", supersedes=old)
 
     store.delete_campaign(conn, new)  # deleting the *newer* record un-supersedes the old one
 
-    assert store.get_campaign(conn, old)["superseded_by"] is None
+    assert store.get_campaign(conn, old)["superseded_by"] == []
+    assert store.get_campaign(conn, old)["is_superseded"] is False
 
 
 def test_get_superseded_campaign_ids(conn):
@@ -100,6 +131,47 @@ def test_get_superseded_campaign_ids(conn):
     superseded = store.get_superseded_campaign_ids(conn)
     assert superseded == {old}
     assert other not in superseded
+
+
+def test_supersession_chain_deleting_the_middle_record_resolves_correctly(conn):
+    """A <- B <- C. A maintained reverse-pointer breaks here (design review finding): deleting
+    B would incorrectly restore A to active while C, the actual latest, stays hidden nowhere
+    (it's still active) - but a STALE pointer scheme can leave both A and C's status wrong in
+    other variants. Deriving live means: after deleting B, nothing points at A anymore (B is
+    gone) and nothing ever pointed at C - both surface as active, which is honest given the
+    chain is now broken, rather than silently hiding one of them."""
+    a = store.insert_campaign(conn, title="A")
+    b = store.insert_campaign(conn, title="B", supersedes=a)
+    c = store.insert_campaign(conn, title="C", supersedes=b)
+
+    assert store.get_campaign(conn, a)["is_superseded"] is True
+    assert store.get_campaign(conn, b)["is_superseded"] is True
+    assert store.get_campaign(conn, c)["is_superseded"] is False
+
+    store.delete_campaign(conn, b)
+
+    assert store.get_campaign(conn, a)["is_superseded"] is False  # nothing points at A anymore
+    assert store.get_campaign(conn, c)["is_superseded"] is False  # was never superseded
+    # C's own `supersedes` value still literally names b (dangling, kept for traceability per
+    # the documented decision) - harmless: no real campaign id is affected by it.
+    assert store.get_superseded_campaign_ids(conn) == {b}
+
+
+def test_supersession_fan_in_two_records_both_claim_to_supersede_the_same_one(conn):
+    """Two people both correct the same mistake independently - both new records are real;
+    a single reverse-pointer column can only remember one of them (last-writer-wins, a real
+    bug in the maintained-column design). Deriving live represents both."""
+    old = store.insert_campaign(conn, title="Old")
+    b = store.insert_campaign(conn, title="Fix attempt 1", supersedes=old)
+    c = store.insert_campaign(conn, title="Fix attempt 2", supersedes=old)
+
+    superseded_by = store.get_campaign(conn, old)["superseded_by"]
+    assert set(superseded_by) == {b, c}
+    assert store.get_campaign(conn, old)["is_superseded"] is True
+
+    store.delete_campaign(conn, b)  # b never "owned" the supersession - deleting it changes nothing
+    assert store.get_campaign(conn, old)["superseded_by"] == [c]
+    assert store.get_campaign(conn, old)["is_superseded"] is True
 
 
 def test_find_similar_excludes_superseded_records_unfiltered_path(conn):

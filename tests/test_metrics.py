@@ -120,6 +120,19 @@ def test_reconcile_evaluation_errors_when_no_actual_available(conn):
     assert "error" in result
 
 
+def test_reconcile_evaluation_includes_structured_only_actuals(conn):
+    """Adversarial review finding: a bulk-imported KPI row with only `structured` (no
+    freeform `detail` text — exactly what a workbook import produces) was silently dropped,
+    leaving `actual` an empty string with no error, instead of surfacing the numbers."""
+    cid = store.insert_campaign(conn, title="X")
+    eid = store.insert_evaluation(conn, subject_title="X", analysis="predicted", campaign_id=cid)
+    store.add_metrics(conn, cid, structured={"ctr": 0.05, "roi": 1.8}, metric_type="actual")
+
+    result = core.reconcile_evaluation(conn, evaluation_id=eid)
+    assert "error" not in result
+    assert "0.05" in result["actual"] or "ctr" in result["actual"]
+
+
 def test_reconcile_evaluation_ignores_predicted_metrics_when_auto_pulling(conn):
     cid = store.insert_campaign(conn, title="X")
     eid = store.insert_evaluation(conn, subject_title="X", analysis="predicted", campaign_id=cid)

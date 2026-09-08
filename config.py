@@ -31,6 +31,18 @@ MAX_CHUNK_CHARS = int(os.getenv("CAMPAIGN_POC_MAX_CHUNK_CHARS", "1800"))
 # default phash is 64 bits; 8 tolerates resize/recompress/light crop without matching unrelated images.
 PHASH_MATCH_THRESHOLD = int(os.getenv("CAMPAIGN_POC_PHASH_THRESHOLD", "8"))
 
+# ── CLIP visual embeddings (§6.6 second half) ─────────────────────────────────
+# Aesthetic/regional similarity ("looks like the APAC shoot"), not exact reuse (pHash's job).
+# 'hash' is an offline, dependency-free test provider (same role as embedding.py's `hash`
+# text provider) - real similarity needs 'openclip' (default), which needs torch + a model
+# download on first use.
+CLIP_PROVIDER = os.getenv("CAMPAIGN_POC_CLIP_PROVIDER", "openclip").lower()
+# quickgelu variant matches OpenAI's original released weights exactly (open_clip warns on
+# an activation-function mismatch otherwise, which would subtly degrade embeddings).
+CLIP_MODEL_NAME = os.getenv("CAMPAIGN_POC_CLIP_MODEL", "ViT-B-32-quickgelu")
+CLIP_PRETRAINED = os.getenv("CAMPAIGN_POC_CLIP_PRETRAINED", "openai")
+CLIP_EMBED_DIM = int(os.getenv("CAMPAIGN_POC_CLIP_DIM", "512"))  # ViT-B-32 = 512
+
 # §6.8: find_similar trims each evidence row's freeform `detail` to this many chars by
 # default (full campaign briefs can be long; a similarity scan doesn't need all of it up
 # front) - pass full_detail=True, or call get_campaign, for the untrimmed record.

@@ -22,7 +22,9 @@ The loop it enables:
 | Reasoning | **Claude** (the intelligence you're paying for) |
 | Transport | MCP over **Streamable HTTP** (`/mcp`) — what Claude Web connectors use |
 
-No Postgres, no CLIP/torch, no Docker required.
+No Postgres, no Docker required. CLIP (`torch` + `open_clip_torch`) IS a dependency, for
+aesthetic/regional image-similarity detection — a deliberate size tradeoff (~150-250MB of
+deps + a one-time ~350MB model download on first use); see `docs/PRODUCTION-ROADMAP.md` §6.6.
 
 ## Run it
 
@@ -58,8 +60,8 @@ Offline smoke test (no Ollama): `CAMPAIGN_POC_EMBED_PROVIDER=hash python -m http
 
 `upload_campaign` · `update_campaign` · `delete_campaign` · `add_metrics` ·
 `bulk_import_metrics` · `upload_image_asset` · `check_image_provenance` ·
-`list_campaigns` · `get_campaign` · `find_similar_campaigns` · `prepare_evaluation` ·
-`save_evaluation` · `reconcile_evaluation` · `save_reconciliation`
+`find_similar_images` · `list_campaigns` · `get_campaign` · `find_similar_campaigns` ·
+`prepare_evaluation` · `save_evaluation` · `reconcile_evaluation` · `save_reconciliation`
 
 ## Files
 
@@ -70,7 +72,8 @@ vectorstore.py   sqlite-vec vector table, keyed by chunk id (+ pure-Python cosin
 embedding.py     ollama | voyage | hash embedders + cosine
 extract.py       PDF / PPTX text extraction, one unit per page/slide
 chunking.py      packs text units into embeddable chunks (server-side, per slide/section)
-images.py        perceptual hashing (pHash) for creative-reuse detection
+images.py        perceptual hashing (pHash) for exact/near-duplicate creative-reuse detection
+clip_embed.py    CLIP visual embeddings for aesthetic/regional similarity (torch, heavy)
 core.py          ingest + chunk + semantic retrieval + evidence packaging (LLM-first)
 mcp_server.py    MCPServer tools (the API Claude calls)
 http_app.py      Streamable-HTTP app (/mcp) + /upload + /healthz

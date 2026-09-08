@@ -105,10 +105,12 @@ def delete_campaign(campaign_id: str) -> dict:
 
 @mcp.tool()
 def upload_image_asset(campaign_id: str, asset_ref: dict) -> dict:
-    """Attach an image (hero shot, creative asset) to a campaign and fingerprint it
-    (perceptual hash) for creative-reuse detection. asset_ref is {asset_id} from POST
-    /upload, {path} local, or {filename, base64} inline. Consider calling
-    check_image_provenance first if you want to flag reuse before attaching it."""
+    """Attach an image (hero shot, creative asset) to a campaign. Processed two ways: a
+    perceptual hash (exact/near-duplicate reuse — check_image_provenance) and a CLIP visual
+    embedding (aesthetic/regional similarity — find_similar_images). asset_ref is {asset_id}
+    from POST /upload, {path} local, or {filename, base64} inline. Consider calling
+    check_image_provenance and/or find_similar_images first if you want to flag reuse or
+    similarity before attaching it."""
     conn = store.connect()
     try:
         return core.ingest_image_asset(conn, campaign_id=campaign_id, asset_ref=asset_ref)
@@ -119,14 +121,32 @@ def upload_image_asset(campaign_id: str, asset_ref: dict) -> dict:
 @mcp.tool()
 def check_image_provenance(asset_ref: dict, campaign_id: Optional[str] = None) -> dict:
     """Check whether an image matches one already in the memory — same/near-same photo,
-    even after resize/recompress/light crop (perceptual hashing; catches exact reuse, not
-    aesthetic similarity). Works before the image is stored. Pass campaign_id (the campaign
-    this image is headed for) to exclude that campaign's own assets and get a flag when a
-    match comes from a *different* region — the real question is usually not "does this image
-    exist" but "does this image belong to a different region than where it's being used.\""""
+    even after resize/recompress/light crop (perceptual hashing; catches exact reuse, NOT
+    aesthetic similarity — use find_similar_images for that). Works before the image is
+    stored. Pass campaign_id (the campaign this image is headed for) to exclude that
+    campaign's own assets and get a flag when a match comes from a *different* region — the
+    real question is usually not "does this image exist" but "does this image belong to a
+    different region than where it's being used.\""""
     conn = store.connect()
     try:
         return core.check_image_provenance(conn, asset_ref=asset_ref, campaign_id=campaign_id)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def find_similar_images(asset_ref: dict, campaign_id: Optional[str] = None, top_k: int = 5,
+                        region: Optional[str] = None) -> dict:
+    """Aesthetic/regional visual similarity via CLIP — catches "same product, different
+    photo," "looks like the APAC shoot" — NOT exact reuse (use check_image_provenance for
+    that). Works before the image is stored. Pass region to weigh only that region's assets
+    first (mirrors find_similar_campaigns' filter-before-rank pattern); pass campaign_id (the
+    campaign this image is headed for) to exclude its own assets and flag matches from a
+    different region."""
+    conn = store.connect()
+    try:
+        return core.find_similar_images(conn, asset_ref=asset_ref, campaign_id=campaign_id,
+                                        top_k=top_k, region=region)
     finally:
         conn.close()
 
@@ -177,7 +197,9 @@ def bulk_import_metrics(rows: list) -> dict:
 @mcp.tool()
 def list_campaigns(record_type: Optional[str] = None, status: Optional[str] = None) -> dict:
     """List records in the memory. Optionally filter by record_type ('campaign', 'reference',
-    'stub') and/or status ('proposed', 'in_flight', 'concluded')."""
+    'stub') and/or status ('proposed', 'in_flight', 'concluded'). is_superseded/supersedes
+    show whether a record has been replaced by a corrected/later one (and by what) — check
+    these before treating two similarly-titled records as both live."""
     conn = store.connect()
     try:
         rows = store.list_campaigns(conn, record_type=record_type, status=status)
@@ -185,7 +207,8 @@ def list_campaigns(record_type: Optional[str] = None, status: Optional[str] = No
             {"campaign_id": r["id"], "title": r["title"], "record_type": r["record_type"],
              "status": r["status"], "region": r["region"], "market": r["market"],
              "embedded": r["embedded"], "has_metrics": r["has_metrics"],
-             "has_evaluations": r["has_evaluations"]}
+             "has_evaluations": r["has_evaluations"], "supersedes": r["supersedes"],
+             "is_superseded": r["is_superseded"]}
             for r in rows]}
     finally:
         conn.close()

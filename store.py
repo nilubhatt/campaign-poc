@@ -29,8 +29,11 @@ CREATE TABLE IF NOT EXISTS campaigns (
     tags          TEXT NOT NULL DEFAULT '[]',   -- JSON array of freeform strings, no fixed taxonomy
     region        TEXT,            -- freeform, e.g. "APAC"
     market        TEXT,            -- freeform, e.g. "Philippines"
-    supersedes    TEXT,            -- campaign_id this record replaces (§6.4), if any
-    superseded_by TEXT,            -- reverse pointer, set automatically when supersedes is used
+    supersedes    TEXT,            -- campaign_id this record replaces (§6.4), if any.
+                                    -- "superseded by" is DERIVED (see is_superseded/
+                                    -- get_superseded_campaign_ids), not a maintained reverse
+                                    -- pointer — a cached pointer breaks on supersession
+                                    -- chains and fan-in (two records both superseding one).
     detail        TEXT,            -- freeform: brief, audience, budget, channel, timeline, anything
     deck_text     TEXT,            -- extracted PDF/PPTX text
     asset_path    TEXT,            -- stored original file (relative to ASSET_DIR)
@@ -51,6 +54,7 @@ CREATE TABLE IF NOT EXISTS assets (
     campaign_id   TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
     modality      TEXT NOT NULL DEFAULT 'image',   -- image today; video/audio later (§6.7)
     file_path     TEXT NOT NULL,    -- relative to ASSET_DIR
+    embedded      INTEGER NOT NULL DEFAULT 0,  -- 1 once its CLIP vector is in the vector store
     created_at    REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS asset_fingerprints (
@@ -102,7 +106,8 @@ def init_db() -> None:
     conn = connect()
     conn.executescript(_SCHEMA)
     conn.commit()
-    vectorstore.init(conn)   # create the vec0 (or fallback) vector table
+    vectorstore.init(conn)   # "campaign" space (text chunks, dim=config.EMBED_DIM)
+    vectorstore.init(conn, space="asset", dim=config.CLIP_EMBED_DIM)  # CLIP image vectors
     conn.close()
 
 
@@ -130,10 +135,6 @@ def insert_campaign(conn, *, title, record_type="campaign", status=None, detail=
         (cid, title, record_type, status, json.dumps(tags or []), region, market, supersedes,
          detail, deck_text, asset_path, now, now),
     )
-    if supersedes:
-        # Reverse pointer for cheap "exclude superseded" filtering. A nonexistent target is
-        # a harmless no-op (0 rows updated) — supersedes stays on the new row for traceability.
-        conn.execute("UPDATE campaigns SET superseded_by = ? WHERE id = ?", (cid, supersedes))
     conn.commit()
     return cid
 
@@ -161,6 +162,10 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
     d["has_evaluations"] = conn.execute(
         "SELECT 1 FROM evaluations WHERE campaign_id = ? LIMIT 1", (campaign_id,)
     ).fetchone() is not None
+    d["superseded_by"] = [r["id"] for r in conn.execute(
+        "SELECT id FROM campaigns WHERE supersedes = ?", (campaign_id,)
+    ).fetchall()]
+    d["is_superseded"] = len(d["superseded_by"]) > 0
     chunk_rows = conn.execute(
         "SELECT embedded FROM campaign_chunks WHERE campaign_id = ?", (campaign_id,)
     ).fetchall()
@@ -195,11 +200,13 @@ def list_campaigns(conn, *, record_type: Optional[str] = None,
         with_evaluations = {r["campaign_id"] for r in conn.execute(
             f"SELECT DISTINCT campaign_id FROM evaluations WHERE campaign_id IN ({placeholders})", ids
         ).fetchall()}
+    superseded_ids = get_superseded_campaign_ids(conn)
 
     out = []
     for r in rows:
         d = dict(r)
         d["has_metrics"] = d["id"] in with_metrics
+        d["is_superseded"] = d["id"] in superseded_ids
         d["has_evaluations"] = d["id"] in with_evaluations
         out.append(d)
     return out
@@ -216,7 +223,10 @@ def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Opti
     freeform and matched case-insensitively; tags matches if the campaign has ANY of the
     given tags (no fixed taxonomy — §6.3 decision).
     """
-    clauses, params = ["superseded_by IS NULL"], []  # §6.4: never surface a replaced record
+    # §6.4: never surface a replaced record — derived live (see get_campaign's
+    # is_superseded/superseded_by) rather than a maintained reverse-pointer column.
+    clauses = ["id NOT IN (SELECT supersedes FROM campaigns WHERE supersedes IS NOT NULL)"]
+    params: list = []
     if record_type:
         clauses.append("record_type = ?")
         params.append(record_type)
@@ -277,23 +287,39 @@ def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_t
 
 
 def delete_campaign(conn, campaign_id: str) -> bool:
-    """Delete a campaign and everything that's exclusively its own (§6.4): chunks, vectors,
-    metrics (all ON DELETE CASCADE). Evaluations that cited it are kept — they're a record of
-    a judgment that was made — but detached (ON DELETE SET NULL). If another record's
-    `supersedes` pointed here, that record is restored to active (its `superseded_by`
-    cleared), since the thing it replaced no longer exists to be "replaced.\""""
+    """Delete a campaign and everything that's exclusively its own (§6.4): chunks + their
+    text vectors, image assets + their pHash fingerprints, CLIP vectors, and the actual
+    files on disk (deck + images) — not just the SQL rows (review found the vectors and
+    files were being left behind, a leak and a GDPR-erasure gap). Metrics cascade (FK).
+    Evaluations that cited it are kept — they're a record of a judgment that was made — but
+    detached (ON DELETE SET NULL). `supersedes`/`is_superseded` are derived live from
+    `supersedes`, not a maintained pointer, so deleting a record automatically and correctly
+    updates what counts as superseded — nothing to clean up here for that."""
+    campaign = get_campaign(conn, campaign_id)
+    if not campaign:
+        return False
+
     chunk_ids = get_chunk_ids_for_campaign(conn, campaign_id)
     if chunk_ids:
         vectorstore.delete_many(conn, chunk_ids)
-    conn.execute("UPDATE campaigns SET superseded_by = NULL WHERE superseded_by = ?", (campaign_id,))
+
+    assets = get_assets_for_campaign(conn, campaign_id)
+    asset_ids = [a["id"] for a in assets]
+    if asset_ids:
+        vectorstore.delete_many(conn, asset_ids, space="asset")
+
+    for file_path in [campaign["asset_path"]] + [a["file_path"] for a in assets]:
+        if file_path:
+            (config.ASSET_DIR / file_path).unlink(missing_ok=True)
+
     cur = conn.execute("DELETE FROM campaigns WHERE id = ?", (campaign_id,))
     conn.commit()
     return cur.rowcount > 0
 
 
 def get_superseded_campaign_ids(conn) -> set[str]:
-    rows = conn.execute("SELECT id FROM campaigns WHERE superseded_by IS NOT NULL").fetchall()
-    return {r["id"] for r in rows}
+    rows = conn.execute("SELECT DISTINCT supersedes FROM campaigns WHERE supersedes IS NOT NULL").fetchall()
+    return {r["supersedes"] for r in rows}
 
 
 # ── campaign chunks (§6.1: one vector per chunk, not per campaign) ───────────
@@ -392,6 +418,31 @@ def get_all_fingerprints(conn, *, exclude_campaign_id: Optional[str] = None) -> 
         sql += " WHERE a.campaign_id != ?"
         params.append(exclude_campaign_id)
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def mark_asset_embedded(conn, asset_id: str) -> None:
+    conn.execute("UPDATE assets SET embedded = 1 WHERE id = ?", (asset_id,))
+    conn.commit()
+
+
+def list_assets(conn, *, campaign_ids: Optional[list[str]] = None,
+               exclude_campaign_id: Optional[str] = None) -> list[dict]:
+    """[{id, campaign_id, ...}] for CLIP similarity search (§6.6) — either restricted to a
+    filtered candidate set of campaigns, or all assets excluding one campaign's own."""
+    if campaign_ids is not None:
+        if not campaign_ids:
+            return []
+        placeholders = ",".join("?" * len(campaign_ids))
+        rows = conn.execute(
+            f"SELECT * FROM assets WHERE campaign_id IN ({placeholders})", campaign_ids
+        ).fetchall()
+    elif exclude_campaign_id:
+        rows = conn.execute(
+            "SELECT * FROM assets WHERE campaign_id != ?", (exclude_campaign_id,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM assets").fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── metrics ──────────────────────────────────────────────────────────────────

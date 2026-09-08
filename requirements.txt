@@ -10,3 +10,5 @@ pypdf>=4.0.0             # PDF extraction
 python-pptx>=0.6.23      # PPTX extraction
 Pillow>=10.0.0           # image loading for perceptual hashing
 imagehash>=4.3.0         # perceptual hashing (creative-reuse detection) - cheap, no ML
+torch>=2.0.0             # CLIP visual embeddings (aesthetic/regional similarity) - heavy, deliberate (see docs/PRODUCTION-ROADMAP.md §6.6)
+open_clip_torch>=3.0.0   # CLIP model loading

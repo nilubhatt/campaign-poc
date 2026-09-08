@@ -192,7 +192,7 @@ unmatched titles are per-row errors, never guessed, and valid rows still import 
 isn't passed explicitly — this is the actual fix that makes it functional; before, the user had
 to retype numbers that were already on file every time they wanted to reconcile.
 
-### 6.6 Image vectorization + creative-reuse detection  *(the SVP question)* — **pHash done (2026-09-08); CLIP not started**
+### 6.6 Image vectorization + creative-reuse detection  *(the SVP question)* — **Done (2026-09-08, pHash + CLIP)**
 Two techniques, two problems:
 - **Perceptual hashing (pHash/dHash — `imagehash` + Pillow):** catches the **same/near-same photo**
   (reused, incl. across regions) even after resize/recompress/light crop. Cheap, no ML. **Ship
@@ -215,17 +215,44 @@ CLIP, since exact/near-duplicate reuse is a pHash match by definition. New deps:
 doc's own "cheap, no ML, ship first" framing, added to `requirements.txt` without a separate
 confirmation gate.
 
-**CLIP is NOT implemented and was not started without checking in first** — it needs
-`torch`/a CLIP model (hundreds of MB to a few GB), which cuts directly against this product's
-"lean, local, free, no heavy ML" positioning and would significantly change PyInstaller bundle
-size across all three OS installers. This needs an explicit decision (and likely a design pass
-on whether it ships in the default bundle or as an optional extra) before writing any code
-against it.
+**CLIP layer implemented (2026-09-08), after explicit confirmation to carry the dependency
+weight.** New `clip_embed.py` — `open_clip_torch` + `torch`, model
+`ViT-B-32-quickgelu`/`openai` (the `-quickgelu` variant matters: open_clip warns of an
+activation-function mismatch against plain `ViT-B-32` with `openai` weights, which would
+subtly degrade embedding quality — verified no warning with the correct name). Real
+dependency cost, measured, not guessed: `torch` alone is a **121MB** wheel (macOS arm64 CPU
+build), plus a **~350MB** one-time model download on first use (`ViT-B-32`); Linux/Windows
+CPU wheels run similarly large. `vectorstore.py` gained a `space` parameter (default
+`"campaign"`, backward compatible) so CLIP's 512-dim vectors and text's 768-dim
+(nomic-embed-text) chunk vectors can coexist without sharing a fixed-width `vec0` column — a
+new `"asset"` space, initialized in `store.init_db()`. New `find_similar_images` tool
+(aesthetic/regional similarity, ranked by cosine similarity, same region-filter-first and
+region-mismatch-flag pattern as `check_image_provenance`/`find_similar` — the flag logic is
+shared via one helper, not duplicated). `ingest_image_asset` now does both pHash AND CLIP on
+upload, independently — one failing doesn't block the other.
 
-### 6.7 Extensible asset pipeline (audio/video pluggable later) — **assets/asset_fingerprints done (2026-09-08) as part of §6.6; asset_vectors (CLIP) not started**
+**Kept offline-testable the same way `embedding.py`'s text embedder already is:** a
+`CAMPAIGN_POC_CLIP_PROVIDER=hash` test provider (`clip_embed.py`, pixel-hash based, NOT
+semantically meaningful) means the automated test suite never downloads a model or imports
+`torch`'s heavy paths at runtime, matching the existing `EMBED_PROVIDER=hash` convention.
+Real `openclip` provider verified end-to-end manually (actual model download from the
+`timm/vit_base_patch32_clip_224.openai` HF checkpoint, real embedding, correct region-flag
+output, confirmed JSON-serializable through the MCP tool layer) — not exercised by CI.
+
+README/requirements.txt updated — the "no CLIP/torch" line is gone; replaced with the actual
+size tradeoff stated plainly.
+
+### 6.7 Extensible asset pipeline (audio/video pluggable later) — **Done (2026-09-08) for image; audio/video not started**
 Generic `assets` (modality) + `asset_fingerprints` (pHash) + `asset_vectors` (CLIP), keyed by
 asset. **Video = keyframes → the image pipeline** (reused clips share keyframes — nearly free once
 images work). **Audio later** = audio fingerprint + embedding, same shape.
+
+The generic shape is fully in place for `image`: `assets.modality` column, `asset_fingerprints`
+(pHash), and CLIP vectors live in `vectorstore`'s `"asset"` space (the module's generic
+`space`/`dim` params ARE the "asset_vectors, keyed by asset" the doc asked for — no separate
+table needed). Adding `video`/`audio` later is: extract representative frames/audio segments,
+reuse `images.phash`/`clip_embed.embed_image` unchanged on keyframes, same `assets` row shape
+with `modality='video'`/`'audio'`. Not built — no video/audio ingestion exists yet to feed it.
 
 ### 6.8 Minor — **Done (2026-09-08), one item unreproducible**
 Trim `find_similar` payload (summary by default, full detail on request); fix `&` stored as
@@ -316,9 +343,8 @@ is the highest-value non-engineering action.
    (2026-09-08) — ran end-to-end locally; §6 below is the feedback from that run.
 2. **v0.2:** the §6 features (chunking, filters, schema, CRUD, metrics, image pHash + CLIP,
    conversational intake) — data reloaded fresh. **§6.1–6.9 together are considered the bar for a
-   complete v1 product** — not a partial cut of them. **Status (2026-09-08): §6.1–6.5, 6.8, 6.9
-   done; §6.6/6.7 done for the pHash/generic-asset half, CLIP (asset_vectors, aesthetic/regional
-   similarity) intentionally not started pending a decision on the torch/model-size dependency —
-   see §6.6.** 114 tests passing (`tests/`), CI (`test.yml`) runs them on every push/PR.
+   complete v1 product** — not a partial cut of them. **Status (2026-09-08): §6.1–6.9 all done**,
+   including CLIP (confirmed by the user to carry the torch/model-size dependency — see §6.6).
+   131 tests passing (`tests/`), CI (`test.yml`) runs them on every push/PR.
 3. **Central deploy:** Postgres, Docker on the VM, TLS (Front Door / App Gateway), **Entra OAuth**
    via the pluggable provider, access scoping via group claims.

@@ -31,6 +31,20 @@ def test_list_campaigns_filters_by_record_type_and_status(conn):
     assert len(store.list_campaigns(conn, record_type="campaign", status="concluded")) == 2
 
 
+def test_list_campaigns_shows_is_superseded(conn):
+    """Design review finding: list_campaigns hid supersedes/is_superseded, so a dead and a
+    live version of the same deck were indistinguishable in a listing - the exact bug §6.4
+    was written to fix, just moved from get_campaign to list_campaigns."""
+    old = store.insert_campaign(conn, title="Mexico Push (draft)")
+    new = store.insert_campaign(conn, title="Mexico Push (final)", supersedes=old)
+
+    rows = {r["id"]: r for r in store.list_campaigns(conn)}
+    assert rows[old]["is_superseded"] is True
+    assert rows[old]["supersedes"] is None
+    assert rows[new]["is_superseded"] is False
+    assert rows[new]["supersedes"] == old
+
+
 def test_reference_and_stub_records_have_no_status_by_default(conn):
     ref = store.insert_campaign(conn, title="Brand guidelines", record_type="reference")
     stub = store.insert_campaign(conn, title="Placeholder", record_type="stub")

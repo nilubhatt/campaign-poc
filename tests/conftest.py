@@ -20,6 +20,7 @@ def conn(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "ASSET_DIR", tmp_path / "assets")
     monkeypatch.setattr(config, "UPLOAD_DIR", tmp_path / "uploads")
     monkeypatch.setattr(config, "EMBED_PROVIDER", "hash")
+    monkeypatch.setattr(config, "CLIP_PROVIDER", "hash")
 
     store.init_db()
     c = store.connect()
