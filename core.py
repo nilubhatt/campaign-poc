@@ -32,7 +32,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                     deck_text: Optional[str] = None, record_type: str = "campaign",
                     status: Optional[str] = None, tags: Optional[list[str]] = None,
                     region: Optional[str] = None, market: Optional[str] = None,
-                    asset_ref: Optional[dict] = None) -> dict:
+                    supersedes: Optional[str] = None, asset_ref: Optional[dict] = None) -> dict:
     """
     Store a past/proposed campaign, chunk it, and embed each chunk for search (§6.1).
 
@@ -61,7 +61,8 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
 
     cid = store.insert_campaign(
         conn, title=title, record_type=record_type, status=status, tags=tags, region=region,
-        market=market, detail=detail, deck_text=deck_text, asset_path=stored_path,
+        market=market, supersedes=supersedes, detail=detail, deck_text=deck_text,
+        asset_path=stored_path,
     )
 
     if not units and deck_text:
@@ -138,6 +139,10 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
         hits = embedding.rank(qvec, list(vecs.items()), top_k=top_k * _SEARCH_OVERFETCH)
     else:
         exclude_chunks = set(store.get_chunk_ids_for_campaign(conn, campaign_id)) if campaign_id else set()
+        superseded_ids = store.get_superseded_campaign_ids(conn)
+        if superseded_ids:
+            for chids in store.get_chunk_ids_for_campaigns(conn, list(superseded_ids)).values():
+                exclude_chunks.update(chids)
         hits = vectorstore.search(conn, qvec, top_k=top_k * _SEARCH_OVERFETCH, exclude=exclude_chunks)
 
     chunk_to_campaign = store.map_chunks_to_campaigns(conn, [chunk_id for chunk_id, _ in hits])

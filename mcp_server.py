@@ -22,7 +22,8 @@ mcp = MCPServer("campaign-intelligence")
 def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optional[str] = None,
                     record_type: str = "campaign", status: Optional[str] = None,
                     tags: Optional[list] = None, region: Optional[str] = None,
-                    market: Optional[str] = None, asset_ref: Optional[dict] = None) -> dict:
+                    market: Optional[str] = None, supersedes: Optional[str] = None,
+                    asset_ref: Optional[dict] = None) -> dict:
     """Store a past or proposed campaign in the memory. From Claude Web, pass deck_text (the
     text you read from the attached PDF/PPTX) plus any freeform detail you have (brief,
     audience, budget, channel, timeline). The server chunks and embeds it per slide/section
@@ -35,6 +36,10 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
     (e.g. region='APAC', market='Philippines'). These structured fields let
     find_similar_campaigns / prepare_evaluation filter before ranking by similarity.
 
+    Pass supersedes=<campaign_id> if this record replaces an existing one (e.g. a corrected
+    deck) — the old record is then excluded from future search evidence, so it stops
+    confusing retrieval, without being deleted.
+
     Add results later with add_metrics. Returns the campaign_id plus
     chunks_total/chunks_embedded (partial embedding failures are reported per-chunk in
     warnings, not silently)."""
@@ -42,7 +47,44 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
     try:
         return core.ingest_campaign(conn, title=title, detail=detail, deck_text=deck_text,
                                     record_type=record_type, status=status, tags=tags,
-                                    region=region, market=market, asset_ref=asset_ref)
+                                    region=region, market=market, supersedes=supersedes,
+                                    asset_ref=asset_ref)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optional[str] = None,
+                    record_type: Optional[str] = None, status: Optional[str] = None,
+                    tags: Optional[list] = None, region: Optional[str] = None,
+                    market: Optional[str] = None) -> dict:
+    """Edit a campaign's metadata (title, detail, record_type, status, tags, region, market).
+    Only the fields you pass change. tags, if given, fully REPLACES the existing list (not a
+    merge) — pass the complete new list. Does NOT change deck_text/chunks/embeddings; for
+    content changes, upload a new record and pass supersedes=campaign_id instead."""
+    conn = store.connect()
+    try:
+        ok = store.update_campaign(conn, campaign_id, title=title, detail=detail,
+                                   record_type=record_type, status=status, tags=tags,
+                                   region=region, market=market)
+        if not ok:
+            return {"error": f"campaign {campaign_id} not found"}
+        return store.get_campaign(conn, campaign_id)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def delete_campaign(campaign_id: str) -> dict:
+    """Permanently delete a campaign and its chunks/vectors/metrics. Evaluations that cited
+    it are kept but detached. If this record superseded another one, that older record is
+    restored to active (no longer excluded from search)."""
+    conn = store.connect()
+    try:
+        ok = store.delete_campaign(conn, campaign_id)
+        if not ok:
+            return {"error": f"campaign {campaign_id} not found"}
+        return {"campaign_id": campaign_id, "status": "deleted"}
     finally:
         conn.close()
 

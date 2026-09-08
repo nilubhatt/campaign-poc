@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
     tags          TEXT NOT NULL DEFAULT '[]',   -- JSON array of freeform strings, no fixed taxonomy
     region        TEXT,            -- freeform, e.g. "APAC"
     market        TEXT,            -- freeform, e.g. "Philippines"
+    supersedes    TEXT,            -- campaign_id this record replaces (§6.4), if any
+    superseded_by TEXT,            -- reverse pointer, set automatically when supersedes is used
     detail        TEXT,            -- freeform: brief, audience, budget, channel, timeline, anything
     deck_text     TEXT,            -- extracted PDF/PPTX text
     asset_path    TEXT,            -- stored original file (relative to ASSET_DIR)
@@ -101,18 +103,23 @@ def _id(prefix: str) -> str:
 # ── campaigns ────────────────────────────────────────────────────────────────
 
 def insert_campaign(conn, *, title, record_type="campaign", status=None, detail=None,
-                    deck_text=None, asset_path=None, tags=None, region=None, market=None) -> str:
+                    deck_text=None, asset_path=None, tags=None, region=None, market=None,
+                    supersedes=None) -> str:
     cid = _id("camp")
     now = _now()
     if status is None and record_type == "campaign":
         status = "concluded"  # reference/stub records have no lifecycle status by default
     conn.execute(
         """INSERT INTO campaigns (id, title, record_type, status, tags, region, market,
-                                  detail, deck_text, asset_path, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (cid, title, record_type, status, json.dumps(tags or []), region, market,
+                                  supersedes, detail, deck_text, asset_path, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (cid, title, record_type, status, json.dumps(tags or []), region, market, supersedes,
          detail, deck_text, asset_path, now, now),
     )
+    if supersedes:
+        # Reverse pointer for cheap "exclude superseded" filtering. A nonexistent target is
+        # a harmless no-op (0 rows updated) — supersedes stays on the new row for traceability.
+        conn.execute("UPDATE campaigns SET superseded_by = ? WHERE id = ?", (cid, supersedes))
     conn.commit()
     return cid
 
@@ -172,7 +179,7 @@ def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Opti
     freeform and matched case-insensitively; tags matches if the campaign has ANY of the
     given tags (no fixed taxonomy — §6.3 decision).
     """
-    clauses, params = [], []
+    clauses, params = ["superseded_by IS NULL"], []  # §6.4: never surface a replaced record
     if record_type:
         clauses.append("record_type = ?")
         params.append(record_type)
@@ -189,9 +196,7 @@ def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Opti
         clauses.append("id != ?")
         params.append(exclude_campaign_id)
 
-    sql = "SELECT id, tags FROM campaigns"
-    if clauses:
-        sql += " WHERE " + " AND ".join(clauses)
+    sql = "SELECT id, tags FROM campaigns WHERE " + " AND ".join(clauses)
     sql += " ORDER BY created_at"
     rows = conn.execute(sql, params).fetchall()
 
@@ -200,6 +205,58 @@ def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Opti
         rows = [r for r in rows if wanted & {t.lower() for t in json.loads(r["tags"] or "[]")}]
 
     return [r["id"] for r in rows]
+
+
+def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_type=None,
+                    status=None, tags=None, region=None, market=None) -> bool:
+    """Update campaign metadata (§6.4) — NOT deck_text/chunks/embeddings; re-upload (or
+    supersede) for content changes. Only given fields change; tags, if given, fully replaces
+    the existing list rather than merging. Returns whether the campaign exists."""
+    fields, params = [], []
+    if title is not None:
+        fields.append("title = ?"); params.append(title)
+    if detail is not None:
+        fields.append("detail = ?"); params.append(detail)
+    if record_type is not None:
+        fields.append("record_type = ?"); params.append(record_type)
+    if status is not None:
+        fields.append("status = ?"); params.append(status)
+    if tags is not None:
+        fields.append("tags = ?"); params.append(json.dumps(tags))
+    if region is not None:
+        fields.append("region = ?"); params.append(region)
+    if market is not None:
+        fields.append("market = ?"); params.append(market)
+
+    if not fields:
+        return get_campaign(conn, campaign_id) is not None
+
+    fields.append("updated_at = ?")
+    params.append(_now())
+    params.append(campaign_id)
+    cur = conn.execute(f"UPDATE campaigns SET {', '.join(fields)} WHERE id = ?", params)
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_campaign(conn, campaign_id: str) -> bool:
+    """Delete a campaign and everything that's exclusively its own (§6.4): chunks, vectors,
+    metrics (all ON DELETE CASCADE). Evaluations that cited it are kept — they're a record of
+    a judgment that was made — but detached (ON DELETE SET NULL). If another record's
+    `supersedes` pointed here, that record is restored to active (its `superseded_by`
+    cleared), since the thing it replaced no longer exists to be "replaced.\""""
+    chunk_ids = get_chunk_ids_for_campaign(conn, campaign_id)
+    if chunk_ids:
+        vectorstore.delete_many(conn, chunk_ids)
+    conn.execute("UPDATE campaigns SET superseded_by = NULL WHERE superseded_by = ?", (campaign_id,))
+    cur = conn.execute("DELETE FROM campaigns WHERE id = ?", (campaign_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def get_superseded_campaign_ids(conn) -> set[str]:
+    rows = conn.execute("SELECT id FROM campaigns WHERE superseded_by IS NOT NULL").fetchall()
+    return {r["id"] for r in rows}
 
 
 # ── campaign chunks (§6.1: one vector per chunk, not per campaign) ───────────

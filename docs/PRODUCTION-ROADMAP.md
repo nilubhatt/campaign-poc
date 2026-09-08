@@ -162,9 +162,20 @@ Schema change: `campaigns.kind` column removed entirely, replaced by `record_typ
 decision; this was already true after §6.1's chunk-table change, so the same local DB reload
 covers both.
 
-### 6.4 Lifecycle: CRUD + supersede
+### 6.4 Lifecycle: CRUD + supersede — **Done (2026-09-08)**
 `delete_campaign`, `update_campaign`, and a **`supersedes`** field. Today every mistake is
 permanent (the Mexico deck exists twice, dead + live, with nothing saying one replaces the other).
+
+`campaigns` gains `supersedes` (the id this record replaces) and an auto-maintained reverse
+pointer `superseded_by`; `find_similar`/`filter_campaign_ids` always exclude superseded records
+from search evidence (both the filtered and the unfiltered ANN path) — direct `get_campaign`/
+`list_campaigns` lookups still show them, only evidence ranking hides them. `delete_campaign`
+cascades chunks/vectors/metrics, detaches (not deletes) any evaluation that cited it, and
+restores an old record to active if the thing that superseded it gets deleted. `update_campaign`
+is metadata-only (title/detail/record_type/status/tags/region/market) — NOT deck_text/chunks;
+content changes go through a new upload + `supersedes`, by design (avoids the complexity of
+re-chunking/re-embedding in place). `supersedes` is set only at creation, not editable via
+`update_campaign` — kept simple; changing what a record supersedes after the fact is deferred.
 
 ### 6.5 Metrics as first-class + bulk import
 Distinguish **prediction vs actual**; `list_campaigns` should show whether a record has

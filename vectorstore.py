@@ -129,5 +129,20 @@ def get_many(conn: sqlite3.Connection, vector_ids: list[str]) -> dict[str, list[
     return {r["vector_id"]: json.loads(r["embedding"]) for r in rows}
 
 
+def delete_many(conn: sqlite3.Connection, vector_ids: list[str]) -> None:
+    """Purge vectors for deleted chunks (§6.4) — otherwise they'd sit as stale rows a search
+    could still fetch, relying on the caller-side campaign lookup silently dropping them."""
+    if not vector_ids:
+        return
+    placeholders = ",".join("?" * len(vector_ids))
+    if _try_load_vec(conn):
+        conn.execute(f"DELETE FROM campaign_vectors WHERE vector_id IN ({placeholders})", vector_ids)
+    else:
+        conn.execute(
+            f"DELETE FROM campaign_vectors_fallback WHERE vector_id IN ({placeholders})", vector_ids
+        )
+    conn.commit()
+
+
 def backend_name(conn: sqlite3.Connection) -> str:
     return "sqlite-vec" if _try_load_vec(conn) else "python-cosine-fallback"
