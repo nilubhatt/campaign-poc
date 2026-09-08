@@ -354,6 +354,44 @@ is the highest-value non-engineering action.
 
 ---
 
+## 8.5 Adversarial + design review round (2026-09-08)
+
+After §6.1–6.9 landed, two independent fresh reviewers (no prior context on this session)
+reviewed the full diff — one adversarial code review, one architecture/design review. Real,
+verified findings were fixed across three follow-up commits (each TDD — a failing test
+reproducing the bug, confirmed red, before the fix): the `_keep_asset` filename-collision
+data-loss bug, `delete_campaign` leaking CLIP vectors + files, the `supersedes`/
+`superseded_by` design flaw (a maintained reverse-pointer breaks on supersession chains and
+fan-in — replaced with a live-derived query), two real search bugs (over-fetch starvation
+before the per-campaign rollup, and a sqlite-vec `k`-limit crash from folding superseded
+campaigns into the ANN exclude set), inconsistent nonexistent-id handling across five entry
+points, `bulk_import_metrics` crashing on a malformed row, `reconcile_evaluation` dropping
+structured-only actuals, missing `record_type`/`status`/`tags` validation, a `clip_embed`
+model-loading race, two tool-surface gaps (`list_evaluations` missing, `get_campaign` not
+showing image assets), and `POST /upload` silently rejecting images its own docs said it
+accepted.
+
+**Deferred, not fixed** (real observations, judged lower-value or higher-risk to fix
+reactively than to plan properly):
+- **PyInstaller + torchvision packaging is verified broken** (§6.6) — needs dedicated
+  packaging work, not a rushed fix.
+- `asset_fingerprints` is a 1:1 table with one column — neither a plain column on `assets`
+  nor a proper multi-fingerprint table `(asset_id, kind, value)` that audio fingerprints
+  (§6.7) would eventually want. Revisit when audio is actually built.
+- Decks (`campaigns.asset_path`) and images (`assets` table) are two different asset
+  models — unifying them into one generic asset table is a real simplification but a bigger
+  schema change than this round should absorb reactively.
+- `metrics.metric_type='predicted'` has no reader anywhere (only `'actual'` is consulted by
+  `reconcile_evaluation`) — not wrong, just unused; revisit if a predicted-vs-actual variance
+  report is ever built, or drop the option.
+- `update_campaign`'s `tags` replace is arguably as deserving of the §6.9 confirm-before-write
+  gate as `add_metrics` is (design review's point) — not added, to keep the gate scoped to the
+  two tools actually fed by free-text conversational parsing.
+- The confirm=False preview on `upload_campaign` only echoes the fields given; it doesn't
+  resolve `asset_ref` or validate a `supersedes` target, so a preview can look fine and still
+  fail (differently) on the `confirm=True` call. A fuller preview (cheap existence checks
+  without doing the full extract/chunk/embed work) would close that gap.
+
 ## 9. Sequence
 
 1. **Now:** local Windows end-to-end green (Desktop + server + Ollama), campaigns loaded. **Done**
@@ -362,6 +400,7 @@ is the highest-value non-engineering action.
    conversational intake) — data reloaded fresh. **§6.1–6.9 together are considered the bar for a
    complete v1 product** — not a partial cut of them. **Status (2026-09-08): §6.1–6.9 all done**,
    including CLIP (confirmed by the user to carry the torch/model-size dependency — see §6.6).
-   131 tests passing (`tests/`), CI (`test.yml`) runs them on every push/PR.
+   169 tests passing (`tests/`) after an adversarial + design review round (§8.5) — CI
+   (`test.yml`) runs them on every push/PR.
 3. **Central deploy:** Postgres, Docker on the VM, TLS (Front Door / App Gateway), **Entra OAuth**
    via the pluggable provider, access scoping via group claims.
