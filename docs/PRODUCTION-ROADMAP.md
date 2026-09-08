@@ -105,11 +105,28 @@ key off them later. See `auth.py`.
 Driven by real-use feedback (the memory was "a well-organised brief archive, not a performance
 memory") plus the SVP's creative-reuse question.
 
-### 6.1 Chunk `deck_text` server-side  *(highest leverage — one change fixes three problems)*
+### 6.1 Chunk `deck_text` server-side  *(highest leverage — one change fixes three problems)* — **Done (2026-09-08)**
 Split each deck by slide/section, embed **each chunk**, store multiple vectors per campaign,
 search chunks and roll up to campaigns. Fixes: (a) the **silent embedding failure** (long deck →
-Ollama 500 → record saved but `embedded:false` hidden in warnings → unsearchable orphan; current
+Ollama 500 → record saved but `embedded:false` hidden in warnings → unsearchable orphan; former
 ceiling ~6.8k–9k chars), (b) the size limit, (c) delivers the **per-slide granularity** asked for.
+
+Implemented on `v0.2-feature-backlog`: `extract.py` returns one unit per PDF page/PPTX slide
+(natural chunks); `chunking.py` packs any text (natural units, or a flat `deck_text` string from
+the LLM-first path with no boundaries) into pieces ≤ `MAX_CHUNK_CHARS` (default 1800, env
+`CAMPAIGN_POC_MAX_CHUNK_CHARS`); new `campaign_chunks` table, one row per chunk; `vectorstore.py`
+now keys vectors by chunk id, not campaign id; `core.ingest_campaign` embeds each chunk
+independently so one oversized/rejected chunk no longer silently drops the whole campaign — it's
+reported per-chunk in `warnings`, with `chunks_total`/`chunks_embedded` on the response;
+`core.find_similar` searches chunks (over-fetching 4x `top_k`) and rolls up to the
+best-matching chunk per campaign, returning `matched_excerpt` (the actual matched slide/section,
+not a naive text prefix). 14 pytest tests added (`tests/`, offline `hash` provider + a real
+generated `.pptx` for the extraction path) and verified end-to-end against live Ollama too. CI
+gained a `test.yml` workflow (pytest on push/PR — there was no test workflow before).
+
+**Note:** this changed the SQLite schema (new table + a renamed vector-store column) — an
+existing local `campaigns.db` from before this change needs to be deleted/reloaded (consistent
+with the locked "reload OK" decision above), not migrated.
 
 ### 6.2 Filter **before** similarity  *(fixes "can't discriminate")*
 On a single-brand corpus, pure vector search returns noise (observed band 0.67–0.84, everything

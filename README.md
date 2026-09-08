@@ -64,11 +64,12 @@ Offline smoke test (no Ollama): `CAMPAIGN_POC_EMBED_PROVIDER=hash python -m http
 
 ```
 config.py        env-driven config
-store.py         SQLite schema + CRUD (campaigns, metrics, evaluations, reconciliations)
-vectorstore.py   sqlite-vec vector table (+ pure-Python cosine fallback)
+store.py         SQLite schema + CRUD (campaigns, campaign_chunks, metrics, evaluations, reconciliations)
+vectorstore.py   sqlite-vec vector table, keyed by chunk id (+ pure-Python cosine fallback)
 embedding.py     ollama | voyage | hash embedders + cosine
-extract.py       PDF / PPTX text extraction
-core.py          ingest + semantic retrieval + evidence packaging (LLM-first)
+extract.py       PDF / PPTX text extraction, one unit per page/slide
+chunking.py      packs text units into embeddable chunks (server-side, per slide/section)
+core.py          ingest + chunk + semantic retrieval + evidence packaging (LLM-first)
 mcp_server.py    MCPServer tools (the API Claude calls)
 http_app.py      Streamable-HTTP app (/mcp) + /upload + /healthz
 auth.py          no-op auth seam (OAuth goes here)
@@ -94,8 +95,10 @@ Both **Claude Web** (custom connector → `<tunnel-url>/mcp`) and **Claude Deskt
 ## Roadmap
 
 This is being extended into the full product — a central multi-user server (Postgres + pgvector,
-chunked text + CLIP image vectors + perceptual-hash creative-reuse detection, region-scoped
-metadata, pluggable OAuth). Current priority is local end-to-end; production/OAuth/deploy is
+CLIP image vectors + perceptual-hash creative-reuse detection, region-scoped metadata, pluggable
+OAuth). Server-side chunking (per slide/section, one vector per chunk) already ships locally —
+the central move swaps the vector store for pgvector, same chunking. Current priority is local
+end-to-end; production/OAuth/deploy is
 captured in **[docs/PRODUCTION-ROADMAP.md](docs/PRODUCTION-ROADMAP.md)**. Auth is already a
 **pluggable provider** (`auth.py`) — no-op today, drop in Azure AD / any OIDC without touching call sites.
 

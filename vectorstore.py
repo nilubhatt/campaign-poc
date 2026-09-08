@@ -8,7 +8,9 @@ cosine over the same vectors stored in a plain table — so the product still ru
 just without the ANN index. Same `add()` / `search()` interface either way, so swapping in
 Postgres+pgvector later is a single-module change.
 
-Vectors are keyed by campaign id and kept in sync with the campaigns table.
+Vectors are keyed by `vector_id` — a chunk id (§6.1: one vector per chunk, several chunks
+per campaign), not a campaign id. Callers roll chunk-level hits up to campaigns themselves
+(see core.find_similar) via campaign_chunks.
 """
 from __future__ import annotations
 
@@ -50,31 +52,31 @@ def init(conn: sqlite3.Connection) -> None:
         # the default is L2, under which `1 - distance` below would be meaningless.
         conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS campaign_vectors USING vec0("
-            f"campaign_id TEXT PRIMARY KEY, "
+            f"vector_id TEXT PRIMARY KEY, "
             f"embedding float[{config.EMBED_DIM}] distance_metric=cosine)"
         )
     else:
         # Fallback: store the raw vector as JSON; search brute-forces in Python.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS campaign_vectors_fallback ("
-            "campaign_id TEXT PRIMARY KEY, embedding TEXT NOT NULL)"
+            "vector_id TEXT PRIMARY KEY, embedding TEXT NOT NULL)"
         )
     conn.commit()
 
 
-def add(conn: sqlite3.Connection, campaign_id: str, vec: list[float]) -> None:
+def add(conn: sqlite3.Connection, vector_id: str, vec: list[float]) -> None:
     if len(vec) != config.EMBED_DIM:
         raise ValueError(f"embedding dim {len(vec)} != configured EMBED_DIM {config.EMBED_DIM}")
     if _try_load_vec(conn):
-        conn.execute("DELETE FROM campaign_vectors WHERE campaign_id = ?", (campaign_id,))
+        conn.execute("DELETE FROM campaign_vectors WHERE vector_id = ?", (vector_id,))
         conn.execute(
-            "INSERT INTO campaign_vectors (campaign_id, embedding) VALUES (?, ?)",
-            (campaign_id, _pack(vec)),
+            "INSERT INTO campaign_vectors (vector_id, embedding) VALUES (?, ?)",
+            (vector_id, _pack(vec)),
         )
     else:
         conn.execute(
-            "INSERT OR REPLACE INTO campaign_vectors_fallback (campaign_id, embedding) VALUES (?, ?)",
-            (campaign_id, json.dumps(vec)),
+            "INSERT OR REPLACE INTO campaign_vectors_fallback (vector_id, embedding) VALUES (?, ?)",
+            (vector_id, json.dumps(vec)),
         )
     conn.commit()
 
@@ -82,26 +84,26 @@ def add(conn: sqlite3.Connection, campaign_id: str, vec: list[float]) -> None:
 def search(conn: sqlite3.Connection, query_vec: list[float], *,
            top_k: int = 5, exclude: Optional[set[str]] = None) -> list[tuple[str, float]]:
     """
-    Return [(campaign_id, similarity)] best-first. similarity is cosine in [-1, 1]
+    Return [(vector_id, similarity)] best-first. similarity is cosine in [-1, 1]
     (converted from sqlite-vec's cosine *distance* so both backends agree on meaning).
     """
     exclude = exclude or set()
     if _try_load_vec(conn):
         # over-fetch so post-filtering `exclude` still yields top_k
         rows = conn.execute(
-            "SELECT campaign_id, distance FROM campaign_vectors "
+            "SELECT vector_id, distance FROM campaign_vectors "
             "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
             (_pack(query_vec), top_k + len(exclude)),
         ).fetchall()
-        out = [(r["campaign_id"], 1.0 - r["distance"]) for r in rows if r["campaign_id"] not in exclude]
+        out = [(r["vector_id"], 1.0 - r["distance"]) for r in rows if r["vector_id"] not in exclude]
         return out[:top_k]
 
     # fallback: brute-force cosine
     import embedding as _emb
-    rows = conn.execute("SELECT campaign_id, embedding FROM campaign_vectors_fallback").fetchall()
+    rows = conn.execute("SELECT vector_id, embedding FROM campaign_vectors_fallback").fetchall()
     scored = [
-        (r["campaign_id"], _emb.cosine(query_vec, json.loads(r["embedding"])))
-        for r in rows if r["campaign_id"] not in exclude
+        (r["vector_id"], _emb.cosine(query_vec, json.loads(r["embedding"])))
+        for r in rows if r["vector_id"] not in exclude
     ]
     scored.sort(key=lambda t: t[1], reverse=True)
     return scored[:top_k]

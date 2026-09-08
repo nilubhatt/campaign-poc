@@ -24,6 +24,9 @@ UPLOAD_DIR = DATA_DIR / "uploads"        # staging for over-the-wire uploads
 MAX_DOC_TEXT_CHARS = int(os.getenv("CAMPAIGN_POC_MAX_DOC_CHARS", "40000"))
 MAX_PDF_PAGES = int(os.getenv("CAMPAIGN_POC_MAX_PDF_PAGES", "60"))
 MAX_PPTX_SLIDES = int(os.getenv("CAMPAIGN_POC_MAX_PPTX_SLIDES", "120"))
+# Chunk size for embedding (§6.1): well under the ~6.8k-9k char point where a whole-deck
+# embed() call started silently failing against real providers.
+MAX_CHUNK_CHARS = int(os.getenv("CAMPAIGN_POC_MAX_CHUNK_CHARS", "1800"))
 # POC accepts only presentation/document formats — the use case is decks + briefs.
 ALLOWED_MIME = {
     "application/pdf",

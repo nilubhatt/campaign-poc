@@ -23,8 +23,10 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
                     kind: str = "concluded", asset_ref: Optional[dict] = None) -> dict:
     """Store a past or proposed campaign in the memory. From Claude Web, pass deck_text (the
     text you read from the attached PDF/PPTX) plus any freeform detail you have (brief,
-    audience, budget, channel, timeline). Add results later with add_metrics. kind is
-    'concluded' or 'proposal'. Returns the campaign_id."""
+    audience, budget, channel, timeline). The server chunks and embeds it per slide/section
+    for search. Add results later with add_metrics. kind is 'concluded' or 'proposal'.
+    Returns the campaign_id plus chunks_total/chunks_embedded (partial embedding failures
+    are reported per-chunk in warnings, not silently)."""
     conn = store.connect()
     try:
         return core.ingest_campaign(conn, title=title, detail=detail, deck_text=deck_text,
@@ -74,8 +76,10 @@ def get_campaign(campaign_id: str) -> dict:
 def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str] = None,
                            top_k: int = 5) -> dict:
     """Semantic search: find prior campaigns most similar to a description (text) or to an
-    existing campaign (campaign_id). Returns ranked evidence — title, similarity, detail, and
-    metrics — for you to reason over."""
+    existing campaign (campaign_id). Matches at the slide/section level and rolls up to the
+    best-matching campaign, so long decks match on the relevant part. Returns ranked
+    evidence — title, similarity, detail, the matched excerpt, and metrics — for you to
+    reason over."""
     conn = store.connect()
     try:
         return {"matches": core.find_similar(conn, text=text, campaign_id=campaign_id, top_k=top_k)}

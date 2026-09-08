@@ -32,6 +32,14 @@ CREATE TABLE IF NOT EXISTS campaigns (
     created_at    REAL NOT NULL,
     updated_at    REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS campaign_chunks (
+    id            TEXT PRIMARY KEY,
+    campaign_id   TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    chunk_index   INTEGER NOT NULL,
+    text          TEXT NOT NULL,
+    embedded      INTEGER NOT NULL DEFAULT 0,
+    created_at    REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS metrics (
     id            TEXT PRIMARY KEY,
     campaign_id   TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -55,6 +63,7 @@ CREATE TABLE IF NOT EXISTS reconciliations (
     comparison    TEXT NOT NULL,   -- Claude's prediction-vs-actual reconciliation + lesson learned
     created_at    REAL NOT NULL
 );
+CREATE INDEX IF NOT EXISTS chunks_campaign_idx   ON campaign_chunks(campaign_id);
 CREATE INDEX IF NOT EXISTS metrics_campaign_idx ON metrics(campaign_id);
 CREATE INDEX IF NOT EXISTS evals_campaign_idx   ON evaluations(campaign_id);
 CREATE INDEX IF NOT EXISTS recon_eval_idx       ON reconciliations(evaluation_id);
@@ -101,12 +110,12 @@ def insert_campaign(conn, *, title, kind="concluded", detail=None, deck_text=Non
     return cid
 
 
-def set_embedding(conn, campaign_id: str, embedding: list[float]) -> None:
-    """Store a campaign's vector in the vector store and flag it embedded."""
-    vectorstore.add(conn, campaign_id, embedding)
+def mark_embedded(conn, campaign_id: str, flag: bool) -> None:
+    """Flag whether a campaign has at least one embedded chunk (§6.1: many chunks per
+    campaign now hold the actual vectors — this is just the rollup for list/get display)."""
     conn.execute(
-        "UPDATE campaigns SET embedded = 1, updated_at = ? WHERE id = ?",
-        (_now(), campaign_id),
+        "UPDATE campaigns SET embedded = ?, updated_at = ? WHERE id = ?",
+        (1 if flag else 0, _now(), campaign_id),
     )
     conn.commit()
 
@@ -119,6 +128,11 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
     d["metrics"] = [dict(m) for m in conn.execute(
         "SELECT * FROM metrics WHERE campaign_id = ? ORDER BY created_at", (campaign_id,)
     ).fetchall()]
+    chunk_rows = conn.execute(
+        "SELECT embedded FROM campaign_chunks WHERE campaign_id = ?", (campaign_id,)
+    ).fetchall()
+    d["chunks_total"] = len(chunk_rows)
+    d["chunks_embedded"] = sum(1 for r in chunk_rows if r["embedded"])
     return d
 
 
@@ -128,6 +142,52 @@ def list_campaigns(conn, *, kind: Optional[str] = None) -> list[dict]:
     else:
         rows = conn.execute("SELECT * FROM campaigns ORDER BY created_at").fetchall()
     return [dict(r) for r in rows]
+
+
+# ── campaign chunks (§6.1: one vector per chunk, not per campaign) ───────────
+
+def insert_chunks(conn, campaign_id: str, texts: list[str]) -> list[str]:
+    now = _now()
+    ids = []
+    for i, text in enumerate(texts):
+        chid = _id("chunk")
+        conn.execute(
+            """INSERT INTO campaign_chunks (id, campaign_id, chunk_index, text, created_at)
+               VALUES (?,?,?,?,?)""",
+            (chid, campaign_id, i, text, now),
+        )
+        ids.append(chid)
+    conn.commit()
+    return ids
+
+
+def set_chunk_embedded(conn, chunk_id: str) -> None:
+    conn.execute("UPDATE campaign_chunks SET embedded = 1 WHERE id = ?", (chunk_id,))
+    conn.commit()
+
+
+def get_chunk(conn, chunk_id: str) -> Optional[dict]:
+    row = conn.execute("SELECT * FROM campaign_chunks WHERE id = ?", (chunk_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_chunk_ids_for_campaign(conn, campaign_id: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT id FROM campaign_chunks WHERE campaign_id = ?", (campaign_id,)
+    ).fetchall()
+    return [r["id"] for r in rows]
+
+
+def map_chunks_to_campaigns(conn, chunk_ids: list[str]) -> dict[str, str]:
+    """Bulk chunk_id -> campaign_id, for rolling up chunk-level search hits."""
+    if not chunk_ids:
+        return {}
+    placeholders = ",".join("?" * len(chunk_ids))
+    rows = conn.execute(
+        f"SELECT id, campaign_id FROM campaign_chunks WHERE id IN ({placeholders})",
+        chunk_ids,
+    ).fetchall()
+    return {r["id"]: r["campaign_id"] for r in rows}
 
 
 # ── metrics ──────────────────────────────────────────────────────────────────

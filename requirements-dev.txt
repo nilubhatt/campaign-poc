@@ -1,0 +1,3 @@
+# Dev/test only — not part of the shipped PyInstaller bundle.
+-r requirements.txt
+pytest>=8.0.0
