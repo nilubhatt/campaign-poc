@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS campaign_chunks (
 CREATE TABLE IF NOT EXISTS metrics (
     id            TEXT PRIMARY KEY,
     campaign_id   TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    metric_type   TEXT NOT NULL DEFAULT 'actual',  -- actual | predicted
     detail        TEXT,            -- freeform metrics / learnings, as given
     structured    TEXT,            -- optional JSON {ctr, roi, conversions, ...}
     created_at    REAL NOT NULL
@@ -143,6 +144,10 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
     d["metrics"] = [dict(m) for m in conn.execute(
         "SELECT * FROM metrics WHERE campaign_id = ? ORDER BY created_at", (campaign_id,)
     ).fetchall()]
+    d["has_metrics"] = len(d["metrics"]) > 0
+    d["has_evaluations"] = conn.execute(
+        "SELECT 1 FROM evaluations WHERE campaign_id = ? LIMIT 1", (campaign_id,)
+    ).fetchone() is not None
     chunk_rows = conn.execute(
         "SELECT embedded FROM campaign_chunks WHERE campaign_id = ?", (campaign_id,)
     ).fetchall()
@@ -165,7 +170,26 @@ def list_campaigns(conn, *, record_type: Optional[str] = None,
         sql += " WHERE " + " AND ".join(clauses)
     sql += " ORDER BY created_at"
     rows = conn.execute(sql, params).fetchall()
-    return [dict(r) for r in rows]
+
+    ids = [r["id"] for r in rows]
+    with_metrics: set[str] = set()
+    with_evaluations: set[str] = set()
+    if ids:
+        placeholders = ",".join("?" * len(ids))
+        with_metrics = {r["campaign_id"] for r in conn.execute(
+            f"SELECT DISTINCT campaign_id FROM metrics WHERE campaign_id IN ({placeholders})", ids
+        ).fetchall()}
+        with_evaluations = {r["campaign_id"] for r in conn.execute(
+            f"SELECT DISTINCT campaign_id FROM evaluations WHERE campaign_id IN ({placeholders})", ids
+        ).fetchall()}
+
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["has_metrics"] = d["id"] in with_metrics
+        d["has_evaluations"] = d["id"] in with_evaluations
+        out.append(d)
+    return out
 
 
 def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Optional[str] = None,
@@ -321,14 +345,54 @@ def map_chunks_to_campaigns(conn, chunk_ids: list[str]) -> dict[str, str]:
 
 # ── metrics ──────────────────────────────────────────────────────────────────
 
-def add_metrics(conn, campaign_id: str, *, detail=None, structured=None) -> str:
+def add_metrics(conn, campaign_id: str, *, detail=None, structured=None,
+                metric_type: str = "actual") -> str:
     mid = _id("met")
     conn.execute(
-        "INSERT INTO metrics (id, campaign_id, detail, structured, created_at) VALUES (?,?,?,?,?)",
-        (mid, campaign_id, detail, json.dumps(structured) if structured is not None else None, _now()),
+        """INSERT INTO metrics (id, campaign_id, metric_type, detail, structured, created_at)
+           VALUES (?,?,?,?,?,?)""",
+        (mid, campaign_id, metric_type, detail,
+         json.dumps(structured) if structured is not None else None, _now()),
     )
     conn.commit()
     return mid
+
+
+def bulk_import_metrics(conn, rows: list[dict]) -> dict:
+    """
+    Load a KPI workbook in one call (§6.5) instead of one add_metrics per row. Each row
+    identifies its campaign by `campaign_id` (preferred) or `title` (exact, case-insensitive
+    — ambiguous or missing matches are reported as errors, never guessed) and carries
+    `detail`/`structured`/`metric_type` like add_metrics. Partial success: valid rows import,
+    bad rows are reported per-row in `errors`, never silently dropped.
+    """
+    imported, errors = 0, []
+    for i, row in enumerate(rows):
+        cid = row.get("campaign_id")
+        if not cid:
+            title = row.get("title")
+            if not title:
+                errors.append({"row": i, "reason": "neither campaign_id nor title given"})
+                continue
+            matches = conn.execute(
+                "SELECT id FROM campaigns WHERE LOWER(title) = LOWER(?)", (title,)
+            ).fetchall()
+            if not matches:
+                errors.append({"row": i, "reason": f"no campaign titled {title!r} found"})
+                continue
+            if len(matches) > 1:
+                errors.append({"row": i, "reason": f"title {title!r} is ambiguous ({len(matches)} matches)"})
+                continue
+            cid = matches[0]["id"]
+        elif get_campaign(conn, cid) is None:
+            errors.append({"row": i, "reason": f"campaign_id {cid!r} not found"})
+            continue
+
+        add_metrics(conn, cid, detail=row.get("detail"), structured=row.get("structured"),
+                   metric_type=row.get("metric_type", "actual"))
+        imported += 1
+
+    return {"imported": imported, "errors": errors}
 
 
 # ── evaluations ──────────────────────────────────────────────────────────────

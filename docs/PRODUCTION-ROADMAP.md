@@ -177,10 +177,20 @@ content changes go through a new upload + `supersedes`, by design (avoids the co
 re-chunking/re-embedding in place). `supersedes` is set only at creation, not editable via
 `update_campaign` — kept simple; changing what a record supersedes after the fact is deferred.
 
-### 6.5 Metrics as first-class + bulk import
+### 6.5 Metrics as first-class + bulk import — **Done (2026-09-08)**
 Distinguish **prediction vs actual**; `list_campaigns` should show whether a record has
 metrics/evaluations; add a **bulk metrics/CSV import** so loading the KPI workbook is one step.
 This is what makes `reconcile_evaluation` actually functional.
+
+`metrics.metric_type` ('actual' default | 'predicted'). `get_campaign`/`list_campaigns` both
+report `has_metrics`/`has_evaluations`. `bulk_import_metrics` (new tool) takes rows identifying
+their campaign by `campaign_id` or exact case-insensitive `title` — LLM-first, matching the
+product's existing pattern: Claude reads the workbook (CSV, pasted table, whatever form it's in)
+and passes structured rows, rather than the server parsing a file format itself; ambiguous/
+unmatched titles are per-row errors, never guessed, and valid rows still import when others fail.
+`reconcile_evaluation` now auto-pulls a campaign's `metric_type='actual'` metrics when `actual`
+isn't passed explicitly — this is the actual fix that makes it functional; before, the user had
+to retype numbers that were already on file every time they wanted to reconcile.
 
 ### 6.6 Image vectorization + creative-reuse detection  *(the SVP question)*
 Two techniques, two problems:

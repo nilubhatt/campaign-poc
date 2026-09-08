@@ -203,6 +203,39 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
     }
 
 
+def reconcile_evaluation(conn, *, evaluation_id: str, actual: Optional[str] = None) -> dict:
+    """
+    Start closing the loop on a past judgment (§6.5: this is what makes reconciliation
+    actually functional). If `actual` isn't given, pull it automatically from the
+    campaign's own metric_type='actual' metrics on file — the user shouldn't have to retype
+    numbers that were already recorded via add_metrics/bulk_import_metrics. Errors if
+    neither is available (only predicted metrics on file don't count as "actual").
+    """
+    import json
+    ev = store.get_evaluation(conn, evaluation_id)
+    if not ev:
+        return {"error": f"evaluation {evaluation_id} not found"}
+
+    if actual is None:
+        campaign = store.get_campaign(conn, ev["campaign_id"]) if ev["campaign_id"] else None
+        actual_metrics = [m for m in (campaign["metrics"] if campaign else [])
+                          if m["metric_type"] == "actual"]
+        if not actual_metrics:
+            return {"error": "no actual metrics on file for this campaign — pass actual= "
+                              "or record them first with add_metrics/bulk_import_metrics"}
+        actual = "\n".join(m["detail"] or "" for m in actual_metrics if m["detail"])
+
+    return {
+        "evaluation_id": ev["id"],
+        "subject_title": ev["subject_title"],
+        "original_analysis": ev["analysis"],
+        "predictions": json.loads(ev["predictions"]) if ev["predictions"] else None,
+        "cited_ids": json.loads(ev["cited_ids"]) if ev["cited_ids"] else [],
+        "actual": actual,
+        "note": "Compare predictions to actual, then call save_reconciliation with the lesson.",
+    }
+
+
 # ── asset resolution (secondary path) ────────────────────────────────────────
 
 def _resolve_asset(ref: dict) -> tuple[Optional[Path], list[str]]:

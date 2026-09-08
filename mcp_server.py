@@ -90,14 +90,33 @@ def delete_campaign(campaign_id: str) -> dict:
 
 
 @mcp.tool()
-def add_metrics(campaign_id: str, detail: str, structured: Optional[dict] = None) -> dict:
-    """Attach post-conclusion outcomes to a campaign. Pass whatever you have as freeform
-    detail (CTR, ROI, conversions, qualitative learnings) and optionally a structured object
-    for machine-readable numbers."""
+def add_metrics(campaign_id: str, detail: str, structured: Optional[dict] = None,
+                metric_type: str = "actual") -> dict:
+    """Attach outcomes to a campaign. Pass whatever you have as freeform detail (CTR, ROI,
+    conversions, qualitative learnings) and optionally a structured object for
+    machine-readable numbers. metric_type is 'actual' (post-conclusion results, the default)
+    or 'predicted' (a forecast/target set before launch) — reconcile_evaluation only pulls
+    'actual' metrics automatically."""
     conn = store.connect()
     try:
-        mid = store.add_metrics(conn, campaign_id, detail=detail, structured=structured)
+        mid = store.add_metrics(conn, campaign_id, detail=detail, structured=structured,
+                               metric_type=metric_type)
         return {"metrics_id": mid, "campaign_id": campaign_id, "status": "stored"}
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def bulk_import_metrics(rows: list) -> dict:
+    """Load a KPI workbook in one call instead of one add_metrics per row. Each row is an
+    object identifying its campaign by campaign_id (preferred) or title (exact,
+    case-insensitive — ambiguous or unmatched titles are reported as errors, never guessed),
+    plus detail/structured/metric_type like add_metrics. Read the workbook yourself (CSV,
+    pasted table, whatever you have) and pass the rows here. Returns {imported, errors} —
+    valid rows import even if others fail."""
+    conn = store.connect()
+    try:
+        return store.bulk_import_metrics(conn, rows)
     finally:
         conn.close()
 
@@ -112,7 +131,8 @@ def list_campaigns(record_type: Optional[str] = None, status: Optional[str] = No
         return {"count": len(rows), "campaigns": [
             {"campaign_id": r["id"], "title": r["title"], "record_type": r["record_type"],
              "status": r["status"], "region": r["region"], "market": r["market"],
-             "embedded": r["embedded"]}
+             "embedded": r["embedded"], "has_metrics": r["has_metrics"],
+             "has_evaluations": r["has_evaluations"]}
             for r in rows]}
     finally:
         conn.close()
@@ -191,25 +211,15 @@ def save_evaluation(subject_title: str, analysis: str, cited_ids: Optional[list]
 
 
 @mcp.tool()
-def reconcile_evaluation(evaluation_id: str, actual: str) -> dict:
-    """Start closing the loop on a past judgment. Give the evaluation_id and the real
-    post-campaign metrics; returns your original analysis + predictions alongside the actuals.
-    Compare them, then call save_reconciliation with the lesson."""
-    import json
+def reconcile_evaluation(evaluation_id: str, actual: Optional[str] = None) -> dict:
+    """Start closing the loop on a past judgment. If actual metrics are already on file for
+    this campaign (via add_metrics/bulk_import_metrics), they're pulled automatically —
+    otherwise pass actual= with the real post-campaign metrics yourself. Returns your
+    original analysis + predictions alongside the actuals. Compare them, then call
+    save_reconciliation with the lesson."""
     conn = store.connect()
     try:
-        ev = store.get_evaluation(conn, evaluation_id)
-        if not ev:
-            return {"error": f"evaluation {evaluation_id} not found"}
-        return {
-            "evaluation_id": ev["id"],
-            "subject_title": ev["subject_title"],
-            "original_analysis": ev["analysis"],
-            "predictions": json.loads(ev["predictions"]) if ev["predictions"] else None,
-            "cited_ids": json.loads(ev["cited_ids"]) if ev["cited_ids"] else [],
-            "actual": actual,
-            "note": "Compare predictions to actual, then call save_reconciliation with the lesson.",
-        }
+        return core.reconcile_evaluation(conn, evaluation_id=evaluation_id, actual=actual)
     finally:
         conn.close()
 
