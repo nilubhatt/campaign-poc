@@ -30,6 +30,11 @@ MAX_CHUNK_CHARS = int(os.getenv("CAMPAIGN_POC_MAX_CHUNK_CHARS", "1800"))
 # Perceptual-hash Hamming distance below which two images count as a match (§6.6). imagehash's
 # default phash is 64 bits; 8 tolerates resize/recompress/light crop without matching unrelated images.
 PHASH_MATCH_THRESHOLD = int(os.getenv("CAMPAIGN_POC_PHASH_THRESHOLD", "8"))
+
+# §6.8: find_similar trims each evidence row's freeform `detail` to this many chars by
+# default (full campaign briefs can be long; a similarity scan doesn't need all of it up
+# front) - pass full_detail=True, or call get_campaign, for the untrimmed record.
+EVIDENCE_DETAIL_SUMMARY_CHARS = int(os.getenv("CAMPAIGN_POC_EVIDENCE_DETAIL_CHARS", "300"))
 # POC accepts only presentation/document formats — the use case is decks + briefs.
 ALLOWED_MIME = {
     "application/pdf",
@@ -54,7 +59,7 @@ VOYAGE_MODEL = os.getenv("CAMPAIGN_POC_VOYAGE_MODEL", "voyage-3.5")
 
 # ── http / auth ──────────────────────────────────────────────────────────────
 HTTP_HOST = os.getenv("CAMPAIGN_POC_HOST", "0.0.0.0")
-HTTP_PORT = int(os.getenv("CAMPAIGN_POC_PORT", "8080"))
+HTTP_PORT = int(os.getenv("CAMPAIGN_POC_PORT", "8086"))
 PUBLIC_BASE_URL = os.getenv("CAMPAIGN_POC_BASE_URL", f"http://localhost:{HTTP_PORT}").rstrip("/")
 AUTH_MODE = os.getenv("CAMPAIGN_POC_AUTH_MODE", "none").lower()  # legacy display value
 # Pluggable auth: names the registered AuthProvider that handles requests (see auth.py).

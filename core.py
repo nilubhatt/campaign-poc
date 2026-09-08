@@ -104,7 +104,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
 def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str] = None,
                  top_k: int = 5, record_type: Optional[str] = None, status: Optional[str] = None,
                  tags: Optional[list[str]] = None, region: Optional[str] = None,
-                 market: Optional[str] = None) -> list[dict]:
+                 market: Optional[str] = None, full_detail: bool = False) -> list[dict]:
     """
     Rank prior campaigns by semantic similarity to `text` (or to an existing campaign's
     own content). Searches at chunk level (§6.1 — one vector per slide/section) and rolls
@@ -114,6 +114,12 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
     §6.2: if any of record_type/status/tags/region/market is given, campaigns are filtered
     to that structured criteria FIRST, then ranked by similarity only within that set —
     otherwise pure vector search on a single-brand corpus returns everything as "similar."
+
+    §6.8: each row's freeform `detail` is trimmed to config.EVIDENCE_DETAIL_SUMMARY_CHARS by
+    default (`detail_truncated` flags when that happened) — a similarity scan over several
+    campaigns shouldn't pay for every full brief. Pass full_detail=True for the untrimmed
+    text, or call get_campaign(campaign_id) for the full record.
+
     Returns evidence rows — id, title, similarity, detail, the matched excerpt, and
     metrics — for Claude to reason over.
     """
@@ -162,6 +168,10 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
         if not c:
             continue
         matched = store.get_chunk(conn, chunk_id)
+        detail = c["detail"] or ""
+        truncated = not full_detail and len(detail) > config.EVIDENCE_DETAIL_SUMMARY_CHARS
+        if truncated:
+            detail = detail[:config.EVIDENCE_DETAIL_SUMMARY_CHARS] + "... [truncated]"
         evidence.append({
             "campaign_id": cid,
             "title": c["title"],
@@ -171,7 +181,8 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
             "region": c["region"],
             "market": c["market"],
             "similarity": round(sim, 4),
-            "detail": c["detail"],
+            "detail": detail,
+            "detail_truncated": truncated,
             "matched_excerpt": matched["text"] if matched else "",
             "metrics": [{"detail": m["detail"], "structured": m["structured"]} for m in c["metrics"]],
         })
@@ -181,15 +192,18 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
 def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: int = 5,
                        record_type: Optional[str] = None, status: Optional[str] = None,
                        tags: Optional[list[str]] = None, region: Optional[str] = None,
-                       market: Optional[str] = None) -> dict:
+                       market: Optional[str] = None, full_detail: bool = True) -> dict:
     """
     Package the evidence Claude needs to judge a new proposal: the most similar prior
-    campaigns WITH their outcomes. Claude reads this, produces its analysis citing specific
+    campaigns WITH their outcomes. full_detail defaults to True here (unlike find_similar) —
+    an actual judgment over a short evidence list shouldn't be working from trimmed briefs.
+    Claude reads this, produces its analysis citing specific
     priors, then calls save_evaluation. This tool does NOT itself judge. Optionally narrow
     to structured criteria first (§6.2), e.g. region="APAC" to only weigh APAC precedent.
     """
     evidence = find_similar(conn, text=proposal_text, top_k=top_k, record_type=record_type,
-                            status=status, tags=tags, region=region, market=market)
+                            status=status, tags=tags, region=region, market=market,
+                            full_detail=full_detail)
     concluded = [e for e in evidence if e["metrics"]]
     return {
         "subject_title": subject_title,

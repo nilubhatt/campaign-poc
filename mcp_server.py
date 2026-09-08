@@ -181,7 +181,8 @@ def get_campaign(campaign_id: str) -> dict:
 def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str] = None,
                            top_k: int = 5, record_type: Optional[str] = None,
                            status: Optional[str] = None, tags: Optional[list] = None,
-                           region: Optional[str] = None, market: Optional[str] = None) -> dict:
+                           region: Optional[str] = None, market: Optional[str] = None,
+                           full_detail: bool = False) -> dict:
     """Semantic search: find prior campaigns most similar to a description (text) or to an
     existing campaign (campaign_id). Matches at the slide/section level and rolls up to the
     best-matching campaign, so long decks match on the relevant part.
@@ -190,13 +191,14 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
     by similarity within it — e.g. status='concluded', region='APAC' to only weigh concluded
     APAC precedent instead of everything in the memory. Returns ranked evidence — title,
     status/tags/region/market, similarity, detail, the matched excerpt, and metrics — for
-    you to reason over."""
+    you to reason over. detail is trimmed by default (detail_truncated flags it) — pass
+    full_detail=True, or call get_campaign, for the untrimmed brief."""
     conn = store.connect()
     try:
         return {"matches": core.find_similar(conn, text=text, campaign_id=campaign_id,
                                              top_k=top_k, record_type=record_type,
                                              status=status, tags=tags, region=region,
-                                             market=market)}
+                                             market=market, full_detail=full_detail)}
     finally:
         conn.close()
 
@@ -205,19 +207,20 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
 def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
                        record_type: Optional[str] = None, status: Optional[str] = None,
                        tags: Optional[list] = None, region: Optional[str] = None,
-                       market: Optional[str] = None) -> dict:
+                       market: Optional[str] = None, full_detail: bool = True) -> dict:
     """Evaluate a NEW campaign proposal against the memory. Returns the most similar prior
-    campaigns WITH their outcomes as an evidence package. Optionally narrow to structured
-    criteria first (e.g. region='APAC') so only relevant precedent is weighed. Read it, then
-    produce your judgment (predicted CTR/ROI ranges, risks, proceed/revise/reject) CITING
-    specific campaign_ids, and call save_evaluation. This tool gathers evidence; the
-    judgment is yours."""
+    campaigns WITH their outcomes as an evidence package (full detail by default — this is
+    for judging, not browsing). Optionally narrow to structured criteria first (e.g.
+    region='APAC') so only relevant precedent is weighed. Read it, then produce your
+    judgment (predicted CTR/ROI ranges, risks, proceed/revise/reject) CITING specific
+    campaign_ids, and call save_evaluation. This tool gathers evidence; the judgment is
+    yours."""
     conn = store.connect()
     try:
         return core.prepare_evaluation(conn, subject_title=subject_title,
                                        proposal_text=proposal_text, top_k=top_k,
                                        record_type=record_type, status=status, tags=tags,
-                                       region=region, market=market)
+                                       region=region, market=market, full_detail=full_detail)
     finally:
         conn.close()
 

@@ -33,10 +33,10 @@ pip install -r requirements.txt
 # real semantic search (local + free): install Ollama, then
 ollama pull nomic-embed-text        # one time
 
-python -m http_app                  # serves http://0.0.0.0:8080  (/mcp, /upload, /healthz)
+python -m http_app                  # serves http://0.0.0.0:8086  (/mcp, /upload, /healthz)
 ```
 
-Check it: `curl http://localhost:8080/healthz` →
+Check it: `curl http://localhost:8086/healthz` →
 `{"status":"ok","vector_backend":"sqlite-vec","embed_provider":"ollama",...}`
 
 Offline smoke test (no Ollama): `CAMPAIGN_POC_EMBED_PROVIDER=hash python -m http_app`
@@ -45,7 +45,7 @@ Offline smoke test (no Ollama): `CAMPAIGN_POC_EMBED_PROVIDER=hash python -m http
 ## Connect from Claude Web / cowork
 
 1. Expose the server on a reachable HTTPS URL — locally, a tunnel:
-   `cloudflared tunnel --url http://localhost:8080` (or `ngrok http 8080`).
+   `cloudflared tunnel --url http://localhost:8086` (or `ngrok http 8086`).
 2. Claude Web → **Settings → Connectors → Add custom connector** → point at `<public-url>/mcp`.
 3. In a chat: attach a campaign PDF and say *"upload this as a concluded campaign, detail: …"*;
    Claude reads the deck and calls `upload_campaign`. Then *"analyze this new proposal against
@@ -56,19 +56,21 @@ Offline smoke test (no Ollama): `CAMPAIGN_POC_EMBED_PROVIDER=hash python -m http
 
 ## Tools (what Claude calls)
 
-`upload_campaign` · `add_metrics` · `list_campaigns` · `get_campaign` ·
-`find_similar_campaigns` · `prepare_evaluation` · `save_evaluation` ·
-`reconcile_evaluation` · `save_reconciliation`
+`upload_campaign` · `update_campaign` · `delete_campaign` · `add_metrics` ·
+`bulk_import_metrics` · `upload_image_asset` · `check_image_provenance` ·
+`list_campaigns` · `get_campaign` · `find_similar_campaigns` · `prepare_evaluation` ·
+`save_evaluation` · `reconcile_evaluation` · `save_reconciliation`
 
 ## Files
 
 ```
 config.py        env-driven config
-store.py         SQLite schema + CRUD (campaigns, campaign_chunks, metrics, evaluations, reconciliations)
+store.py         SQLite schema + CRUD (campaigns, campaign_chunks, assets, asset_fingerprints, metrics, evaluations, reconciliations)
 vectorstore.py   sqlite-vec vector table, keyed by chunk id (+ pure-Python cosine fallback)
 embedding.py     ollama | voyage | hash embedders + cosine
 extract.py       PDF / PPTX text extraction, one unit per page/slide
 chunking.py      packs text units into embeddable chunks (server-side, per slide/section)
+images.py        perceptual hashing (pHash) for creative-reuse detection
 core.py          ingest + chunk + semantic retrieval + evidence packaging (LLM-first)
 mcp_server.py    MCPServer tools (the API Claude calls)
 http_app.py      Streamable-HTTP app (/mcp) + /upload + /healthz

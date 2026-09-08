@@ -227,9 +227,25 @@ Generic `assets` (modality) + `asset_fingerprints` (pHash) + `asset_vectors` (CL
 asset. **Video = keyframes → the image pipeline** (reused clips share keyframes — nearly free once
 images work). **Audio later** = audio fingerprint + embedding, same shape.
 
-### 6.8 Minor
+### 6.8 Minor — **Done (2026-09-08), one item unreproducible**
 Trim `find_similar` payload (summary by default, full detail on request); fix `&` stored as
 `&amp;`; **align the port** (binary/config default 8080 vs `run.ps1` default 8086 — make them match).
+
+- **Port aligned to 8086** (not 8080) — `run.sh`/`run.ps1`/`LINUX.md`/`WINDOWS.md` and the
+  actual local dev setup already standardized on 8086; `config.py`'s raw default and two
+  README lines were the outliers and are now fixed to match, rather than the other way
+  around (would have broken the already-wired Claude Desktop `mcp-remote` config).
+- **`find_similar` trimmed**: each evidence row's freeform `detail` is cut to
+  `config.EVIDENCE_DETAIL_SUMMARY_CHARS` (default 300) with a `detail_truncated` flag, opt out
+  via `full_detail=True`. `prepare_evaluation` defaults `full_detail=True` instead — a real
+  judgment over a short evidence list shouldn't work from trimmed briefs, only a browsing
+  search (`find_similar_campaigns`) should default to trimmed.
+- **`&` → `&amp;` — could NOT reproduce.** Checked `extract.py`'s PPTX text extraction directly
+  (python-pptx correctly returns unescaped `&`) and grepped the whole codebase for any
+  HTML/XML-escaping code — none exists here; nothing in this repo writes XML/HTML. Left as an
+  open item rather than guessing at a fix for a bug with no locatable cause in this codebase —
+  it may be a source-file artifact (a PPTX whose own XML has literal `&amp;` text) or from a
+  display layer outside this repo, not a code defect here.
 
 ### 6.9 Conversational intake + confirm-before-write (uploads & feedback)
 Users are **non-technical marketers**, not people filling out a form. Both entry points —
