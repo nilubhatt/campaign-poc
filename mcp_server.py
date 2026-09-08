@@ -8,7 +8,7 @@ Claude Web / cowork custom connector points at.
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from mcp.server.mcpserver import MCPServer
 
@@ -17,11 +17,19 @@ import store
 
 mcp = MCPServer("campaign-intelligence")
 
+# Constrains the JSON schema the LLM sees for these params, instead of relying on prose in
+# a docstring alone — a typo ("inflight") is now a schema-validation error, not a silent
+# value that never matches any filter (review flagged this as the cheapest correctness win
+# available; store.py enforces the same values server-side regardless).
+RecordType = Literal["campaign", "reference", "stub"]
+Status = Literal["proposed", "in_flight", "concluded"]
+MetricType = Literal["actual", "predicted"]
+
 
 @mcp.tool()
 def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optional[str] = None,
-                    record_type: str = "campaign", status: Optional[str] = None,
-                    tags: Optional[list] = None, region: Optional[str] = None,
+                    record_type: RecordType = "campaign", status: Optional[Status] = None,
+                    tags: Optional[list[str]] = None, region: Optional[str] = None,
                     market: Optional[str] = None, supersedes: Optional[str] = None,
                     asset_ref: Optional[dict] = None, confirm: bool = False) -> dict:
     """Store a past or proposed campaign in the memory.
@@ -69,8 +77,8 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
 
 @mcp.tool()
 def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optional[str] = None,
-                    record_type: Optional[str] = None, status: Optional[str] = None,
-                    tags: Optional[list] = None, region: Optional[str] = None,
+                    record_type: Optional[RecordType] = None, status: Optional[Status] = None,
+                    tags: Optional[list[str]] = None, region: Optional[str] = None,
                     market: Optional[str] = None) -> dict:
     """Edit a campaign's metadata (title, detail, record_type, status, tags, region, market).
     Only the fields you pass change. tags, if given, fully REPLACES the existing list (not a
@@ -153,7 +161,7 @@ def find_similar_images(asset_ref: dict, campaign_id: Optional[str] = None, top_
 
 @mcp.tool()
 def add_metrics(campaign_id: str, detail: Optional[str] = None,
-                structured: Optional[dict] = None, metric_type: str = "actual",
+                structured: Optional[dict] = None, metric_type: MetricType = "actual",
                 confirm: bool = False) -> dict:
     """Record feedback/outcomes for a campaign — this is the feedback conversation, not a
     form. Ask: *which campaign* (look it up with find_similar_campaigns/list_campaigns if the
@@ -195,7 +203,7 @@ def bulk_import_metrics(rows: list) -> dict:
 
 
 @mcp.tool()
-def list_campaigns(record_type: Optional[str] = None, status: Optional[str] = None) -> dict:
+def list_campaigns(record_type: Optional[RecordType] = None, status: Optional[Status] = None) -> dict:
     """List records in the memory. Optionally filter by record_type ('campaign', 'reference',
     'stub') and/or status ('proposed', 'in_flight', 'concluded'). is_superseded/supersedes
     show whether a record has been replaced by a corrected/later one (and by what) — check
@@ -227,8 +235,8 @@ def get_campaign(campaign_id: str) -> dict:
 
 @mcp.tool()
 def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str] = None,
-                           top_k: int = 5, record_type: Optional[str] = None,
-                           status: Optional[str] = None, tags: Optional[list] = None,
+                           top_k: int = 5, record_type: Optional[RecordType] = None,
+                           status: Optional[Status] = None, tags: Optional[list[str]] = None,
                            region: Optional[str] = None, market: Optional[str] = None,
                            full_detail: bool = False) -> dict:
     """Semantic search: find prior campaigns most similar to a description (text) or to an
@@ -253,8 +261,8 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
 
 @mcp.tool()
 def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
-                       record_type: Optional[str] = None, status: Optional[str] = None,
-                       tags: Optional[list] = None, region: Optional[str] = None,
+                       record_type: Optional[RecordType] = None, status: Optional[Status] = None,
+                       tags: Optional[list[str]] = None, region: Optional[str] = None,
                        market: Optional[str] = None, full_detail: bool = True) -> dict:
     """Evaluate a NEW campaign proposal against the memory. Returns the most similar prior
     campaigns WITH their outcomes as an evidence package (full detail by default — this is
@@ -285,6 +293,19 @@ def save_evaluation(subject_title: str, analysis: str, cited_ids: Optional[list]
                                       campaign_id=campaign_id, cited_ids=cited_ids,
                                       predictions=predictions)
         return {"evaluation_id": eid, "status": "saved"}
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def list_evaluations() -> dict:
+    """List past evaluations (id, campaign_id, subject_title, created_at) — use this to find
+    an evaluation_id when the user refers to a judgment by name rather than id (e.g.
+    "reconcile the APAC campaign evaluation") before calling reconcile_evaluation."""
+    conn = store.connect()
+    try:
+        rows = store.list_evaluations(conn)
+        return {"count": len(rows), "evaluations": rows}
     finally:
         conn.close()
 

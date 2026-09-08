@@ -47,7 +47,7 @@ CLIP_EMBED_DIM = int(os.getenv("CAMPAIGN_POC_CLIP_DIM", "512"))  # ViT-B-32 = 51
 # default (full campaign briefs can be long; a similarity scan doesn't need all of it up
 # front) - pass full_detail=True, or call get_campaign, for the untrimmed record.
 EVIDENCE_DETAIL_SUMMARY_CHARS = int(os.getenv("CAMPAIGN_POC_EVIDENCE_DETAIL_CHARS", "300"))
-# POC accepts only presentation/document formats — the use case is decks + briefs.
+# Decks/briefs (extracted for search) plus images (§6.6 — pHash/CLIP; not text-extracted).
 ALLOWED_MIME = {
     "application/pdf",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # .pptx
@@ -55,6 +55,9 @@ ALLOWED_MIME = {
 }
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 PPT_LEGACY_MIME = "application/vnd.ms-powerpoint"
+# review found upload_image_asset's docstring claimed POST /upload works for images while
+# ALLOWED_MIME (deck-only) silently rejected them — this is that route's actual allow-list.
+ALLOWED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp"}
 MAX_ASSET_BYTES = int(os.getenv("CAMPAIGN_POC_MAX_ASSET_MB", "100")) * 1024 * 1024
 MAX_INLINE_BYTES = int(os.getenv("CAMPAIGN_POC_MAX_INLINE_MB", "10")) * 1024 * 1024
 

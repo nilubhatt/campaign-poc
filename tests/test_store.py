@@ -116,3 +116,23 @@ def test_evaluation_and_reconciliation_roundtrip(conn):
 
 def test_get_evaluation_missing_returns_none(conn):
     assert store.get_evaluation(conn, "nope") is None
+
+
+def test_get_campaign_includes_image_assets(conn, tmp_path):
+    """Design review finding: get_assets_for_campaign existed in store.py but wasn't
+    surfaced anywhere the LLM could see it - get_campaign is the natural place."""
+    import numpy as np
+    from PIL import Image
+    import core
+
+    img = tmp_path / "hero.png"
+    rng = np.random.default_rng(1)
+    small = rng.integers(0, 256, size=(8, 8, 3), dtype="uint8")
+    Image.fromarray(small, mode="RGB").resize((64, 64), Image.BICUBIC).save(img)
+
+    cid = store.insert_campaign(conn, title="X")
+    core.ingest_image_asset(conn, campaign_id=cid, asset_ref={"path": str(img)})
+
+    c = store.get_campaign(conn, cid)
+    assert len(c["assets"]) == 1
+    assert c["assets"][0]["modality"] == "image"

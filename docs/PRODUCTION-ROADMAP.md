@@ -242,6 +242,23 @@ output, confirmed JSON-serializable through the MCP tool layer) — not exercise
 README/requirements.txt updated — the "no CLIP/torch" line is gone; replaced with the actual
 size tradeoff stated plainly.
 
+**Packaging: verified BROKEN, not yet fixed.** Ran an actual PyInstaller build with torch
+included (removed the earlier blanket `excludes=["torch"]`, added `collect_all` for
+torch/open_clip/timm) — it builds (717MB bundle, torch/open_clip genuinely present) but the
+packaged binary **crashes on startup**: `RuntimeError: operator torchvision::nms does not
+exist`. Root cause, confirmed by inspection: torchvision 0.29.0 ships its compiled extension
+as `_C_stable.so` (a newer ABI-stable naming scheme); PyInstaller 6.22.2's hooks don't
+recognize that name, so the custom-op registration open_clip's package init triggers
+(via `coca_model.py` → `torchvision.ops`, even though we only use the plain ViT-B-32
+model, not CoCa) fails in the frozen build. This is **packaging-only** — running from
+source (`python -m http_app` / `run.sh` / `run.ps1`) has CLIP fully working, verified
+repeatedly against the real model this session. `check_image_provenance` (pHash, no torch)
+is unaffected either way. **Not fixed** — needs dedicated packaging work (pin a torchvision
+version compatible with PyInstaller's hooks, a newer PyInstaller with an updated hook, or a
+custom hook for `_C_stable.so`) before the next tagged release; ship pHash-only or hold the
+release until this is resolved, don't ship a bundle whose `find_similar_images` silently
+doesn't work.
+
 ### 6.7 Extensible asset pipeline (audio/video pluggable later) — **Done (2026-09-08) for image; audio/video not started**
 Generic `assets` (modality) + `asset_fingerprints` (pHash) + `asset_vectors` (CLIP), keyed by
 asset. **Video = keyframes → the image pipeline** (reused clips share keyframes — nearly free once

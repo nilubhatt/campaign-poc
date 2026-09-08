@@ -21,6 +21,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 import auth
+import clip_embed
 import config
 import extract
 import store
@@ -49,8 +50,11 @@ async def upload(request: Request):
     if len(data) > config.MAX_ASSET_BYTES:
         return JSONResponse({"error": f"file exceeds {config.MAX_ASSET_BYTES // (1024*1024)} MB"}, status_code=413)
     mime = extract.guess_mime(upl.filename or "asset.bin")
-    if mime not in config.ALLOWED_MIME:
-        return JSONResponse({"error": f"unsupported type {mime}; POC accepts PDF and PPTX"}, status_code=400)
+    if mime not in config.ALLOWED_MIME and mime not in config.ALLOWED_IMAGE_MIME:
+        return JSONResponse(
+            {"error": f"unsupported type {mime}; POC accepts PDF, PPTX, and images"},
+            status_code=400,
+        )
     asset_id = uuid.uuid4().hex
     dest_dir = config.UPLOAD_DIR / asset_id
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -66,6 +70,7 @@ async def healthz(request: Request):
             "status": "ok",
             "vector_backend": vectorstore.backend_name(conn),
             "embed_provider": config.EMBED_PROVIDER,
+            "clip_provider": config.CLIP_PROVIDER,
             "auth_provider": config.AUTH_PROVIDER,
         })
     finally:
@@ -80,6 +85,10 @@ def main():
     import uvicorn
     config.ensure_dirs()
     store.init_db()
+    # Load the CLIP model now, not on the first tool call — a live MCP request over a
+    # tunnel is the wrong place for a ~350MB first-time download (risks the client's
+    # tool-call timeout; review flagged this).
+    clip_embed.warm_up()
     uvicorn.run(app, host=config.HTTP_HOST, port=config.HTTP_PORT)
 
 

@@ -11,12 +11,14 @@ slow.
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import config
 
 _model = None
 _preprocess = None
+_model_lock = threading.Lock()
 
 
 def embed_image(path: Path) -> list[float]:
@@ -29,15 +31,30 @@ def embed_image(path: Path) -> list[float]:
 
 
 def _load_model():
+    """Loads once, guarded by a lock — MCP dispatches sync tools onto worker threads, so
+    concurrent first calls could otherwise race into loading the model multiple times at
+    once (transiently multiplying memory use and load time for no benefit; review found
+    this with 3 concurrent calls each loading their own copy)."""
     global _model, _preprocess
     if _model is None:
-        import open_clip
-        model, _, preprocess = open_clip.create_model_and_transforms(
-            config.CLIP_MODEL_NAME, pretrained=config.CLIP_PRETRAINED
-        )
-        model.eval()
-        _model, _preprocess = model, preprocess
+        with _model_lock:
+            if _model is None:  # re-check: another thread may have finished while we waited
+                import open_clip
+                model, _, preprocess = open_clip.create_model_and_transforms(
+                    config.CLIP_MODEL_NAME, pretrained=config.CLIP_PRETRAINED
+                )
+                model.eval()
+                _model, _preprocess = model, preprocess
     return _model, _preprocess
+
+
+def warm_up() -> None:
+    """Load the model now, at server startup, instead of lazily on first tool call — a live
+    MCP tool call is the wrong place for a first-time model download (~350MB) plus load
+    time, which risks the calling client's tool-call timeout. No-op for the offline `hash`
+    test provider."""
+    if config.CLIP_PROVIDER == "openclip":
+        _load_model()
 
 
 def _embed_openclip(path: Path) -> list[float]:

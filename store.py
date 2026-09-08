@@ -191,6 +191,7 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
         "SELECT id FROM campaigns WHERE supersedes = ?", (campaign_id,)
     ).fetchall()]
     d["is_superseded"] = len(d["superseded_by"]) > 0
+    d["assets"] = get_assets_for_campaign(conn, campaign_id)
     chunk_rows = conn.execute(
         "SELECT embedded FROM campaign_chunks WHERE campaign_id = ?", (campaign_id,)
     ).fetchall()
