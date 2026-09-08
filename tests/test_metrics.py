@@ -92,6 +92,50 @@ def test_bulk_import_metrics_supports_metric_type(conn):
     assert store.get_campaign(conn, cid)["metrics"][0]["metric_type"] == "predicted"
 
 
+def test_bulk_import_metrics_normalizes_metric_type_case_and_whitespace(conn):
+    """Adversarial review finding: 'Actual'/'predicted ' inserted fine but were silently
+    excluded from reconcile_evaluation's exact `== 'actual'` check - normalize instead."""
+    cid = store.insert_campaign(conn, title="X")
+    store.bulk_import_metrics(conn, [
+        {"campaign_id": cid, "detail": "x", "metric_type": " Actual "},
+    ])
+    assert store.get_campaign(conn, cid)["metrics"][0]["metric_type"] == "actual"
+
+
+def test_bulk_import_metrics_rejects_invalid_metric_type_as_a_row_error(conn):
+    cid = store.insert_campaign(conn, title="X")
+    result = store.bulk_import_metrics(conn, [
+        {"campaign_id": cid, "detail": "x", "metric_type": "forecasted"},
+    ])
+    assert result["imported"] == 0
+    assert "metric_type" in result["errors"][0]["reason"]
+
+
+def test_bulk_import_metrics_one_bad_row_does_not_crash_the_batch(conn):
+    """Adversarial review finding: a non-dict row raised AttributeError and crashed the
+    whole call, including rows already processed before it in the same batch."""
+    cid = store.insert_campaign(conn, title="X")
+    result = store.bulk_import_metrics(conn, [
+        {"campaign_id": cid, "detail": "good row one"},
+        "not a dict",
+        {"campaign_id": cid, "detail": "good row two"},
+    ])
+    assert result["imported"] == 2
+    assert len(result["errors"]) == 1
+    assert result["errors"][0]["row"] == 1
+
+
+def test_bulk_import_metrics_title_match_excludes_superseded_campaigns(conn):
+    """A re-uploaded corrected deck (supersedes=old) shouldn't make every subsequent
+    title-based import ambiguous forever - the live one should resolve uniquely."""
+    old = store.insert_campaign(conn, title="Mexico Push")
+    store.insert_campaign(conn, title="Mexico Push", supersedes=old)
+
+    result = store.bulk_import_metrics(conn, [{"title": "Mexico Push", "detail": "results"}])
+    assert result["imported"] == 1
+    assert result["errors"] == []
+
+
 def test_reconcile_evaluation_pulls_actual_metrics_automatically(conn):
     cid = store.insert_campaign(conn, title="X")
     eid = store.insert_evaluation(conn, subject_title="X", analysis="predicted strong ROI",

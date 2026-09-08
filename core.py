@@ -129,6 +129,8 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
     conversational feedback flow (which campaign, how did it go, what metrics) where a
     free-text answer gets parsed into detail/structured and shown back before saving.
     """
+    if store.get_campaign(conn, campaign_id) is None:
+        return {"error": f"campaign {campaign_id} not found"}
     if not confirm:
         return {
             "preview": True, "campaign_id": campaign_id, "metric_type": metric_type,
@@ -167,8 +169,9 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
     """
     if campaign_id:
         row = conn.execute("SELECT detail, deck_text FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
-        text = "\n\n".join(p for p in ((row["detail"] if row else None),
-                                       (row["deck_text"] if row else None)) if p)
+        if not row:
+            raise ValueError(f"campaign {campaign_id} not found")
+        text = "\n\n".join(p for p in (row["detail"], row["deck_text"]) if p)
     if not text or not text.strip():
         raise ValueError("provide text (or a campaign_id that has content) to search by")
 
@@ -319,6 +322,9 @@ def ingest_image_asset(conn, *, campaign_id: str, asset_ref: dict) -> dict:
     similarity, the heavier follow-on). Storage always succeeds even if one or both
     processing steps fail (e.g. a corrupt image, or CLIP unavailable) — failures are
     reported per-step, not swallowed, and don't block each other."""
+    if store.get_campaign(conn, campaign_id) is None:
+        return {"error": f"campaign {campaign_id} not found"}
+
     path, warnings = _resolve_asset(asset_ref)
     if not path:
         return {"error": "; ".join(warnings) or "could not resolve asset_ref"}
@@ -358,16 +364,25 @@ def check_image_provenance(conn, *, asset_ref: dict, campaign_id: Optional[str] 
     a region mismatch against a matched campaign is flagged explicitly — the point isn't just
     "this image exists," it's "this image's look belongs to a *different* region."
     """
+    current = store.get_campaign(conn, campaign_id) if campaign_id else None
+    if campaign_id and current is None:
+        return {"error": f"campaign {campaign_id} not found"}
+
     path, warnings = _resolve_asset(asset_ref)
     if not path:
         return {"error": "; ".join(warnings) or "could not resolve asset_ref"}
 
-    query_hash = images.phash(path)
+    try:
+        query_hash = images.phash(path)
+    except Exception as exc:
+        return {"error": f"could not process image: {exc}"}
     threshold = config.PHASH_MATCH_THRESHOLD if threshold is None else threshold
-    current = store.get_campaign(conn, campaign_id) if campaign_id else None
+    superseded_ids = store.get_superseded_campaign_ids(conn)
 
     matches = []
     for cand in store.get_all_fingerprints(conn, exclude_campaign_id=campaign_id):
+        if cand["campaign_id"] in superseded_ids:
+            continue
         dist = images.hamming_distance(query_hash, cand["phash"])
         if dist > threshold:
             continue
@@ -393,18 +408,27 @@ def find_similar_images(conn, *, asset_ref: dict, campaign_id: Optional[str] = N
     campaign_id (the campaign this image is headed for) to exclude its own assets and get a
     region-mismatch flag on matches from elsewhere.
     """
+    current = store.get_campaign(conn, campaign_id) if campaign_id else None
+    if campaign_id and current is None:
+        return {"error": f"campaign {campaign_id} not found"}
+
     path, warnings = _resolve_asset(asset_ref)
     if not path:
         return {"error": "; ".join(warnings) or "could not resolve asset_ref"}
 
-    qvec = clip_embed.embed_image(path)
-    current = store.get_campaign(conn, campaign_id) if campaign_id else None
+    try:
+        qvec = clip_embed.embed_image(path)
+    except Exception as exc:
+        return {"error": f"could not process image: {exc}"}
 
     if region:
+        # filter_campaign_ids already excludes superseded campaigns.
         candidate_ids = store.filter_campaign_ids(conn, region=region, exclude_campaign_id=campaign_id)
         assets = store.list_assets(conn, campaign_ids=candidate_ids)
     else:
-        assets = store.list_assets(conn, exclude_campaign_id=campaign_id)
+        superseded_ids = store.get_superseded_campaign_ids(conn)
+        assets = [a for a in store.list_assets(conn, exclude_campaign_id=campaign_id)
+                 if a["campaign_id"] not in superseded_ids]
 
     asset_to_campaign = {a["id"]: a["campaign_id"] for a in assets}
     vecs = vectorstore.get_many(conn, list(asset_to_campaign), space="asset")

@@ -121,9 +121,34 @@ def _id(prefix: str) -> str:
 
 # ── campaigns ────────────────────────────────────────────────────────────────
 
+_VALID_RECORD_TYPES = {"campaign", "reference", "stub"}
+_VALID_STATUSES = {"proposed", "in_flight", "concluded"}
+
+
+def _validate_record_type(value) -> None:
+    if value not in _VALID_RECORD_TYPES:
+        raise ValueError(f"invalid record_type {value!r}, must be one of {sorted(_VALID_RECORD_TYPES)}")
+
+
+def _validate_status(value) -> None:
+    if value is not None and value not in _VALID_STATUSES:
+        raise ValueError(f"invalid status {value!r}, must be one of {sorted(_VALID_STATUSES)} or None")
+
+
+def _validate_tags(tags) -> list:
+    if tags is None:
+        return []
+    if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+        raise ValueError(f"tags must be a list of strings, got {tags!r}")
+    return tags
+
+
 def insert_campaign(conn, *, title, record_type="campaign", status=None, detail=None,
                     deck_text=None, asset_path=None, tags=None, region=None, market=None,
                     supersedes=None) -> str:
+    _validate_record_type(record_type)
+    _validate_status(status)
+    tags = _validate_tags(tags)
     cid = _id("camp")
     now = _now()
     if status is None and record_type == "campaign":
@@ -132,7 +157,7 @@ def insert_campaign(conn, *, title, record_type="campaign", status=None, detail=
         """INSERT INTO campaigns (id, title, record_type, status, tags, region, market,
                                   supersedes, detail, deck_text, asset_path, created_at, updated_at)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (cid, title, record_type, status, json.dumps(tags or []), region, market, supersedes,
+        (cid, title, record_type, status, json.dumps(tags), region, market, supersedes,
          detail, deck_text, asset_path, now, now),
     )
     conn.commit()
@@ -223,6 +248,8 @@ def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Opti
     freeform and matched case-insensitively; tags matches if the campaign has ANY of the
     given tags (no fixed taxonomy — §6.3 decision).
     """
+    if tags is not None:
+        _validate_tags(tags)
     # §6.4: never surface a replaced record — derived live (see get_campaign's
     # is_superseded/superseded_by) rather than a maintained reverse-pointer column.
     clauses = ["id NOT IN (SELECT supersedes FROM campaigns WHERE supersedes IS NOT NULL)"]
@@ -265,10 +292,13 @@ def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_t
     if detail is not None:
         fields.append("detail = ?"); params.append(detail)
     if record_type is not None:
+        _validate_record_type(record_type)
         fields.append("record_type = ?"); params.append(record_type)
     if status is not None:
+        _validate_status(status)
         fields.append("status = ?"); params.append(status)
     if tags is not None:
+        tags = _validate_tags(tags)
         fields.append("tags = ?"); params.append(json.dumps(tags))
     if region is not None:
         fields.append("region = ?"); params.append(region)
@@ -447,8 +477,15 @@ def list_assets(conn, *, campaign_ids: Optional[list[str]] = None,
 
 # ── metrics ──────────────────────────────────────────────────────────────────
 
+_VALID_METRIC_TYPES = {"actual", "predicted"}
+
+
 def add_metrics(conn, campaign_id: str, *, detail=None, structured=None,
                 metric_type: str = "actual") -> str:
+    metric_type = str(metric_type).strip().lower()
+    if metric_type not in _VALID_METRIC_TYPES:
+        raise ValueError(f"invalid metric_type {metric_type!r}, "
+                         f"must be one of {sorted(_VALID_METRIC_TYPES)}")
     mid = _id("met")
     conn.execute(
         """INSERT INTO metrics (id, campaign_id, metric_type, detail, structured, created_at)
@@ -463,36 +500,53 @@ def add_metrics(conn, campaign_id: str, *, detail=None, structured=None,
 def bulk_import_metrics(conn, rows: list[dict]) -> dict:
     """
     Load a KPI workbook in one call (§6.5) instead of one add_metrics per row. Each row
-    identifies its campaign by `campaign_id` (preferred) or `title` (exact, case-insensitive
-    — ambiguous or missing matches are reported as errors, never guessed) and carries
-    `detail`/`structured`/`metric_type` like add_metrics. Partial success: valid rows import,
-    bad rows are reported per-row in `errors`, never silently dropped.
+    identifies its campaign by `campaign_id` (preferred) or `title` (exact, case-insensitive,
+    excluding superseded campaigns so a corrected re-upload resolves uniquely — ambiguous or
+    missing matches are reported as errors, never guessed) and carries
+    `detail`/`structured`/`metric_type` like add_metrics. Every row is processed
+    independently: a malformed row (wrong shape, bad metric_type, a nonexistent id) is
+    reported in `errors` and never crashes or blocks the rest of the batch.
     """
     imported, errors = 0, []
     for i, row in enumerate(rows):
-        cid = row.get("campaign_id")
-        if not cid:
-            title = row.get("title")
-            if not title:
-                errors.append({"row": i, "reason": "neither campaign_id nor title given"})
+        try:
+            if not isinstance(row, dict):
+                errors.append({"row": i, "reason": f"row must be an object, got {type(row).__name__}"})
                 continue
-            matches = conn.execute(
-                "SELECT id FROM campaigns WHERE LOWER(title) = LOWER(?)", (title,)
-            ).fetchall()
-            if not matches:
-                errors.append({"row": i, "reason": f"no campaign titled {title!r} found"})
-                continue
-            if len(matches) > 1:
-                errors.append({"row": i, "reason": f"title {title!r} is ambiguous ({len(matches)} matches)"})
-                continue
-            cid = matches[0]["id"]
-        elif get_campaign(conn, cid) is None:
-            errors.append({"row": i, "reason": f"campaign_id {cid!r} not found"})
-            continue
 
-        add_metrics(conn, cid, detail=row.get("detail"), structured=row.get("structured"),
-                   metric_type=row.get("metric_type", "actual"))
-        imported += 1
+            metric_type = str(row.get("metric_type", "actual")).strip().lower()
+            if metric_type not in _VALID_METRIC_TYPES:
+                errors.append({"row": i, "reason": f"invalid metric_type {metric_type!r}, "
+                                                    f"must be one of {sorted(_VALID_METRIC_TYPES)}"})
+                continue
+
+            cid = row.get("campaign_id")
+            if not cid:
+                title = row.get("title")
+                if not title:
+                    errors.append({"row": i, "reason": "neither campaign_id nor title given"})
+                    continue
+                matches = conn.execute(
+                    "SELECT id FROM campaigns WHERE LOWER(title) = LOWER(?) "
+                    "AND id NOT IN (SELECT supersedes FROM campaigns WHERE supersedes IS NOT NULL)",
+                    (title,),
+                ).fetchall()
+                if not matches:
+                    errors.append({"row": i, "reason": f"no campaign titled {title!r} found"})
+                    continue
+                if len(matches) > 1:
+                    errors.append({"row": i, "reason": f"title {title!r} is ambiguous ({len(matches)} matches)"})
+                    continue
+                cid = matches[0]["id"]
+            elif get_campaign(conn, cid) is None:
+                errors.append({"row": i, "reason": f"campaign_id {cid!r} not found"})
+                continue
+
+            add_metrics(conn, cid, detail=row.get("detail"), structured=row.get("structured"),
+                       metric_type=metric_type)
+            imported += 1
+        except Exception as exc:
+            errors.append({"row": i, "reason": str(exc)})
 
     return {"imported": imported, "errors": errors}
 
