@@ -46,14 +46,17 @@ for pkg in ("torch", "open_clip", "timm"):
     d, b, h = collect_all(pkg)
     datas += d; binaries += b; hiddenimports += h
 
-# torchvision's own extension modules (_C_stable.so, image_stable.so) are dlopen'd by
+# torchvision's own extension modules (_C_stable.*, image_stable.*) are dlopen'd by
 # explicit path at runtime, never `import`ed — collect_all/collect_dynamic_libs both miss
 # them (see the long comment above). Glob them directly into the same relative path
-# torchvision's own lookup expects: right next to torchvision/__init__.py.
+# torchvision's own lookup expects: right next to torchvision/__init__.py. .so on
+# macOS/Linux, .pyd on Windows — only macOS was actually rebuilt-and-run to verify this
+# session; Linux/Windows are the same fix by inspection but not yet independently verified.
 import torchvision
 _tv_dir = Path(torchvision.__file__).parent
-for so_file in _tv_dir.glob("*.so"):
-    binaries.append((str(so_file), "torchvision"))
+for pattern in ("*.so", "*.pyd"):
+    for ext_file in _tv_dir.glob(pattern):
+        binaries.append((str(ext_file), "torchvision"))
 
 # Server stack — collect submodules PyInstaller commonly under-detects.
 for pkg in ("uvicorn", "mcp", "starlette", "anyio", "fastapi", "pptx", "pypdf"):
