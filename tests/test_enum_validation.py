@@ -53,5 +53,5 @@ def test_update_campaign_rejects_non_string_tags(conn):
 
 def test_filter_campaign_ids_rejects_non_string_tags_in_query(conn):
     store.insert_campaign(conn, title="X", tags=["seeding"])
-    with pytest.raises(ValueError, match="tags"):
+    with pytest.raises(ValueError, match="tag"):
         store.filter_campaign_ids(conn, tags=[42])

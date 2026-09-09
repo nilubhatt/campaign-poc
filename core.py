@@ -61,11 +61,18 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
     compatibility with direct/programmatic callers that already know what they want stored.
     """
     if not confirm:
+        # Normalize (and validate — raise the same errors confirm=True would) so the
+        # preview shows what would ACTUALLY be stored, not the raw input. Reviewed: an
+        # unnormalized echo could look fine and then fail differently on confirm=True,
+        # defeating the point of a preview. has_actual_metrics=False always here: a
+        # not-yet-created campaign can't have metrics on file, so a 'verified' tag
+        # correctly raises at preview time too, not just on commit.
+        normalized_tags = store.normalize_tags(tags, has_actual_metrics=False)
         return {
             "preview": True, "title": title, "record_type": record_type,
             "status": status if status is not None else ("concluded" if record_type == "campaign" else None),
-            "tags": tags or [], "region": region, "market": market, "collection": collection,
-            "supersedes": supersedes, "detail": detail,
+            "tags": normalized_tags, "region": region, "market": market,
+            "collection": collection, "supersedes": supersedes, "detail": detail,
             "note": "Nothing has been stored yet. Show this to the user for confirmation or "
                     "edits, then call upload_campaign again with confirm=True to save it.",
         }
@@ -149,10 +156,9 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
 
 def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str] = None,
                  top_k: int = 5, record_type: Optional[str] = None, status: Optional[str] = None,
-                 tags: Optional[list[str]] = None, match_all_tags: bool = False,
-                 verified_tags_only: bool = False, region: Optional[str] = None,
-                 market: Optional[str] = None, collection: Optional[str] = None,
-                 full_detail: bool = False) -> list[dict]:
+                 tags: Optional[list] = None, match_all_tags: bool = False,
+                 region: Optional[str] = None, market: Optional[str] = None,
+                 collection: Optional[str] = None, full_detail: bool = False) -> list[dict]:
     """
     Rank prior campaigns by semantic similarity to `text` (or to an existing campaign's
     own content). Searches at chunk level (§6.1 — one vector per slide/section) and rolls
@@ -162,9 +168,12 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
     §6.2: if any of record_type/status/tags/region/market/collection is given, campaigns
     are filtered to that structured criteria FIRST, then ranked by similarity only within
     that set — otherwise pure vector search on a single-brand corpus returns everything as
-    "similar." tags default to ANY-match; match_all_tags=True requires every given tag (a
-    quadrant query, e.g. tags=["liked","underperformed"]); verified_tags_only=True only
-    counts a tag match backed by real data (source='verified'), not a stated impression.
+    "similar." tags is a list of plain strings (match that value, any source) and/or
+    {value, source} objects (match that value AND require that specific source) — mix
+    freely, e.g. tags=["liked", {"value": "underperformed", "source": "verified"}] with
+    match_all_tags=True for the actual quadrant query (a creative-reaction tag can never
+    itself be "verified" the way a performance tag can, so a single global verified-only
+    flag can't express this — per-tag precision can).
 
     §6.8: each row's freeform `detail` is trimmed to config.EVIDENCE_DETAIL_SUMMARY_CHARS by
     default (`detail_truncated` flags when that happened) — a similarity scan over several
@@ -194,9 +203,8 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
         # slot, starving every other campaign out of the result entirely).
         candidate_ids = store.filter_campaign_ids(
             conn, record_type=record_type, status=status, tags=tags,
-            match_all_tags=match_all_tags, verified_tags_only=verified_tags_only,
-            region=region, market=market, collection=collection,
-            exclude_campaign_id=campaign_id,
+            match_all_tags=match_all_tags, region=region, market=market,
+            collection=collection, exclude_campaign_id=campaign_id,
         )
         if not candidate_ids:
             return []
@@ -232,8 +240,14 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
         truncated = not full_detail and len(detail) > config.EVIDENCE_DETAIL_SUMMARY_CHARS
         if truncated:
             detail = detail[:config.EVIDENCE_DETAIL_SUMMARY_CHARS] + "... [truncated]"
+        # Most decision-relevant first: real outcomes before forecasts, most recent within
+        # each — trimming below then keeps the rows worth keeping. (Reviewed: trimming used
+        # to keep insertion order, i.e. the OLDEST rows — a campaign predicted early then
+        # measured later, the normal lifecycle, had its real actuals silently dropped from a
+        # browsing scan while stale predictions survived.)
+        sorted_metrics = sorted(c["metrics"], key=lambda m: (m["metric_type"] != "actual", -m["created_at"]))
         all_metrics = [{"metric_type": m["metric_type"], "detail": m["detail"],
-                        "structured": m["structured"]} for m in c["metrics"]]
+                        "structured": m["structured"]} for m in sorted_metrics]
         # §6.8 (extended): a match with many metrics rows (e.g. bulk-imported) was returning
         # all of them unconditionally even in a light similarity scan — heavy at top_k=5.
         # Same knob as detail: full_detail=True (prepare_evaluation's default) keeps every
@@ -262,10 +276,9 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
 
 def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: int = 5,
                        record_type: Optional[str] = None, status: Optional[str] = None,
-                       tags: Optional[list[str]] = None, match_all_tags: bool = False,
-                       verified_tags_only: bool = False, region: Optional[str] = None,
-                       market: Optional[str] = None, collection: Optional[str] = None,
-                       full_detail: bool = True) -> dict:
+                       tags: Optional[list] = None, match_all_tags: bool = False,
+                       region: Optional[str] = None, market: Optional[str] = None,
+                       collection: Optional[str] = None, full_detail: bool = True) -> dict:
     """
     Package the evidence Claude needs to judge a new proposal: the most similar prior
     campaigns WITH their outcomes. full_detail defaults to True here (unlike find_similar) —
@@ -273,12 +286,13 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
     Claude reads this, produces its analysis citing specific
     priors, then calls save_evaluation. This tool does NOT itself judge. Optionally narrow
     to structured criteria first (§6.2), e.g. region="APAC" to only weigh APAC precedent.
-    verified_tags_only=True weighs only precedent whose tags are backed by real data.
+    Pass a {"value": ..., "source": "verified"} tag to weigh only precedent whose matching
+    performance claim is backed by real metric data, not a stated impression.
     """
     evidence = find_similar(conn, text=proposal_text, top_k=top_k, record_type=record_type,
                             status=status, tags=tags, match_all_tags=match_all_tags,
-                            verified_tags_only=verified_tags_only, region=region,
-                            market=market, collection=collection, full_detail=full_detail)
+                            region=region, market=market, collection=collection,
+                            full_detail=full_detail)
     concluded = [e for e in evidence if e["metrics"]]
     return {
         "subject_title": subject_title,

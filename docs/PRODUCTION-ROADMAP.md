@@ -429,17 +429,42 @@ item against what was actually built. Most was addressed; three real gaps were f
   evidence when it isn't, and the agent will weight it as if it were." Tags are no longer
   plain strings — each is `{"value": str, "source": "verified"|"stated"}` (a plain string
   still works for ergonomics and defaults to `"stated"`, the conservative assumption).
-  `verified` means backed by real `metric_type='actual'` data; it's an explicit claim, never
-  inferred automatically from whether metrics exist — only set it when real numbers actually
-  back the specific tag. Added `verified_tags_only=True` to weigh only verified precedent.
-  The JSON schema itself (not just the docstring) documents the `{value, source}` shape via
-  a `TypedDict`, with `source` optional (defaults server-side) so the schema matches actual
-  permissive behavior.
 
-Verified end-to-end: the literal "Mexico record" scenario from the feedback (liked +
-verified-underperformed) is retrievable via `tags=["liked","underperformed"],
-match_all_tags=True`, and `verified_tags_only=True` correctly excludes a same-tagged but
-merely-stated match. 187 tests passing (was 169 before this round).
+  **First version of this was flawed** — two more independent reviews (adversarial + design,
+  same fresh-agent process as §8.5) on this specific change caught it: `source='verified'`
+  had no structural connection to anything (anyone could claim it with zero metrics behind
+  it — the exact trust problem the feature exists to fix, just moved one level down), and a
+  global `verified_tags_only` flag couldn't express the real quadrant query at all (a
+  creative-reaction tag like "liked" can never itself be "verified" the way a performance
+  tag can — a flag requiring every queried tag to be verified made "liked AND verified-
+  underperformed" unanswerable). Both fixed: `source='verified'` is now REJECTED unless the
+  campaign already has a `metric_type='actual'` record on file (enforced in
+  `store.normalize_tags`, not just documented — a brand-new campaign can never satisfy this,
+  so verified tags can only be set via `update_campaign`, after `add_metrics`, never at
+  creation). `verified_tags_only` is gone; tag queries now carry per-tag source instead
+  (mirroring the storage shape) — `tags=["liked", {"value": "underperformed", "source":
+  "verified"}]` expresses "liked, any evidence, AND underperformed, but only if verified" —
+  the actual quadrant query, precisely.
+
+  Also fixed in this pass: a database from before `collection` existed (including the
+  already-shipped v0.2.0 release) would have failed on every operation — `CREATE TABLE IF
+  NOT EXISTS` does nothing for a column added to an existing table. `init_db()` now runs an
+  additive migration (`ALTER TABLE ... ADD COLUMN` when missing, never destructive).
+  Pre-existing plain-string tags (from before provenance existed) are now tolerated on read
+  rather than crashing the new filtering code. `get_campaign` gained a derived
+  `collection_siblings` (mirroring `superseded_by`) — a collection value on its own wasn't
+  usable from a single record without a way to find the other members. Metrics trimming in
+  evidence now keeps the most decision-relevant rows (`actual` before `predicted`, most
+  recent within each) instead of the oldest by insertion order. The `confirm=False` preview
+  now normalizes (and validates) tags the same way `confirm=True` would, so what the user
+  reviews actually matches what gets stored.
+
+Verified end-to-end, including through a real MCP round-trip: the literal "Mexico record"
+scenario from the feedback (liked, stated + underperformed, verified) is retrievable via
+`tags=["liked", {"value":"underperformed","source":"verified"}], match_all_tags=True`, and
+attempting to mark a tag verified on a campaign with no actual metrics is correctly
+rejected. 199 tests passing (was 169 before this round; 187 after the first, flawed pass;
+199 after the fixes).
 
 **Still open, not fixed:**
 - **`&` → `&amp;`** — still unreproduced; no HTML/XML-escaping code found anywhere in the

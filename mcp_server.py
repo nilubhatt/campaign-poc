@@ -64,10 +64,11 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
     campaign or a future/proposed one* (record_type/status)? What do you *like* about it,
     what don't you like, what are you trying to *achieve* (fold into detail)? Where does it
     run (region/market)? Is it a market/version variant of something already in the memory
-    (collection)? Any tags that fit (see SUGGESTED_TAGS — a creative-reaction tag AND a
-    performance tag can both apply to the same campaign)? If they answer in one free-text
-    paragraph instead of field-by-field, parse it into these fields yourself rather than
-    asking again.
+    (collection)? Any tags that fit — two independent axes that commonly BOTH apply to the
+    same campaign: creative reaction (liked / not_liked / mixed_reaction) and performance
+    (performed_well / underperformed / performed_as_expected / no_data_yet). If they answer
+    in one free-text paragraph instead of field-by-field, parse it into these fields
+    yourself rather than asking again.
 
     Then call this tool with confirm=False (the default) to get a PREVIEW — nothing is
     stored yet. Show the user the breakdown you parsed ("Here's what I got: type=future,
@@ -83,9 +84,11 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
     campaign), or 'stub' (a placeholder record). status is 'proposed', 'in_flight', or
     'concluded' — defaults to 'concluded' for record_type='campaign', otherwise unset.
     tags is a list of strings or {"value","source"} objects (source: 'verified' if backed by
-    real data, 'stated' if it's someone's claim — defaults to 'stated', the conservative
-    assumption; see SUGGESTED_TAGS above for the creative-reaction/performance vocabulary,
-    though tags aren't restricted to it). region/market are freeform too (e.g.
+    real data — this requires the campaign to already have a metric_type='actual' record on
+    file, so it can only be set via update_campaign after add_metrics, never here on a
+    brand-new campaign — or 'stated' if it's someone's claim; defaults to 'stated', the
+    conservative assumption. Not restricted to the creative-reaction/performance vocabulary
+    above, but that's the vocabulary the "missing quadrant" analysis needs. region/market are freeform too (e.g.
     region='APAC', market='Philippines'). collection links market/version variants of the
     SAME creative — a symmetric grouping (e.g. all regional launches of one collection share
     a collection value), unlike supersedes below (asymmetric replacement). These structured
@@ -274,10 +277,10 @@ def get_campaign(campaign_id: str) -> dict:
 @mcp.tool()
 def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str] = None,
                            top_k: int = 5, record_type: Optional[RecordType] = None,
-                           status: Optional[Status] = None, tags: Optional[list[str]] = None,
-                           match_all_tags: bool = False, verified_tags_only: bool = False,
-                           region: Optional[str] = None, market: Optional[str] = None,
-                           collection: Optional[str] = None, full_detail: bool = False) -> dict:
+                           status: Optional[Status] = None, tags: Optional[list[TagInput]] = None,
+                           match_all_tags: bool = False, region: Optional[str] = None,
+                           market: Optional[str] = None, collection: Optional[str] = None,
+                           full_detail: bool = False) -> dict:
     """Semantic search: find prior campaigns most similar to a description (text) or to an
     existing campaign (campaign_id). Matches at the slide/section level and rolls up to the
     best-matching campaign, so long decks match on the relevant part.
@@ -286,12 +289,15 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
     then rank by similarity within it — e.g. status='concluded', region='APAC' to only weigh
     concluded APAC precedent instead of everything in the memory.
 
-    tags is a list of tag VALUES to search for (plain strings, matched regardless of
-    source) — defaults to ANY-match. For a quadrant query like "which campaigns were liked
-    but underperformed," pass tags=["liked","underperformed"] with match_all_tags=True
-    (otherwise you'd get anything matching EITHER tag, not the co-occurrence). Pass
-    verified_tags_only=True to only count tags backed by real data (source='verified'), not
-    someone's stated impression — important before treating a performance tag as evidence.
+    tags is a list of plain strings (match that value, any source) and/or {value, source}
+    objects (match that value AND require that specific source) — mix freely. Defaults to
+    ANY-match. For a quadrant query like "which campaigns were liked but VERIFIED
+    underperformed," pass tags=["liked", {"value": "underperformed", "source": "verified"}]
+    with match_all_tags=True (otherwise you'd get anything matching EITHER tag, not the
+    co-occurrence). A creative-reaction tag like "liked" can never itself be "verified" the
+    way a performance tag can — that's why source is per-tag, not one global flag: it lets
+    you require verification on just the performance tag while leaving the reaction tag
+    open to any source.
 
     Returns ranked evidence — title, status/tags/region/market/collection, similarity,
     detail, the matched excerpt, and metrics (each tag shows its value AND source) — for you
@@ -303,10 +309,9 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
         return {"matches": core.find_similar(conn, text=text, campaign_id=campaign_id,
                                              top_k=top_k, record_type=record_type,
                                              status=status, tags=tags,
-                                             match_all_tags=match_all_tags,
-                                             verified_tags_only=verified_tags_only,
-                                             region=region, market=market,
-                                             collection=collection, full_detail=full_detail)}
+                                             match_all_tags=match_all_tags, region=region,
+                                             market=market, collection=collection,
+                                             full_detail=full_detail)}
     finally:
         conn.close()
 
@@ -314,20 +319,19 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
 @mcp.tool()
 def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
                        record_type: Optional[RecordType] = None, status: Optional[Status] = None,
-                       tags: Optional[list[str]] = None, match_all_tags: bool = False,
-                       verified_tags_only: bool = False, region: Optional[str] = None,
-                       market: Optional[str] = None, collection: Optional[str] = None,
-                       full_detail: bool = True) -> dict:
+                       tags: Optional[list[TagInput]] = None, match_all_tags: bool = False,
+                       region: Optional[str] = None, market: Optional[str] = None,
+                       collection: Optional[str] = None, full_detail: bool = True) -> dict:
     """Evaluate a NEW campaign proposal against the memory. Returns the most similar prior
     campaigns WITH their outcomes as an evidence package (full detail by default — this is
     for judging, not browsing). Optionally narrow to structured criteria first (e.g.
     region='APAC') so only relevant precedent is weighed.
 
-    Pass verified_tags_only=True to weigh only precedent whose performance tags are backed
-    by real metric data (source='verified'), not someone's stated impression — a
-    performance claim with no measurement behind it should carry less weight in your
-    judgment than one with real numbers. Read the evidence's tags for each match's source
-    either way before treating a performance tag as fact.
+    Pass a tag as {"value": "underperformed", "source": "verified"} to weigh only precedent
+    whose matching performance claim is backed by real metric data, not someone's stated
+    impression — a performance claim with no measurement behind it should carry less
+    weight in your judgment than one with real numbers. Read the evidence's tags for each
+    match's source either way before treating a performance tag as fact.
 
     Read it, then produce your judgment (predicted CTR/ROI ranges, risks,
     proceed/revise/reject) CITING specific campaign_ids, and call save_evaluation. This tool
@@ -337,8 +341,7 @@ def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
         return core.prepare_evaluation(conn, subject_title=subject_title,
                                        proposal_text=proposal_text, top_k=top_k,
                                        record_type=record_type, status=status, tags=tags,
-                                       match_all_tags=match_all_tags,
-                                       verified_tags_only=verified_tags_only, region=region,
+                                       match_all_tags=match_all_tags, region=region,
                                        market=market, collection=collection,
                                        full_detail=full_detail)
     finally:
