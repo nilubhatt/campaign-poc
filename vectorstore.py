@@ -8,7 +8,13 @@ cosine over the same vectors stored in a plain table — so the product still ru
 just without the ANN index. Same `add()` / `search()` interface either way, so swapping in
 Postgres+pgvector later is a single-module change.
 
-Vectors are keyed by campaign id and kept in sync with the campaigns table.
+Vectors are keyed by `vector_id` — a chunk id for text (§6.1: one vector per chunk, several
+chunks per campaign) or an asset id for images (§6.6) — not a campaign id. Callers roll
+chunk/asset-level hits up to campaigns themselves (see core.find_similar/find_similar_images).
+
+Multiple named `space`s (default "campaign") let unrelated vector kinds coexist without
+sharing a table — needed because CLIP image embeddings (512-dim) and text-chunk embeddings
+(768-dim, nomic-embed-text) can't live in the same fixed-width vec0 column.
 """
 from __future__ import annotations
 
@@ -20,6 +26,12 @@ from typing import Optional
 import config
 
 _HAS_VEC: Optional[bool] = None
+
+# sqlite-vec's KNN `k` parameter has a hard upper bound (observed: 4096 in this build) — a
+# large `exclude` set (top_k + len(exclude), see search()) must be clamped before it crosses
+# that limit and crashes the query outright. Clamping means a very large exclude set can
+# silently return fewer than top_k results rather than erroring, which is the right tradeoff.
+_MAX_ANN_K = 4096
 
 
 def _try_load_vec(conn: sqlite3.Connection) -> bool:
@@ -43,68 +55,125 @@ def _pack(vec: list[float]) -> bytes:
     return struct.pack(f"{len(vec)}f", *vec)
 
 
-def init(conn: sqlite3.Connection) -> None:
-    """Create the vector table. vec0 when sqlite-vec is present, else a plain fallback table."""
+def _table_names(space: str) -> tuple[str, str]:
+    return f"{space}_vectors", f"{space}_vectors_fallback"
+
+
+def _default_dim(space: str) -> int:
+    """Known spaces default their own dimension so callers don't have to remember to pass
+    dim= by hand at every call site (review flagged the repeated-magic-number version of
+    this as a footgun — one missed dim= and get_many would misread the vector blob)."""
+    return config.CLIP_EMBED_DIM if space == "asset" else config.EMBED_DIM
+
+
+def init(conn: sqlite3.Connection, *, space: str = "campaign", dim: Optional[int] = None) -> None:
+    """Create the vector table for a space. vec0 when sqlite-vec is present, else a plain
+    fallback table. dim defaults to config.EMBED_DIM (the default "campaign" text space);
+    other spaces (e.g. "asset" for CLIP's 512-dim) must pass their own dim."""
+    dim = dim or _default_dim(space)
+    vec_table, fallback_table = _table_names(space)
     if _try_load_vec(conn):
         # distance_metric=cosine so `distance` is cosine distance (1 - cosine similarity);
         # the default is L2, under which `1 - distance` below would be meaningless.
         conn.execute(
-            f"CREATE VIRTUAL TABLE IF NOT EXISTS campaign_vectors USING vec0("
-            f"campaign_id TEXT PRIMARY KEY, "
-            f"embedding float[{config.EMBED_DIM}] distance_metric=cosine)"
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {vec_table} USING vec0("
+            f"vector_id TEXT PRIMARY KEY, "
+            f"embedding float[{dim}] distance_metric=cosine)"
         )
     else:
         # Fallback: store the raw vector as JSON; search brute-forces in Python.
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS campaign_vectors_fallback ("
-            "campaign_id TEXT PRIMARY KEY, embedding TEXT NOT NULL)"
+            f"CREATE TABLE IF NOT EXISTS {fallback_table} ("
+            f"vector_id TEXT PRIMARY KEY, embedding TEXT NOT NULL)"
         )
     conn.commit()
 
 
-def add(conn: sqlite3.Connection, campaign_id: str, vec: list[float]) -> None:
-    if len(vec) != config.EMBED_DIM:
-        raise ValueError(f"embedding dim {len(vec)} != configured EMBED_DIM {config.EMBED_DIM}")
+def add(conn: sqlite3.Connection, vector_id: str, vec: list[float], *,
+        space: str = "campaign", dim: Optional[int] = None) -> None:
+    dim = dim or _default_dim(space)
+    if len(vec) != dim:
+        raise ValueError(f"embedding dim {len(vec)} != expected {dim} for space {space!r}")
+    vec_table, fallback_table = _table_names(space)
     if _try_load_vec(conn):
-        conn.execute("DELETE FROM campaign_vectors WHERE campaign_id = ?", (campaign_id,))
+        conn.execute(f"DELETE FROM {vec_table} WHERE vector_id = ?", (vector_id,))
         conn.execute(
-            "INSERT INTO campaign_vectors (campaign_id, embedding) VALUES (?, ?)",
-            (campaign_id, _pack(vec)),
+            f"INSERT INTO {vec_table} (vector_id, embedding) VALUES (?, ?)",
+            (vector_id, _pack(vec)),
         )
     else:
         conn.execute(
-            "INSERT OR REPLACE INTO campaign_vectors_fallback (campaign_id, embedding) VALUES (?, ?)",
-            (campaign_id, json.dumps(vec)),
+            f"INSERT OR REPLACE INTO {fallback_table} (vector_id, embedding) VALUES (?, ?)",
+            (vector_id, json.dumps(vec)),
         )
     conn.commit()
 
 
-def search(conn: sqlite3.Connection, query_vec: list[float], *,
-           top_k: int = 5, exclude: Optional[set[str]] = None) -> list[tuple[str, float]]:
+def search(conn: sqlite3.Connection, query_vec: list[float], *, top_k: int = 5,
+           exclude: Optional[set[str]] = None, space: str = "campaign") -> list[tuple[str, float]]:
     """
-    Return [(campaign_id, similarity)] best-first. similarity is cosine in [-1, 1]
-    (converted from sqlite-vec's cosine *distance* so both backends agree on meaning).
+    Return [(vector_id, similarity)] best-first, within one space. similarity is cosine in
+    [-1, 1] (converted from sqlite-vec's cosine *distance* so both backends agree on meaning).
     """
+    vec_table, fallback_table = _table_names(space)
     exclude = exclude or set()
     if _try_load_vec(conn):
-        # over-fetch so post-filtering `exclude` still yields top_k
+        # over-fetch so post-filtering `exclude` still yields top_k, clamped to sqlite-vec's
+        # own k limit — an unclamped k crashes instead of just returning fewer results.
+        k = min(top_k + len(exclude), _MAX_ANN_K)
         rows = conn.execute(
-            "SELECT campaign_id, distance FROM campaign_vectors "
-            "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-            (_pack(query_vec), top_k + len(exclude)),
+            f"SELECT vector_id, distance FROM {vec_table} "
+            f"WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+            (_pack(query_vec), k),
         ).fetchall()
-        out = [(r["campaign_id"], 1.0 - r["distance"]) for r in rows if r["campaign_id"] not in exclude]
+        out = [(r["vector_id"], 1.0 - r["distance"]) for r in rows if r["vector_id"] not in exclude]
         return out[:top_k]
 
     # fallback: brute-force cosine
     import embedding as _emb
-    rows = conn.execute("SELECT campaign_id, embedding FROM campaign_vectors_fallback").fetchall()
+    rows = conn.execute(f"SELECT vector_id, embedding FROM {fallback_table}").fetchall()
     scored = [
-        (r["campaign_id"], _emb.cosine(query_vec, json.loads(r["embedding"])))
-        for r in rows if r["campaign_id"] not in exclude
+        (r["vector_id"], _emb.cosine(query_vec, json.loads(r["embedding"])))
+        for r in rows if r["vector_id"] not in exclude
     ]
     scored.sort(key=lambda t: t[1], reverse=True)
     return scored[:top_k]
+
+
+def get_many(conn: sqlite3.Connection, vector_ids: list[str], *, space: str = "campaign",
+            dim: Optional[int] = None) -> dict[str, list[float]]:
+    """Fetch raw vectors for specific ids (§6.2: filtered search brute-forces cosine over a
+    small pre-filtered candidate set instead of an unrestricted ANN query)."""
+    if not vector_ids:
+        return {}
+    dim = dim or _default_dim(space)
+    vec_table, fallback_table = _table_names(space)
+    placeholders = ",".join("?" * len(vector_ids))
+    if _try_load_vec(conn):
+        rows = conn.execute(
+            f"SELECT vector_id, embedding FROM {vec_table} WHERE vector_id IN ({placeholders})",
+            vector_ids,
+        ).fetchall()
+        return {r["vector_id"]: list(struct.unpack(f"{dim}f", r["embedding"])) for r in rows}
+    rows = conn.execute(
+        f"SELECT vector_id, embedding FROM {fallback_table} WHERE vector_id IN ({placeholders})",
+        vector_ids,
+    ).fetchall()
+    return {r["vector_id"]: json.loads(r["embedding"]) for r in rows}
+
+
+def delete_many(conn: sqlite3.Connection, vector_ids: list[str], *, space: str = "campaign") -> None:
+    """Purge vectors for deleted chunks/assets (§6.4/6.6) — otherwise they'd sit as stale rows
+    a search could still fetch, relying on the caller-side lookup silently dropping them."""
+    if not vector_ids:
+        return
+    vec_table, fallback_table = _table_names(space)
+    placeholders = ",".join("?" * len(vector_ids))
+    if _try_load_vec(conn):
+        conn.execute(f"DELETE FROM {vec_table} WHERE vector_id IN ({placeholders})", vector_ids)
+    else:
+        conn.execute(f"DELETE FROM {fallback_table} WHERE vector_id IN ({placeholders})", vector_ids)
+    conn.commit()
 
 
 def backend_name(conn: sqlite3.Connection) -> str:

@@ -22,7 +22,9 @@ The loop it enables:
 | Reasoning | **Claude** (the intelligence you're paying for) |
 | Transport | MCP over **Streamable HTTP** (`/mcp`) — what Claude Web connectors use |
 
-No Postgres, no CLIP/torch, no Docker required.
+No Postgres, no Docker required. CLIP (`torch` + `open_clip_torch`) IS a dependency, for
+aesthetic/regional image-similarity detection — a deliberate size tradeoff (~150-250MB of
+deps + a one-time ~350MB model download on first use); see `docs/PRODUCTION-ROADMAP.md` §6.6.
 
 ## Run it
 
@@ -33,10 +35,10 @@ pip install -r requirements.txt
 # real semantic search (local + free): install Ollama, then
 ollama pull nomic-embed-text        # one time
 
-python -m http_app                  # serves http://0.0.0.0:8080  (/mcp, /upload, /healthz)
+python -m http_app                  # serves http://0.0.0.0:8086  (/mcp, /upload, /healthz)
 ```
 
-Check it: `curl http://localhost:8080/healthz` →
+Check it: `curl http://localhost:8086/healthz` →
 `{"status":"ok","vector_backend":"sqlite-vec","embed_provider":"ollama",...}`
 
 Offline smoke test (no Ollama): `CAMPAIGN_POC_EMBED_PROVIDER=hash python -m http_app`
@@ -45,7 +47,7 @@ Offline smoke test (no Ollama): `CAMPAIGN_POC_EMBED_PROVIDER=hash python -m http
 ## Connect from Claude Web / cowork
 
 1. Expose the server on a reachable HTTPS URL — locally, a tunnel:
-   `cloudflared tunnel --url http://localhost:8080` (or `ngrok http 8080`).
+   `cloudflared tunnel --url http://localhost:8086` (or `ngrok http 8086`).
 2. Claude Web → **Settings → Connectors → Add custom connector** → point at `<public-url>/mcp`.
 3. In a chat: attach a campaign PDF and say *"upload this as a concluded campaign, detail: …"*;
    Claude reads the deck and calls `upload_campaign`. Then *"analyze this new proposal against
@@ -56,19 +58,24 @@ Offline smoke test (no Ollama): `CAMPAIGN_POC_EMBED_PROVIDER=hash python -m http
 
 ## Tools (what Claude calls)
 
-`upload_campaign` · `add_metrics` · `list_campaigns` · `get_campaign` ·
-`find_similar_campaigns` · `prepare_evaluation` · `save_evaluation` ·
-`reconcile_evaluation` · `save_reconciliation`
+`upload_campaign` · `update_campaign` · `delete_campaign` · `add_metrics` ·
+`bulk_import_metrics` · `upload_image_asset` · `check_image_provenance` ·
+`find_similar_images` · `list_campaigns` · `get_campaign` · `find_similar_campaigns` ·
+`prepare_evaluation` · `save_evaluation` · `list_evaluations` · `reconcile_evaluation` ·
+`save_reconciliation`
 
 ## Files
 
 ```
 config.py        env-driven config
-store.py         SQLite schema + CRUD (campaigns, metrics, evaluations, reconciliations)
-vectorstore.py   sqlite-vec vector table (+ pure-Python cosine fallback)
+store.py         SQLite schema + CRUD (campaigns, campaign_chunks, assets, asset_fingerprints, metrics, evaluations, reconciliations)
+vectorstore.py   sqlite-vec vector table, keyed by chunk id (+ pure-Python cosine fallback)
 embedding.py     ollama | voyage | hash embedders + cosine
-extract.py       PDF / PPTX text extraction
-core.py          ingest + semantic retrieval + evidence packaging (LLM-first)
+extract.py       PDF / PPTX text extraction, one unit per page/slide
+chunking.py      packs text units into embeddable chunks (server-side, per slide/section)
+images.py        perceptual hashing (pHash) for exact/near-duplicate creative-reuse detection
+clip_embed.py    CLIP visual embeddings for aesthetic/regional similarity (torch, heavy)
+core.py          ingest + chunk + semantic retrieval + evidence packaging (LLM-first)
 mcp_server.py    MCPServer tools (the API Claude calls)
 http_app.py      Streamable-HTTP app (/mcp) + /upload + /healthz
 auth.py          no-op auth seam (OAuth goes here)
@@ -94,8 +101,10 @@ Both **Claude Web** (custom connector → `<tunnel-url>/mcp`) and **Claude Deskt
 ## Roadmap
 
 This is being extended into the full product — a central multi-user server (Postgres + pgvector,
-chunked text + CLIP image vectors + perceptual-hash creative-reuse detection, region-scoped
-metadata, pluggable OAuth). Current priority is local end-to-end; production/OAuth/deploy is
+CLIP image vectors + perceptual-hash creative-reuse detection, region-scoped metadata, pluggable
+OAuth). Server-side chunking (per slide/section, one vector per chunk) already ships locally —
+the central move swaps the vector store for pgvector, same chunking. Current priority is local
+end-to-end; production/OAuth/deploy is
 captured in **[docs/PRODUCTION-ROADMAP.md](docs/PRODUCTION-ROADMAP.md)**. Auth is already a
 **pluggable provider** (`auth.py`) — no-op today, drop in Azure AD / any OIDC without touching call sites.
 
