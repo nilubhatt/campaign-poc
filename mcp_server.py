@@ -8,6 +8,7 @@ Claude Web / cowork custom connector points at.
 """
 from __future__ import annotations
 
+import functools
 from typing import Literal, NotRequired, Optional, TypedDict, Union
 
 from mcp.server.mcpserver import MCPServer
@@ -16,6 +17,25 @@ import core
 import store
 
 mcp = MCPServer("campaign-intelligence")
+
+
+def _catch_value_errors(fn):
+    """A validation ValueError raised from inside a tool body (store.py/core.py's input
+    validation — invalid enum values, a 'verified' tag with no metrics behind it, a
+    not-found id via find_similar, etc.) must not propagate as a raw exception: the MCP
+    framework converts any exception other than its own ToolError into a generic "Error
+    executing tool X" and discards the original message entirely (reviewed and reproduced
+    over a real MCP client — none of the carefully-written validation messages in this
+    codebase were reaching the caller). Convert to the same {"error": str(exc)} convention
+    already used for the not-found cases, so the actual guidance reaches Claude instead of
+    being silently swallowed."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except ValueError as exc:
+            return {"error": str(exc)}
+    return wrapper
 
 # Constrains the JSON schema the LLM sees for these params, instead of relying on prose in
 # a docstring alone — a typo ("inflight") is now a schema-validation error, not a silent
@@ -51,6 +71,7 @@ TagInput = Union[str, TagObject]
 
 
 @mcp.tool()
+@_catch_value_errors
 def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optional[str] = None,
                     record_type: RecordType = "campaign", status: Optional[Status] = None,
                     tags: Optional[list[TagInput]] = None, region: Optional[str] = None,
@@ -113,6 +134,7 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
 
 
 @mcp.tool()
+@_catch_value_errors
 def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optional[str] = None,
                     record_type: Optional[RecordType] = None, status: Optional[Status] = None,
                     tags: Optional[list[TagInput]] = None, region: Optional[str] = None,
@@ -138,6 +160,7 @@ def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optio
 
 
 @mcp.tool()
+@_catch_value_errors
 def delete_campaign(campaign_id: str) -> dict:
     """Permanently delete a campaign and its chunks/vectors/metrics. Evaluations that cited
     it are kept but detached. If this record superseded another one, that older record is
@@ -153,6 +176,7 @@ def delete_campaign(campaign_id: str) -> dict:
 
 
 @mcp.tool()
+@_catch_value_errors
 def upload_image_asset(campaign_id: str, asset_ref: dict) -> dict:
     """Attach an image (hero shot, creative asset) to a campaign. Processed two ways: a
     perceptual hash (exact/near-duplicate reuse — check_image_provenance) and a CLIP visual
@@ -168,6 +192,7 @@ def upload_image_asset(campaign_id: str, asset_ref: dict) -> dict:
 
 
 @mcp.tool()
+@_catch_value_errors
 def check_image_provenance(asset_ref: dict, campaign_id: Optional[str] = None) -> dict:
     """Check whether an image matches one already in the memory — same/near-same photo,
     even after resize/recompress/light crop (perceptual hashing; catches exact reuse, NOT
@@ -184,6 +209,7 @@ def check_image_provenance(asset_ref: dict, campaign_id: Optional[str] = None) -
 
 
 @mcp.tool()
+@_catch_value_errors
 def find_similar_images(asset_ref: dict, campaign_id: Optional[str] = None, top_k: int = 5,
                         region: Optional[str] = None) -> dict:
     """Aesthetic/regional visual similarity via CLIP — catches "same product, different
@@ -201,6 +227,7 @@ def find_similar_images(asset_ref: dict, campaign_id: Optional[str] = None, top_
 
 
 @mcp.tool()
+@_catch_value_errors
 def add_metrics(campaign_id: str, detail: Optional[str] = None,
                 structured: Optional[dict] = None, metric_type: MetricType = "actual",
                 confirm: bool = False) -> dict:
@@ -229,6 +256,7 @@ def add_metrics(campaign_id: str, detail: Optional[str] = None,
 
 
 @mcp.tool()
+@_catch_value_errors
 def bulk_import_metrics(rows: list) -> dict:
     """Load a KPI workbook in one call instead of one add_metrics per row. Each row is an
     object identifying its campaign by campaign_id (preferred) or title (exact,
@@ -244,6 +272,7 @@ def bulk_import_metrics(rows: list) -> dict:
 
 
 @mcp.tool()
+@_catch_value_errors
 def list_campaigns(record_type: Optional[RecordType] = None, status: Optional[Status] = None) -> dict:
     """List records in the memory. Optionally filter by record_type ('campaign', 'reference',
     'stub') and/or status ('proposed', 'in_flight', 'concluded'). is_superseded/supersedes
@@ -264,6 +293,7 @@ def list_campaigns(record_type: Optional[RecordType] = None, status: Optional[St
 
 
 @mcp.tool()
+@_catch_value_errors
 def get_campaign(campaign_id: str) -> dict:
     """Full detail + all metrics for one campaign by id."""
     conn = store.connect()
@@ -275,6 +305,7 @@ def get_campaign(campaign_id: str) -> dict:
 
 
 @mcp.tool()
+@_catch_value_errors
 def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str] = None,
                            top_k: int = 5, record_type: Optional[RecordType] = None,
                            status: Optional[Status] = None, tags: Optional[list[TagInput]] = None,
@@ -317,6 +348,7 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
 
 
 @mcp.tool()
+@_catch_value_errors
 def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
                        record_type: Optional[RecordType] = None, status: Optional[Status] = None,
                        tags: Optional[list[TagInput]] = None, match_all_tags: bool = False,
@@ -349,6 +381,7 @@ def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
 
 
 @mcp.tool()
+@_catch_value_errors
 def save_evaluation(subject_title: str, analysis: str, cited_ids: Optional[list] = None,
                     predictions: Optional[dict] = None, campaign_id: Optional[str] = None) -> dict:
     """Persist your judgment of a campaign so it becomes memory. Include the specific
@@ -365,6 +398,7 @@ def save_evaluation(subject_title: str, analysis: str, cited_ids: Optional[list]
 
 
 @mcp.tool()
+@_catch_value_errors
 def list_evaluations() -> dict:
     """List past evaluations (id, campaign_id, subject_title, created_at) — use this to find
     an evaluation_id when the user refers to a judgment by name rather than id (e.g.
@@ -378,6 +412,7 @@ def list_evaluations() -> dict:
 
 
 @mcp.tool()
+@_catch_value_errors
 def reconcile_evaluation(evaluation_id: str, actual: Optional[str] = None) -> dict:
     """Start closing the loop on a past judgment. If actual metrics are already on file for
     this campaign (via add_metrics/bulk_import_metrics), they're pulled automatically —
@@ -392,6 +427,7 @@ def reconcile_evaluation(evaluation_id: str, actual: Optional[str] = None) -> di
 
 
 @mcp.tool()
+@_catch_value_errors
 def save_reconciliation(evaluation_id: str, comparison: str, actual: Optional[str] = None) -> dict:
     """Persist your prediction-vs-actual comparison and the lesson learned, so future
     evaluations are better calibrated. Returns the reconciliation id."""

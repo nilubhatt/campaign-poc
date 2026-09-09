@@ -466,6 +466,26 @@ attempting to mark a tag verified on a campaign with no actual metrics is correc
 rejected. 199 tests passing (was 169 before this round; 187 after the first, flawed pass;
 199 after the fixes).
 
+**A third review round** (verification-focused, same fresh-agent process) confirmed all of
+the above actually holds up under tracing — plus caught one more real bug: a bare
+`ValueError` raised from inside a tool body (exactly what the new tag-provenance validation
+raises) was being swallowed by the MCP framework and replaced with a generic "Error
+executing tool X" — none of the carefully-written validation messages anywhere in this
+codebase were reaching the caller, verified by reproducing it over a real MCP streamable-
+HTTP client. Fixed with a `_catch_value_errors` decorator applied to every `@mcp.tool()`
+function, converting to the same `{"error": str(exc)}` convention already used for
+not-found cases. Re-verified over the live protocol afterward — the actual message now
+reaches the client. 204 tests passing.
+
+Minor items from the third round intentionally left as-is (documented, not silent): a
+`'verified'` tag is a one-time write gate, not a live invariant — if a `delete_metrics` tool
+is ever added, a tag could theoretically outlive the metric that justified it (no such tool
+exists today); `_keep_asset` still copies a file before tag validation runs on
+`confirm=True`, leaving an orphan on rejection (pre-existing pattern, not introduced here);
+`collection_siblings` doesn't exclude superseded records the way `filter_campaign_ids` does
+(mirrors `superseded_by`'s own behavior, arguable either way); an update on a nonexistent
+campaign_id with an invalid verified tag reports the tag error before the not-found error.
+
 **Still open, not fixed:**
 - **`&` → `&amp;`** — still unreproduced; no HTML/XML-escaping code found anywhere in the
   repo across two attempts. Needs a specific record to chase it in.
