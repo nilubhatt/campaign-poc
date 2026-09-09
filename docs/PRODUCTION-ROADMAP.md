@@ -403,6 +403,51 @@ reactively than to plan properly):
   fail (differently) on the `confirm=True` call. A fuller preview (cheap existence checks
   without doing the full extract/chunk/embed work) would close that gap.
 
+## 8.6 Closing the delta against the original feedback (2026-09-09)
+
+After §8.5's review round, went back to the **original feedback document** (the one that
+actually drove §6.1–6.9 — its exact wording, not the paraphrase in this doc) and checked each
+item against what was actually built. Most was addressed; three real gaps were found and closed:
+
+- **"No relationships. Same collection different market... buried in prose."** New
+  `campaigns.collection` (freeform, like region/market) — market/version variants of the same
+  creative now share an explicit, queryable value instead of only being findable by
+  title-guessing. `supersedes` already covered v1→v2 (replacement, asymmetric);
+  `collection` covers siblings (variants, symmetric) — a different relationship, not a
+  duplicate of supersedes.
+- **The four-category taxonomy, defined:** `liked` / `not_liked` / `mixed_reaction`
+  (creative reaction) and `performed_well` / `underperformed` / `performed_as_expected` /
+  `no_data_yet` (performance) — two independent axes that commonly co-occur on one campaign
+  (documented as `SUGGESTED_TAGS` in `mcp_server.py`, not schema-enforced — tags stay
+  freeform). Discovering this needed the query capability below, which didn't exist yet:
+  **tags matching was OR-only** ("has any of the given tags"), which cannot answer "show me
+  campaigns that are BOTH liked AND underperformed" — the actual quadrant query the taxonomy
+  exists to enable. Added `match_all_tags=True` (AND-match) to `filter_campaign_ids`/
+  `find_similar`/`find_similar_campaigns`/`prepare_evaluation`.
+- **Tag provenance — verified vs. stated:** "Four of our five performable tags are
+  currently impression, not measurements. Without that distinction, the tag reads as
+  evidence when it isn't, and the agent will weight it as if it were." Tags are no longer
+  plain strings — each is `{"value": str, "source": "verified"|"stated"}` (a plain string
+  still works for ergonomics and defaults to `"stated"`, the conservative assumption).
+  `verified` means backed by real `metric_type='actual'` data; it's an explicit claim, never
+  inferred automatically from whether metrics exist — only set it when real numbers actually
+  back the specific tag. Added `verified_tags_only=True` to weigh only verified precedent.
+  The JSON schema itself (not just the docstring) documents the `{value, source}` shape via
+  a `TypedDict`, with `source` optional (defaults server-side) so the schema matches actual
+  permissive behavior.
+
+Verified end-to-end: the literal "Mexico record" scenario from the feedback (liked +
+verified-underperformed) is retrievable via `tags=["liked","underperformed"],
+match_all_tags=True`, and `verified_tags_only=True` correctly excludes a same-tagged but
+merely-stated match. 187 tests passing (was 169 before this round).
+
+**Still open, not fixed:**
+- **`&` → `&amp;`** — still unreproduced; no HTML/XML-escaping code found anywhere in the
+  repo across two attempts. Needs a specific record to chase it in.
+- **Outcome data itself** — the mechanisms now exist (`bulk_import_metrics`, `metric_type`,
+  tag provenance), but no software fix produces real KPI data that hasn't been loaded yet.
+  §7's "missing quadrant" data gap is unchanged until the actual workbook is loaded.
+
 ## 9. Sequence
 
 1. **Now:** local Windows end-to-end green (Desktop + server + Ollama), campaigns loaded. **Done**

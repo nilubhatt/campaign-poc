@@ -24,7 +24,7 @@ def test_update_campaign_changes_only_given_fields(conn):
 def test_update_campaign_tags_fully_replaces_not_merges(conn):
     cid = store.insert_campaign(conn, title="X", tags=["a", "b"])
     store.update_campaign(conn, cid, tags=["c"])
-    assert store.get_campaign(conn, cid)["tags"] == ["c"]
+    assert store.get_campaign(conn, cid)["tags"] == [{"value": "c", "source": "stated"}]
 
 
 def test_update_campaign_missing_id_returns_false(conn):

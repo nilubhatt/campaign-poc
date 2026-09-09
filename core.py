@@ -35,16 +35,18 @@ _SEARCH_OVERFETCH = 20
 
 def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                     deck_text: Optional[str] = None, record_type: str = "campaign",
-                    status: Optional[str] = None, tags: Optional[list[str]] = None,
+                    status: Optional[str] = None, tags: Optional[list] = None,
                     region: Optional[str] = None, market: Optional[str] = None,
-                    supersedes: Optional[str] = None, asset_ref: Optional[dict] = None,
-                    confirm: bool = True) -> dict:
+                    collection: Optional[str] = None, supersedes: Optional[str] = None,
+                    asset_ref: Optional[dict] = None, confirm: bool = True) -> dict:
     """
     Store a past/proposed campaign, chunk it, and embed each chunk for search (§6.1).
 
     record_type distinguishes an actual campaign from background reference material or a
     placeholder stub (§6.3); status tracks a campaign's own lifecycle. tags/region/market
-    are structured fields used to filter BEFORE similarity ranking (§6.2).
+    are structured fields used to filter BEFORE similarity ranking (§6.2). collection links
+    market/version variants of the same creative (e.g. multiple regional launches of "Khloe
+    Q2 2026") — a symmetric grouping, unlike supersedes (asymmetric replacement).
 
     LLM-first: from Claude Web, pass `deck_text` (the text Claude already read from the
     attached PDF/PPTX) plus freeform `detail`. Alternatively pass `asset_ref`
@@ -62,8 +64,8 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         return {
             "preview": True, "title": title, "record_type": record_type,
             "status": status if status is not None else ("concluded" if record_type == "campaign" else None),
-            "tags": tags or [], "region": region, "market": market, "supersedes": supersedes,
-            "detail": detail,
+            "tags": tags or [], "region": region, "market": market, "collection": collection,
+            "supersedes": supersedes, "detail": detail,
             "note": "Nothing has been stored yet. Show this to the user for confirmation or "
                     "edits, then call upload_campaign again with confirm=True to save it.",
         }
@@ -83,8 +85,8 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
 
     cid = store.insert_campaign(
         conn, title=title, record_type=record_type, status=status, tags=tags, region=region,
-        market=market, supersedes=supersedes, detail=detail, deck_text=deck_text,
-        asset_path=stored_path,
+        market=market, collection=collection, supersedes=supersedes, detail=detail,
+        deck_text=deck_text, asset_path=stored_path,
     )
 
     if not units and deck_text:
@@ -147,17 +149,22 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
 
 def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str] = None,
                  top_k: int = 5, record_type: Optional[str] = None, status: Optional[str] = None,
-                 tags: Optional[list[str]] = None, region: Optional[str] = None,
-                 market: Optional[str] = None, full_detail: bool = False) -> list[dict]:
+                 tags: Optional[list[str]] = None, match_all_tags: bool = False,
+                 verified_tags_only: bool = False, region: Optional[str] = None,
+                 market: Optional[str] = None, collection: Optional[str] = None,
+                 full_detail: bool = False) -> list[dict]:
     """
     Rank prior campaigns by semantic similarity to `text` (or to an existing campaign's
     own content). Searches at chunk level (§6.1 — one vector per slide/section) and rolls
     up to the best-matching chunk per campaign, so a long deck can still match on the one
     section that's actually relevant. Excludes the query campaign's own chunks.
 
-    §6.2: if any of record_type/status/tags/region/market is given, campaigns are filtered
-    to that structured criteria FIRST, then ranked by similarity only within that set —
-    otherwise pure vector search on a single-brand corpus returns everything as "similar."
+    §6.2: if any of record_type/status/tags/region/market/collection is given, campaigns
+    are filtered to that structured criteria FIRST, then ranked by similarity only within
+    that set — otherwise pure vector search on a single-brand corpus returns everything as
+    "similar." tags default to ANY-match; match_all_tags=True requires every given tag (a
+    quadrant query, e.g. tags=["liked","underperformed"]); verified_tags_only=True only
+    counts a tag match backed by real data (source='verified'), not a stated impression.
 
     §6.8: each row's freeform `detail` is trimmed to config.EVIDENCE_DETAIL_SUMMARY_CHARS by
     default (`detail_truncated` flags when that happened) — a similarity scan over several
@@ -176,7 +183,7 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
         raise ValueError("provide text (or a campaign_id that has content) to search by")
 
     qvec = embedding.embed(text)
-    filters_given = any([record_type, status, tags, region, market])
+    filters_given = any([record_type, status, tags, region, market, collection])
     superseded_ids = store.get_superseded_campaign_ids(conn)
 
     if filters_given:
@@ -186,8 +193,10 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
         # before rollup is exactly the starvation bug review found (one deck filling every
         # slot, starving every other campaign out of the result entirely).
         candidate_ids = store.filter_campaign_ids(
-            conn, record_type=record_type, status=status, tags=tags, region=region,
-            market=market, exclude_campaign_id=campaign_id,
+            conn, record_type=record_type, status=status, tags=tags,
+            match_all_tags=match_all_tags, verified_tags_only=verified_tags_only,
+            region=region, market=market, collection=collection,
+            exclude_campaign_id=campaign_id,
         )
         if not candidate_ids:
             return []
@@ -223,6 +232,14 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
         truncated = not full_detail and len(detail) > config.EVIDENCE_DETAIL_SUMMARY_CHARS
         if truncated:
             detail = detail[:config.EVIDENCE_DETAIL_SUMMARY_CHARS] + "... [truncated]"
+        all_metrics = [{"metric_type": m["metric_type"], "detail": m["detail"],
+                        "structured": m["structured"]} for m in c["metrics"]]
+        # §6.8 (extended): a match with many metrics rows (e.g. bulk-imported) was returning
+        # all of them unconditionally even in a light similarity scan — heavy at top_k=5.
+        # Same knob as detail: full_detail=True (prepare_evaluation's default) keeps every
+        # row for real judgment; find_similar_campaigns' browsing default trims.
+        metrics_truncated = not full_detail and len(all_metrics) > config.EVIDENCE_METRICS_MAX
+        metrics = all_metrics[:config.EVIDENCE_METRICS_MAX] if metrics_truncated else all_metrics
         evidence.append({
             "campaign_id": cid,
             "title": c["title"],
@@ -231,19 +248,24 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
             "tags": c["tags"],
             "region": c["region"],
             "market": c["market"],
+            "collection": c["collection"],
             "similarity": round(sim, 4),
             "detail": detail,
             "detail_truncated": truncated,
             "matched_excerpt": matched["text"] if matched else "",
-            "metrics": [{"detail": m["detail"], "structured": m["structured"]} for m in c["metrics"]],
+            "metrics": metrics,
+            "metrics_total": len(all_metrics),
+            "metrics_truncated": metrics_truncated,
         })
     return evidence
 
 
 def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: int = 5,
                        record_type: Optional[str] = None, status: Optional[str] = None,
-                       tags: Optional[list[str]] = None, region: Optional[str] = None,
-                       market: Optional[str] = None, full_detail: bool = True) -> dict:
+                       tags: Optional[list[str]] = None, match_all_tags: bool = False,
+                       verified_tags_only: bool = False, region: Optional[str] = None,
+                       market: Optional[str] = None, collection: Optional[str] = None,
+                       full_detail: bool = True) -> dict:
     """
     Package the evidence Claude needs to judge a new proposal: the most similar prior
     campaigns WITH their outcomes. full_detail defaults to True here (unlike find_similar) —
@@ -251,10 +273,12 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
     Claude reads this, produces its analysis citing specific
     priors, then calls save_evaluation. This tool does NOT itself judge. Optionally narrow
     to structured criteria first (§6.2), e.g. region="APAC" to only weigh APAC precedent.
+    verified_tags_only=True weighs only precedent whose tags are backed by real data.
     """
     evidence = find_similar(conn, text=proposal_text, top_k=top_k, record_type=record_type,
-                            status=status, tags=tags, region=region, market=market,
-                            full_detail=full_detail)
+                            status=status, tags=tags, match_all_tags=match_all_tags,
+                            verified_tags_only=verified_tags_only, region=region,
+                            market=market, collection=collection, full_detail=full_detail)
     concluded = [e for e in evidence if e["metrics"]]
     return {
         "subject_title": subject_title,
