@@ -34,6 +34,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # CPU-only torch wheel: PyPI's default `torch` on Linux/Windows pulls CUDA + the
+          # nvidia-* dependency wheels (multiple GB, never used - CLIP inference here is
+          # CPU-only), which pushed the Linux bundle past GitHub's 2GB release-asset limit
+          # and silently failed "Attach to release" on v0.2.0/v0.2.1 (macOS/Windows happened
+          # to stay under the limit, so this went unnoticed there).
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt pyinstaller typer
 
       - name: Build bundle
