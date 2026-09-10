@@ -14,7 +14,8 @@ def test_insert_campaign_stores_structured_fields(conn):
     c = store.get_campaign(conn, cid)
     assert c["record_type"] == "campaign"
     assert c["status"] == "concluded"
-    assert c["tags"] == ["seeding", "awareness"]
+    assert c["tags"] == [{"value": "seeding", "source": "stated"},
+                         {"value": "awareness", "source": "stated"}]
     assert c["region"] == "APAC"
     assert c["market"] == "Philippines"
 

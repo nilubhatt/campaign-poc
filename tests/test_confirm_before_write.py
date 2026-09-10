@@ -24,9 +24,28 @@ def test_ingest_campaign_confirm_false_echoes_the_fields(conn):
                                   confirm=False)
     assert result["title"] == "APAC Push"
     assert result["status"] == "proposed"
-    assert result["tags"] == ["seeding"]
+    assert result["tags"] == [{"value": "seeding", "source": "stated"}]
     assert result["region"] == "APAC"
     assert result["market"] == "Philippines"
+
+
+def test_ingest_campaign_confirm_false_normalizes_tags_same_as_confirm_true_would(conn):
+    """Adversarial review finding: the preview echoed raw tags input unnormalized, so what
+    the user saw ("Here's what I got") didn't match what confirm=True would actually store
+    - defeating the point of a preview."""
+    preview = core.ingest_campaign(conn, title="X", tags=["Liked", "  Liked  "], confirm=False)
+    committed = core.ingest_campaign(conn, title="X", tags=["Liked", "  Liked  "], confirm=True)
+    assert preview["tags"] == store.get_campaign(conn, committed["campaign_id"])["tags"]
+
+
+def test_ingest_campaign_confirm_false_rejects_an_invalid_tag_same_as_confirm_true_would(conn):
+    """A preview that doesn't validate can look fine and then fail differently on
+    confirm=True - the preview should raise the exact same error, not silently accept it."""
+    import pytest
+    with pytest.raises(ValueError, match="verified"):
+        core.ingest_campaign(conn, title="X",
+                             tags=[{"value": "performed_well", "source": "verified"}],
+                             confirm=False)
 
 
 def test_ingest_campaign_confirm_false_still_defaults_status_for_campaigns(conn):

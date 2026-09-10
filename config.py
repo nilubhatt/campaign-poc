@@ -47,6 +47,8 @@ CLIP_EMBED_DIM = int(os.getenv("CAMPAIGN_POC_CLIP_DIM", "512"))  # ViT-B-32 = 51
 # default (full campaign briefs can be long; a similarity scan doesn't need all of it up
 # front) - pass full_detail=True, or call get_campaign, for the untrimmed record.
 EVIDENCE_DETAIL_SUMMARY_CHARS = int(os.getenv("CAMPAIGN_POC_EVIDENCE_DETAIL_CHARS", "300"))
+# Same idea, for a match's metrics list (a bulk-imported campaign can carry many rows).
+EVIDENCE_METRICS_MAX = int(os.getenv("CAMPAIGN_POC_EVIDENCE_METRICS_MAX", "5"))
 # Decks/briefs (extracted for search) plus images (§6.6 — pHash/CLIP; not text-extracted).
 ALLOWED_MIME = {
     "application/pdf",

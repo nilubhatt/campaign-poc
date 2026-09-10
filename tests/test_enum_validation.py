@@ -24,7 +24,7 @@ def test_insert_campaign_accepts_valid_values(conn):
 
 
 def test_insert_campaign_rejects_non_string_tags(conn):
-    with pytest.raises(ValueError, match="tags"):
+    with pytest.raises(ValueError, match="tag"):
         store.insert_campaign(conn, title="X", tags=["ok", 42])
 
 
@@ -47,11 +47,11 @@ def test_update_campaign_rejects_invalid_status(conn):
 
 def test_update_campaign_rejects_non_string_tags(conn):
     cid = store.insert_campaign(conn, title="X")
-    with pytest.raises(ValueError, match="tags"):
+    with pytest.raises(ValueError, match="tag"):
         store.update_campaign(conn, cid, tags=[1, 2, 3])
 
 
 def test_filter_campaign_ids_rejects_non_string_tags_in_query(conn):
     store.insert_campaign(conn, title="X", tags=["seeding"])
-    with pytest.raises(ValueError, match="tags"):
+    with pytest.raises(ValueError, match="tag"):
         store.filter_campaign_ids(conn, tags=[42])

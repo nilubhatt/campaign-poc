@@ -26,9 +26,13 @@ CREATE TABLE IF NOT EXISTS campaigns (
     title         TEXT NOT NULL,
     record_type   TEXT NOT NULL DEFAULT 'campaign',   -- campaign | reference | stub
     status        TEXT,            -- proposed | in_flight | concluded (campaigns only)
-    tags          TEXT NOT NULL DEFAULT '[]',   -- JSON array of freeform strings, no fixed taxonomy
+    tags          TEXT NOT NULL DEFAULT '[]',   -- JSON array of {value, source}, no fixed
+                                    -- taxonomy; source is verified|stated (§ tag provenance)
     region        TEXT,            -- freeform, e.g. "APAC"
     market        TEXT,            -- freeform, e.g. "Philippines"
+    collection    TEXT,            -- freeform: links market/version variants of the same
+                                    -- creative (e.g. "Khloe Q2 2026") - symmetric grouping,
+                                    -- unlike supersedes (asymmetric replacement)
     supersedes    TEXT,            -- campaign_id this record replaces (§6.4), if any.
                                     -- "superseded by" is DERIVED (see is_superseded/
                                     -- get_superseded_campaign_ids), not a maintained reverse
@@ -102,10 +106,24 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Additive migrations for columns added after a release — CREATE TABLE IF NOT EXISTS
+    (in _SCHEMA) does nothing for an EXISTING table, so a column added since someone's last
+    install (e.g. `collection`, added after v0.2.0 shipped with installers) would otherwise
+    make every insert/read against their real database fail outright (reviewed and
+    reproduced against a pre-collection schema). Never destructive — only ever adds a
+    nullable column to an existing table; a fresh DB already has it via _SCHEMA."""
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(campaigns)").fetchall()}
+    if "collection" not in existing:
+        conn.execute("ALTER TABLE campaigns ADD COLUMN collection TEXT")
+    conn.commit()
+
+
 def init_db() -> None:
     conn = connect()
     conn.executescript(_SCHEMA)
     conn.commit()
+    _migrate_schema(conn)
     vectorstore.init(conn)   # "campaign" space (text chunks, dim=config.EMBED_DIM)
     vectorstore.init(conn, space="asset", dim=config.CLIP_EMBED_DIM)  # CLIP image vectors
     conn.close()
@@ -135,30 +153,133 @@ def _validate_status(value) -> None:
         raise ValueError(f"invalid status {value!r}, must be one of {sorted(_VALID_STATUSES)} or None")
 
 
-def _validate_tags(tags) -> list:
+_VALID_TAG_SOURCES = {"verified", "stated"}
+
+
+def normalize_tags(tags, *, has_actual_metrics: bool = False) -> list[dict]:
+    """
+    Normalize tags to [{"value": str, "source": "verified"|"stated"}, ...]. A plain string
+    is accepted for ergonomics (LLM-first, conversational intake — §6.9) and defaults to
+    'stated': the conservative assumption that a tag is someone's claim, not measured
+    evidence, unless explicitly marked 'verified'. This distinction matters specifically for
+    performance-outcome tags (performed_well, underperformed, ...) — without it, a stated
+    impression reads as evidence and gets weighted as if it were (user feedback: four of
+    five performance tags in the real data were impressions, one had real numbers behind
+    it). tags overlap and a campaign commonly carries several at once (e.g. a creative-
+    reaction tag plus a performance tag) — this is a list, not a single value.
+
+    'verified' REQUIRES has_actual_metrics=True (i.e. the campaign already has at least one
+    metric_type='actual' record) — reviewed and found the first version of this let anyone
+    claim 'verified' with nothing behind it, defeating the whole point. A brand-new campaign
+    can never satisfy this (chicken-and-egg: no metrics exist yet at insert time), so
+    'verified' can only be set via update_campaign, after add_metrics/bulk_import_metrics.
+
+    Duplicate values (case/whitespace-insensitive) are deduped, preferring 'verified' over
+    'stated' if both appear for the same value.
+    """
     if tags is None:
         return []
-    if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
-        raise ValueError(f"tags must be a list of strings, got {tags!r}")
-    return tags
+    if not isinstance(tags, list):
+        raise ValueError(f"tags must be a list, got {tags!r}")
+    out = []
+    for t in tags:
+        if isinstance(t, str):
+            value, source = t.strip(), "stated"
+        elif isinstance(t, dict):
+            raw_value = t.get("value")
+            if not isinstance(raw_value, str) or not raw_value.strip():
+                raise ValueError(f"tag object must have a non-empty string 'value', got {t!r}")
+            value = raw_value.strip()
+            source = t.get("source", "stated")
+            if source not in _VALID_TAG_SOURCES:
+                raise ValueError(f"invalid tag source {source!r}, must be one of {sorted(_VALID_TAG_SOURCES)}")
+        else:
+            raise ValueError(f"tag must be a string or {{value, source}} object, got {t!r}")
+        if not value:
+            raise ValueError(f"tag value cannot be empty or whitespace-only, got {t!r}")
+        if source == "verified" and not has_actual_metrics:
+            raise ValueError(
+                f"tag {value!r} cannot be marked source='verified' — this campaign has no "
+                f"metric_type='actual' record on file yet. Add real metrics first "
+                f"(add_metrics/bulk_import_metrics), then update_campaign to mark it verified."
+            )
+        out.append({"value": value, "source": source})
+
+    deduped: dict[str, dict] = {}
+    for entry in out:
+        key = entry["value"].lower()
+        if key not in deduped or (deduped[key]["source"] != "verified" and entry["source"] == "verified"):
+            deduped[key] = entry
+    return list(deduped.values())
+
+
+def _parse_stored_tags(raw: Optional[str]) -> list[dict]:
+    """Parse a campaign's stored tags JSON, tolerating legacy plain-string entries (from
+    before tags carried provenance) — reviewed and found the strict-dict-only reader crashed
+    outright on any pre-existing row with the old shape."""
+    entries = json.loads(raw) if raw else []
+    out = []
+    for e in entries:
+        if isinstance(e, str):
+            out.append({"value": e, "source": "stated"})
+        elif isinstance(e, dict):
+            out.append({"value": e.get("value", ""), "source": e.get("source", "stated")})
+    return out
+
+
+def _parse_tag_query(tags) -> list[tuple[str, Optional[str]]]:
+    """
+    Parse a tags filter into [(value_lower, source_or_None), ...]. Each entry is a plain
+    string (match that value regardless of source) or a {value, source} object (match that
+    value AND require that specific source) — mirrors the storage shape so a query can mix
+    precision per tag: tags=["liked", {"value": "underperformed", "source": "verified"}]
+    means "liked, any evidence, AND underperformed, but only if verified." A single global
+    verified-only flag can't express this — reviewed and found it forces every queried tag
+    (including ones that can never be "verified," like a creative-reaction tag) through the
+    same requirement, making the actual quadrant query unanswerable.
+    """
+    if tags is None:
+        return []
+    if not isinstance(tags, list):
+        raise ValueError(f"tags filter must be a list, got {tags!r}")
+    out = []
+    for t in tags:
+        if isinstance(t, str):
+            value, source = t.strip(), None
+        elif isinstance(t, dict):
+            raw_value = t.get("value")
+            if not isinstance(raw_value, str) or not raw_value.strip():
+                raise ValueError(f"tag query object must have a non-empty string 'value', got {t!r}")
+            value = raw_value.strip()
+            source = t.get("source")
+            if source is not None and source not in _VALID_TAG_SOURCES:
+                raise ValueError(f"invalid tag source {source!r} in query, must be one of "
+                                 f"{sorted(_VALID_TAG_SOURCES)} or omitted")
+        else:
+            raise ValueError(f"tag query entry must be a string or {{value, source}} object, got {t!r}")
+        if not value:
+            raise ValueError(f"tag query value cannot be empty or whitespace-only, got {t!r}")
+        out.append((value.lower(), source))
+    return out
 
 
 def insert_campaign(conn, *, title, record_type="campaign", status=None, detail=None,
                     deck_text=None, asset_path=None, tags=None, region=None, market=None,
-                    supersedes=None) -> str:
+                    collection=None, supersedes=None) -> str:
     _validate_record_type(record_type)
     _validate_status(status)
-    tags = _validate_tags(tags)
+    tags = normalize_tags(tags, has_actual_metrics=False)  # brand-new: no metrics can exist yet
     cid = _id("camp")
     now = _now()
     if status is None and record_type == "campaign":
         status = "concluded"  # reference/stub records have no lifecycle status by default
     conn.execute(
         """INSERT INTO campaigns (id, title, record_type, status, tags, region, market,
-                                  supersedes, detail, deck_text, asset_path, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (cid, title, record_type, status, json.dumps(tags), region, market, supersedes,
-         detail, deck_text, asset_path, now, now),
+                                  collection, supersedes, detail, deck_text, asset_path,
+                                  created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (cid, title, record_type, status, json.dumps(tags), region, market, collection,
+         supersedes, detail, deck_text, asset_path, now, now),
     )
     conn.commit()
     return cid
@@ -179,7 +300,7 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
     if not row:
         return None
     d = dict(row)
-    d["tags"] = json.loads(d["tags"]) if d["tags"] else []
+    d["tags"] = _parse_stored_tags(d["tags"])
     d["metrics"] = [dict(m) for m in conn.execute(
         "SELECT * FROM metrics WHERE campaign_id = ? ORDER BY created_at", (campaign_id,)
     ).fetchall()]
@@ -191,6 +312,14 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
         "SELECT id FROM campaigns WHERE supersedes = ?", (campaign_id,)
     ).fetchall()]
     d["is_superseded"] = len(d["superseded_by"]) > 0
+    # Derived, not maintained — same reasoning as superseded_by/is_superseded above: a
+    # freeform collection value on its own isn't usable from a single record without a way
+    # to find the other members (design review flagged this as the missing half of the
+    # feature).
+    d["collection_siblings"] = [r["id"] for r in conn.execute(
+        "SELECT id FROM campaigns WHERE collection IS NOT NULL AND LOWER(collection) = LOWER(?) "
+        "AND id != ?", (d["collection"], campaign_id)
+    ).fetchall()] if d["collection"] else []
     d["assets"] = get_assets_for_campaign(conn, campaign_id)
     chunk_rows = conn.execute(
         "SELECT embedded FROM campaign_chunks WHERE campaign_id = ?", (campaign_id,)
@@ -231,6 +360,7 @@ def list_campaigns(conn, *, record_type: Optional[str] = None,
     out = []
     for r in rows:
         d = dict(r)
+        d["tags"] = _parse_stored_tags(d["tags"])
         d["has_metrics"] = d["id"] in with_metrics
         d["is_superseded"] = d["id"] in superseded_ids
         d["has_evaluations"] = d["id"] in with_evaluations
@@ -239,18 +369,26 @@ def list_campaigns(conn, *, record_type: Optional[str] = None,
 
 
 def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Optional[str] = None,
-                        tags: Optional[list[str]] = None, region: Optional[str] = None,
-                        market: Optional[str] = None, exclude_campaign_id: Optional[str] = None
-                        ) -> list[str]:
+                        tags: Optional[list] = None, match_all_tags: bool = False,
+                        region: Optional[str] = None, market: Optional[str] = None,
+                        collection: Optional[str] = None,
+                        exclude_campaign_id: Optional[str] = None) -> list[str]:
     """
     Structured filtering BEFORE similarity ranking (§6.2) — on a single-brand corpus, pure
     vector search returns noise; narrow to the matching campaigns first (e.g. "concluded
-    seeding campaigns in APAC"), then rank what's left by similarity. region/market are
-    freeform and matched case-insensitively; tags matches if the campaign has ANY of the
-    given tags (no fixed taxonomy — §6.3 decision).
+    seeding campaigns in APAC"), then rank what's left by similarity. region/market/
+    collection are freeform and matched case-insensitively.
+
+    tags is a list of plain strings (match that value, any source) and/or {value, source}
+    objects (match that value AND require that specific source) — mix freely. Defaults to
+    ANY-match (has at least one). Pass match_all_tags=True for AND-match (has every one) —
+    needed for a quadrant query like tags=["liked", {"value": "underperformed",
+    "source": "verified"}]: "liked" (any evidence) AND "underperformed" but only if
+    verified. A creative-reaction tag can never itself be "verified" the way a performance
+    tag can, so per-tag precision — not one global verified-only flag — is what makes the
+    actual quadrant query answerable.
     """
-    if tags is not None:
-        _validate_tags(tags)
+    wanted = _parse_tag_query(tags)
     # §6.4: never surface a replaced record — derived live (see get_campaign's
     # is_superseded/superseded_by) rather than a maintained reverse-pointer column.
     clauses = ["id NOT IN (SELECT supersedes FROM campaigns WHERE supersedes IS NOT NULL)"]
@@ -267,6 +405,9 @@ def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Opti
     if market:
         clauses.append("LOWER(market) = LOWER(?)")
         params.append(market)
+    if collection:
+        clauses.append("LOWER(collection) = LOWER(?)")
+        params.append(collection)
     if exclude_campaign_id:
         clauses.append("id != ?")
         params.append(exclude_campaign_id)
@@ -275,15 +416,22 @@ def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Opti
     sql += " ORDER BY created_at"
     rows = conn.execute(sql, params).fetchall()
 
-    if tags:
-        wanted = {t.lower() for t in tags}
-        rows = [r for r in rows if wanted & {t.lower() for t in json.loads(r["tags"] or "[]")}]
+    if wanted:
+        def one_matches(stored_pairs, value, source) -> bool:
+            return any(v == value and (source is None or s == source) for v, s in stored_pairs)
+
+        def campaign_matches(row) -> bool:
+            stored_pairs = [(e["value"].lower(), e["source"]) for e in _parse_stored_tags(row["tags"])]
+            checks = (one_matches(stored_pairs, v, s) for v, s in wanted)
+            return all(checks) if match_all_tags else any(checks)
+
+        rows = [r for r in rows if campaign_matches(r)]
 
     return [r["id"] for r in rows]
 
 
 def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_type=None,
-                    status=None, tags=None, region=None, market=None) -> bool:
+                    status=None, tags=None, region=None, market=None, collection=None) -> bool:
     """Update campaign metadata (§6.4) — NOT deck_text/chunks/embeddings; re-upload (or
     supersede) for content changes. Only given fields change; tags, if given, fully replaces
     the existing list rather than merging. Returns whether the campaign exists."""
@@ -299,12 +447,18 @@ def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_t
         _validate_status(status)
         fields.append("status = ?"); params.append(status)
     if tags is not None:
-        tags = _validate_tags(tags)
+        has_actual = conn.execute(
+            "SELECT 1 FROM metrics WHERE campaign_id = ? AND metric_type = 'actual' LIMIT 1",
+            (campaign_id,),
+        ).fetchone() is not None
+        tags = normalize_tags(tags, has_actual_metrics=has_actual)
         fields.append("tags = ?"); params.append(json.dumps(tags))
     if region is not None:
         fields.append("region = ?"); params.append(region)
     if market is not None:
         fields.append("market = ?"); params.append(market)
+    if collection is not None:
+        fields.append("collection = ?"); params.append(collection)
 
     if not fields:
         return get_campaign(conn, campaign_id) is not None

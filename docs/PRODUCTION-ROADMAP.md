@@ -403,6 +403,96 @@ reactively than to plan properly):
   fail (differently) on the `confirm=True` call. A fuller preview (cheap existence checks
   without doing the full extract/chunk/embed work) would close that gap.
 
+## 8.6 Closing the delta against the original feedback (2026-09-09)
+
+After §8.5's review round, went back to the **original feedback document** (the one that
+actually drove §6.1–6.9 — its exact wording, not the paraphrase in this doc) and checked each
+item against what was actually built. Most was addressed; three real gaps were found and closed:
+
+- **"No relationships. Same collection different market... buried in prose."** New
+  `campaigns.collection` (freeform, like region/market) — market/version variants of the same
+  creative now share an explicit, queryable value instead of only being findable by
+  title-guessing. `supersedes` already covered v1→v2 (replacement, asymmetric);
+  `collection` covers siblings (variants, symmetric) — a different relationship, not a
+  duplicate of supersedes.
+- **The four-category taxonomy, defined:** `liked` / `not_liked` / `mixed_reaction`
+  (creative reaction) and `performed_well` / `underperformed` / `performed_as_expected` /
+  `no_data_yet` (performance) — two independent axes that commonly co-occur on one campaign
+  (documented as `SUGGESTED_TAGS` in `mcp_server.py`, not schema-enforced — tags stay
+  freeform). Discovering this needed the query capability below, which didn't exist yet:
+  **tags matching was OR-only** ("has any of the given tags"), which cannot answer "show me
+  campaigns that are BOTH liked AND underperformed" — the actual quadrant query the taxonomy
+  exists to enable. Added `match_all_tags=True` (AND-match) to `filter_campaign_ids`/
+  `find_similar`/`find_similar_campaigns`/`prepare_evaluation`.
+- **Tag provenance — verified vs. stated:** "Four of our five performable tags are
+  currently impression, not measurements. Without that distinction, the tag reads as
+  evidence when it isn't, and the agent will weight it as if it were." Tags are no longer
+  plain strings — each is `{"value": str, "source": "verified"|"stated"}` (a plain string
+  still works for ergonomics and defaults to `"stated"`, the conservative assumption).
+
+  **First version of this was flawed** — two more independent reviews (adversarial + design,
+  same fresh-agent process as §8.5) on this specific change caught it: `source='verified'`
+  had no structural connection to anything (anyone could claim it with zero metrics behind
+  it — the exact trust problem the feature exists to fix, just moved one level down), and a
+  global `verified_tags_only` flag couldn't express the real quadrant query at all (a
+  creative-reaction tag like "liked" can never itself be "verified" the way a performance
+  tag can — a flag requiring every queried tag to be verified made "liked AND verified-
+  underperformed" unanswerable). Both fixed: `source='verified'` is now REJECTED unless the
+  campaign already has a `metric_type='actual'` record on file (enforced in
+  `store.normalize_tags`, not just documented — a brand-new campaign can never satisfy this,
+  so verified tags can only be set via `update_campaign`, after `add_metrics`, never at
+  creation). `verified_tags_only` is gone; tag queries now carry per-tag source instead
+  (mirroring the storage shape) — `tags=["liked", {"value": "underperformed", "source":
+  "verified"}]` expresses "liked, any evidence, AND underperformed, but only if verified" —
+  the actual quadrant query, precisely.
+
+  Also fixed in this pass: a database from before `collection` existed (including the
+  already-shipped v0.2.0 release) would have failed on every operation — `CREATE TABLE IF
+  NOT EXISTS` does nothing for a column added to an existing table. `init_db()` now runs an
+  additive migration (`ALTER TABLE ... ADD COLUMN` when missing, never destructive).
+  Pre-existing plain-string tags (from before provenance existed) are now tolerated on read
+  rather than crashing the new filtering code. `get_campaign` gained a derived
+  `collection_siblings` (mirroring `superseded_by`) — a collection value on its own wasn't
+  usable from a single record without a way to find the other members. Metrics trimming in
+  evidence now keeps the most decision-relevant rows (`actual` before `predicted`, most
+  recent within each) instead of the oldest by insertion order. The `confirm=False` preview
+  now normalizes (and validates) tags the same way `confirm=True` would, so what the user
+  reviews actually matches what gets stored.
+
+Verified end-to-end, including through a real MCP round-trip: the literal "Mexico record"
+scenario from the feedback (liked, stated + underperformed, verified) is retrievable via
+`tags=["liked", {"value":"underperformed","source":"verified"}], match_all_tags=True`, and
+attempting to mark a tag verified on a campaign with no actual metrics is correctly
+rejected. 199 tests passing (was 169 before this round; 187 after the first, flawed pass;
+199 after the fixes).
+
+**A third review round** (verification-focused, same fresh-agent process) confirmed all of
+the above actually holds up under tracing — plus caught one more real bug: a bare
+`ValueError` raised from inside a tool body (exactly what the new tag-provenance validation
+raises) was being swallowed by the MCP framework and replaced with a generic "Error
+executing tool X" — none of the carefully-written validation messages anywhere in this
+codebase were reaching the caller, verified by reproducing it over a real MCP streamable-
+HTTP client. Fixed with a `_catch_value_errors` decorator applied to every `@mcp.tool()`
+function, converting to the same `{"error": str(exc)}` convention already used for
+not-found cases. Re-verified over the live protocol afterward — the actual message now
+reaches the client. 204 tests passing.
+
+Minor items from the third round intentionally left as-is (documented, not silent): a
+`'verified'` tag is a one-time write gate, not a live invariant — if a `delete_metrics` tool
+is ever added, a tag could theoretically outlive the metric that justified it (no such tool
+exists today); `_keep_asset` still copies a file before tag validation runs on
+`confirm=True`, leaving an orphan on rejection (pre-existing pattern, not introduced here);
+`collection_siblings` doesn't exclude superseded records the way `filter_campaign_ids` does
+(mirrors `superseded_by`'s own behavior, arguable either way); an update on a nonexistent
+campaign_id with an invalid verified tag reports the tag error before the not-found error.
+
+**Still open, not fixed:**
+- **`&` → `&amp;`** — still unreproduced; no HTML/XML-escaping code found anywhere in the
+  repo across two attempts. Needs a specific record to chase it in.
+- **Outcome data itself** — the mechanisms now exist (`bulk_import_metrics`, `metric_type`,
+  tag provenance), but no software fix produces real KPI data that hasn't been loaded yet.
+  §7's "missing quadrant" data gap is unchanged until the actual workbook is loaded.
+
 ## 9. Sequence
 
 1. **Now:** local Windows end-to-end green (Desktop + server + Ollama), campaigns loaded. **Done**
