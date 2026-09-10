@@ -101,6 +101,27 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
     freeform detail you have (brief, audience, budget, channel, timeline). The server chunks
     and embeds it per slide/section for search.
 
+    Passing deck_text alone does NOT check images — you also need asset_ref (a reference to
+    the actual file: POST /upload first to get one, or a local path in stdio mode). Prefer
+    passing asset_ref whenever you have the file, alongside deck_text if you already read it
+    (deck_text you pass is kept as-is, not overwritten by server-side extraction) — this is
+    the only way to get automatic creative-reuse detection, and it's what most users actually
+    want when they attach a deck.
+
+    When asset_ref resolves to a real file, the server ALSO extracts every image embedded in
+    the deck automatically, fingerprints and visually embeds each one, and checks it against
+    every other campaign's images for reuse — no separate upload_image_asset call needed per
+    image (nobody would actually do that for every slide). Check the response's
+    images_checked field first: True means image reuse was actually checked (image_assets may
+    still be empty if the deck simply had no images); False means it was NOT checked at all
+    (no file reached the server, or extraction itself failed) — do not tell the user "no
+    reuse found" when images_checked is False. When True, each image_assets entry's
+    reuse_flags is a list of prior campaigns whose image matched this one (by content, not by
+    look) — a NON-EMPTY list means that image was reused, period, even if its `flag` field is
+    null (null `flag` = reused within the same region, not itself suspicious; a `flag` string
+    = reused across a different region, the signal worth calling out). Mention every non-empty
+    reuse_flags entry to the user, not just ones with a `flag` string.
+
     record_type is 'campaign' (default), 'reference' (background material, not itself a
     campaign), or 'stub' (a placeholder record). status is 'proposed', 'in_flight', or
     'concluded' — defaults to 'concluded' for record_type='campaign', otherwise unset.
@@ -122,7 +143,7 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
 
     Add results later with add_metrics. On confirm=True, returns the campaign_id plus
     chunks_total/chunks_embedded (partial embedding failures are reported per-chunk in
-    warnings, not silently)."""
+    warnings, not silently), and images_checked/image_assets (see above)."""
     conn = store.connect()
     try:
         return core.ingest_campaign(conn, title=title, detail=detail, deck_text=deck_text,
