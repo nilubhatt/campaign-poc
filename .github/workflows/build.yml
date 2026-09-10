@@ -38,8 +38,13 @@ jobs:
           # nvidia-* dependency wheels (multiple GB, never used - CLIP inference here is
           # CPU-only), which pushed the Linux bundle past GitHub's 2GB release-asset limit
           # and silently failed "Attach to release" on v0.2.0/v0.2.1 (macOS/Windows happened
-          # to stay under the limit, so this went unnoticed there).
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          # to stay under the limit, so this went unnoticed there). torchvision must be
+          # pinned to the SAME index in the same command - open_clip_torch pulls torchvision
+          # transitively from requirements.txt below, and a torchvision built against the
+          # default (CUDA) torch ABI raises "operator torchvision::nms does not exist"
+          # against a CPU-only torch (verified: v0.2.3's Linux build failed exactly this way
+          # when only torch, not torchvision, was pinned).
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt pyinstaller typer
 
       - name: Build bundle
