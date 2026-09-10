@@ -60,6 +60,10 @@ PPT_LEGACY_MIME = "application/vnd.ms-powerpoint"
 # review found upload_image_asset's docstring claimed POST /upload works for images while
 # ALLOWED_MIME (deck-only) silently rejected them — this is that route's actual allow-list.
 ALLOWED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp"}
+# Images embedded inside an uploaded deck, extracted automatically on upload_campaign (via
+# asset_ref) so creative-reuse detection doesn't require re-uploading every image by hand -
+# "who'll use it then?" Capped to bound per-upload phash/CLIP cost on a deck with many images.
+MAX_EXTRACTED_IMAGES_PER_DECK = int(os.getenv("CAMPAIGN_POC_MAX_EXTRACTED_IMAGES", "20"))
 MAX_ASSET_BYTES = int(os.getenv("CAMPAIGN_POC_MAX_ASSET_MB", "100")) * 1024 * 1024
 MAX_INLINE_BYTES = int(os.getenv("CAMPAIGN_POC_MAX_INLINE_MB", "10")) * 1024 * 1024
 

@@ -493,6 +493,105 @@ campaign_id with an invalid verified tag reports the tag error before the not-fo
   tag provenance), but no software fix produces real KPI data that hasn't been loaded yet.
   §7's "missing quadrant" data gap is unchanged until the actual workbook is loaded.
 
+## 8.7 Automatic image extraction from uploaded decks (2026-09-10)
+
+§6.6's `check_image_provenance`/`upload_image_asset` pair only ever worked as a **standalone**
+path — a user (or Claude) had to upload each image separately, one call per image. Real
+decks carry their images baked in; the user's own correction: *"Image reuse detection can't
+just be outside of the deck as an independent functionality... you really want users to be
+doing this for every image? who'll use it then?"* A day before a live demo, chose to build
+this now rather than after, despite it touching `core.ingest_campaign` — the single most
+load-bearing function in the product, with no time left for the multi-round review cycle
+that caught real bugs in every prior pass (§8.5, §8.6).
+
+- New `extract.extract_images(path)` (PDF via `pypdf`'s `page.images`, PPTX via
+  `python-pptx`'s `shape.image.blob`/`.ext` on `MSO_SHAPE_TYPE.PICTURE` shapes), capped at
+  `config.MAX_EXTRACTED_IMAGES_PER_DECK` (default 20, bounds per-upload phash/CLIP cost on a
+  large deck).
+- `core.ingest_campaign` now runs this automatically whenever `asset_ref` resolves to a real
+  file — including **alongside** `deck_text` (see the fixed-bug note below), not only on the
+  file-only path. The pure LLM-first path with no `asset_ref` at all still has no bytes to
+  extract images from — an inherent limit, not a bug. Each extracted image is stored,
+  pHash-fingerprinted, CLIP-embedded, and checked for reuse against every other campaign's
+  image, reusing `_phash_matches` (shared with `check_image_provenance`). The fingerprint/
+  CLIP-embed steps are NOT shared with `_store_and_fingerprint_image` (`upload_image_asset`'s
+  helper) — that helper doesn't compute reuse flags inline, so this path re-implements those
+  two steps rather than bolt reuse-checking on after calling it; an earlier version of this
+  doc claimed it was shared, which a design review caught as doc-code drift. New
+  `core._keep_asset_bytes` writes extracted image bytes straight to `ASSET_DIR` (no source
+  file exists to copy, unlike `_keep_asset`).
+- Response gains `image_assets: list[dict]` (`asset_id`, `fingerprinted`, `visually_embedded`,
+  `reuse_flags` per image) and `images_checked: bool`. Each per-image step fails independently
+  into `warnings` (matching the existing chunk-embedding-failure philosophy) rather than
+  failing the whole upload. The standalone `upload_image_asset`/`check_image_provenance`
+  tools are unchanged and remain available as a secondary, explicit path.
+- Verified with the literal "Mexico record" scenario as a test (`tests/test_deck_image_extraction.py`):
+  the same hero image embedded in decks uploaded for `region="LATAM"` then `region="APAC"`
+  produces an automatic `reuse_flags` entry on the second upload (`hamming_distance: 0`,
+  flagged as a different-region reuse) with no manual per-image step — verified both directly
+  and over a real MCP `streamable_http_client` round-trip.
+
+**Independent review round** (adversarial + design, two parallel fresh agents, same process
+as §8.5/§8.6, run despite the timeline because the standing instruction has no time-pressure
+carve-out) — both found real, demo-relevant bugs, all fixed and covered by new regression
+tests in the same pass:
+
+- **Design review — the feature was invisible on the demo's own documented flow.** This doc's
+  own Run-it section says the demo is "attach a campaign PDF... Claude reads the deck and
+  calls upload_campaign" — text Claude read itself, i.e. `deck_text`. The code only ran image
+  extraction when `asset_ref` was given **and `deck_text` was NOT**
+  (`if asset_ref and not deck_text:`), while the docstring claimed "instead of/alongside
+  deck_text" — the realistic call shape (Claude passing both: text it already read, plus the
+  file for storage) silently skipped extraction entirely. **Fixed:** extraction now runs
+  whenever `asset_ref` resolves, independent of `deck_text` (the caller's `deck_text`, when
+  given, is kept as-is, not overwritten by server-side extraction). Also fixed:
+  `image_assets: []` was indistinguishable between "deck had no images" and "never checked"
+  (no file, unsupported type, or extraction failed) — added `images_checked: bool`, and
+  rewrote `upload_campaign`'s docstring to tell the calling LLM to check it before reporting
+  "no reuse found," and to treat any non-empty `reuse_flags` entry as reuse worth mentioning
+  (not only entries whose `flag` field is non-null — a null `flag` means same-region reuse,
+  still real reuse, just not itself the cross-region signal).
+- **Adversarial review — three bugs that would each make a real reused image go undetected,**
+  reproduced with real corrupt/placeholder/grouped/repeated images before fixing:
+  1. One unsupported or corrupt embedded image (e.g. WebP — `python-pptx`'s `shape.image.ext`
+     raises for any format outside its known map) aborted extraction for the **entire deck**,
+     not just that image. Fixed: each image is now extracted inside its own `try`/`except`;
+     one bad image is skipped with a warning, the rest of the deck still gets checked.
+  2. A picture inserted into a template's picture placeholder (`shape_type == PLACEHOLDER`,
+     how corporate decks built from a layout typically place images) and a picture nested
+     inside a grouped shape were both silently skipped — `shape_type == PICTURE` doesn't
+     match either. Fixed: `isinstance(shape, pptx.shapes.picture.Picture)` (covers
+     `PlaceholderPicture`, a `Picture` subclass) plus recursion into `GROUP` shapes.
+  3. The same image repeated across slides (e.g. a per-slide logo) was extracted and
+     cap-checked once per occurrence — on a deck with ≥`MAX_EXTRACTED_IMAGES_PER_DECK` slides
+     carrying a footer logo, the cap fills with logo copies and a genuinely distinct hero
+     image later in the deck is **never extracted at all**, the exact failure mode that would
+     hide the demo's headline flag. Fixed: images are deduped by content hash to their first
+     occurrence, *before* the cap is applied, in `extract._dedup_and_cap`.
+  4. Two related correctness/consistency fixes taken in the same pass: `_phash_matches` is
+     now called only after `store.set_asset_fingerprint` succeeds (previously the other way
+     round — a match-query failure would discard a fingerprint that was in fact already
+     computed, hiding this image from every future upload's reuse check, not just this one);
+     and an image file written by `_keep_asset_bytes` is now unlinked if the following
+     `store.insert_asset` fails, closing an orphaned-file leak.
+  5. Each `extract_images` tuple now carries the 1-based slide/page number
+     (`image_assets[].location`) so a flagged image can be pointed to — the natural
+     follow-up question ("which slide?") a multi-image deck couldn't previously answer.
+
+Verified with the literal "Mexico record" scenario (same hero image, decks uploaded for
+`region="LATAM"` then `region="APAC"`, `deck_text` passed alongside `asset_ref` on both — the
+exact shape the design review flagged as broken) both directly and over a real MCP
+`streamable_http_client` round-trip. 227 tests passing (was 216 before this round; 218 after
+the first, still-flawed pass; 227 after the fixes) — 20 of them new to this specific round
+(dedup, placeholder/group pictures, per-image resilience, cap-starvation, fingerprint-before-
+match ordering, orphaned-file cleanup, `images_checked` semantics under legacy/unsupported
+file types).
+
+**Deferred, flagged rather than silently skipped, given the timeline:** no independent
+verification of real-Windows behavior for this feature or the §6.6 PyInstaller torchvision
+`.pyd` fix it depends on; both remain inspection-verified only. Recommend testing on the
+actual Windows box before the demo, ideally tonight.
+
 ## 9. Sequence
 
 1. **Now:** local Windows end-to-end green (Desktop + server + Ollama), campaigns loaded. **Done**

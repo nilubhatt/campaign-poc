@@ -80,21 +80,90 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
     warnings: list[str] = []
     stored_path = None
     units: list[str] = []  # natural per-page/slide units, when extraction ran
+    asset_path_for_images: Optional[Path] = None  # only set when a real file reached us
 
-    if asset_ref and not deck_text:
+    if asset_ref:
         path, w = _resolve_asset(asset_ref)
         warnings += w
         if path:
-            units, w2 = extract.extract_units(path)
-            warnings += w2
-            deck_text = "\n\n".join(units)
+            # A real file reached us — store it and extract its embedded images regardless
+            # of whether deck_text was also given (docstring promises "instead of/alongside
+            # deck_text"; the realistic case is Claude passing both: text it already read,
+            # plus the file itself via asset_ref for storage/image extraction).
             stored_path = _keep_asset(path)
+            asset_path_for_images = path
+            if not deck_text:
+                units, w2 = extract.extract_units(path)
+                warnings += w2
+                deck_text = "\n\n".join(units)
 
     cid = store.insert_campaign(
         conn, title=title, record_type=record_type, status=status, tags=tags, region=region,
         market=market, collection=collection, supersedes=supersedes, detail=detail,
         deck_text=deck_text, asset_path=stored_path,
     )
+
+    # Images embedded IN the deck, extracted and processed automatically — a separate
+    # manual upload_image_asset call per image isn't a workflow anyone would actually use
+    # (product feedback). Only possible when a real file reached us (asset_ref); the
+    # LLM-first deck_text-only path has no file to extract images from.
+    image_assets: list[dict] = []
+    # Distinguishes "checked, found nothing/nothing to flag" from "never checked" (e.g. the
+    # deck_text-only path with no file, an unsupported file type like legacy .ppt, or
+    # extraction itself failing) - all otherwise look identical as an empty image_assets
+    # list, which a calling LLM can't tell apart. Tied to the file type actually being one we
+    # know how to check, not just to the per-image loop completing without error below (a
+    # single image's storage failure shouldn't retroactively make an otherwise-successful
+    # check report itself as "never happened").
+    images_checked = False
+    current_campaign = None
+    if asset_path_for_images is not None:
+        image_mime = extract.guess_mime(asset_path_for_images.name)
+        try:
+            found_images, img_warnings = extract.extract_images(asset_path_for_images, mime=image_mime)
+            warnings += img_warnings
+        except Exception as exc:
+            found_images = []
+            warnings.append(f"image extraction failed (deck images will not be searchable "
+                            f"or reuse-checked): {exc}")
+        else:
+            images_checked = image_mime in (config.PPTX_MIME, "application/pdf")
+
+        if found_images:
+            current_campaign = store.get_campaign(conn, cid)
+        for img_bytes, ext, location in found_images:
+            stored_name = None
+            try:
+                stored_name = _keep_asset_bytes(img_bytes, ext)
+                image_full_path = config.ASSET_DIR / stored_name
+                aid = store.insert_asset(conn, cid, file_path=stored_name)
+            except Exception as exc:
+                if stored_name:
+                    (config.ASSET_DIR / stored_name).unlink(missing_ok=True)
+                warnings.append(f"deck image on slide/page {location} could not be stored: {exc}")
+                continue
+            entry = {"asset_id": aid, "location": location, "fingerprinted": False,
+                    "visually_embedded": False, "reuse_flags": []}
+            try:
+                h = images.phash(image_full_path)
+                store.set_asset_fingerprint(conn, aid, h)
+                entry["fingerprinted"] = True
+            except Exception as exc:
+                warnings.append(f"deck image {aid} not fingerprinted (reuse detection will miss it): {exc}")
+            else:
+                try:
+                    entry["reuse_flags"] = _phash_matches(
+                        conn, h, exclude_campaign_id=cid, current=current_campaign)
+                except Exception as exc:
+                    warnings.append(f"deck image {aid} fingerprinted but reuse check failed: {exc}")
+            try:
+                vec = clip_embed.embed_image(image_full_path)
+                vectorstore.add(conn, aid, vec, space="asset")
+                store.mark_asset_embedded(conn, aid)
+                entry["visually_embedded"] = True
+            except Exception as exc:
+                warnings.append(f"deck image {aid} not visually embedded: {exc}")
+            image_assets.append(entry)
 
     if not units and deck_text:
         # LLM-first path: Claude passed one flat string with no page/slide boundaries —
@@ -107,7 +176,9 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
     if not chunk_texts:
         warnings.append("nothing to embed (no title/detail/deck_text)")
         return {"campaign_id": cid, "title": title, "record_type": record_type,
-                "embedded": False, "chunks_total": 0, "chunks_embedded": 0, "warnings": warnings}
+                "embedded": False, "chunks_total": 0, "chunks_embedded": 0,
+                "image_assets": image_assets, "images_checked": images_checked,
+                "warnings": warnings}
 
     chunk_ids = store.insert_chunks(conn, cid, chunk_texts)
     embedded_count = 0
@@ -125,7 +196,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         "campaign_id": cid, "title": title, "record_type": record_type,
         "embedded": embedded_count > 0,
         "chunks_total": len(chunk_texts), "chunks_embedded": embedded_count,
-        "warnings": warnings,
+        "image_assets": image_assets, "images_checked": images_checked, "warnings": warnings,
     }
 
 
@@ -368,7 +439,19 @@ def ingest_image_asset(conn, *, campaign_id: str, asset_ref: dict) -> dict:
         return {"error": "; ".join(warnings) or "could not resolve asset_ref"}
 
     stored_name = _keep_asset(path)
+    result = _store_and_fingerprint_image(conn, campaign_id, stored_name)
+    result["warnings"] = warnings + result["warnings"]
+    return result
+
+
+def _store_and_fingerprint_image(conn, campaign_id: str, stored_name: str) -> dict:
+    """The part of ingest_image_asset that runs once the image file is already saved under
+    ASSET_DIR. NOT used by the deck-embedded-image path in ingest_campaign — that path also
+    computes reuse_flags inline (via the shared _phash_matches below) as part of the same
+    loop, which this helper doesn't do, so it re-implements the fingerprint/CLIP-embed steps
+    rather than call this and bolt reuse-checking on after."""
     full_path = config.ASSET_DIR / stored_name
+    warnings: list[str] = []
     aid = store.insert_asset(conn, campaign_id, file_path=stored_name)
 
     fingerprinted = False
@@ -414,11 +497,20 @@ def check_image_provenance(conn, *, asset_ref: dict, campaign_id: Optional[str] 
         query_hash = images.phash(path)
     except Exception as exc:
         return {"error": f"could not process image: {exc}"}
+    matches = _phash_matches(conn, query_hash, exclude_campaign_id=campaign_id,
+                             current=current, threshold=threshold)
+    return {"query_hash": query_hash, "matches": matches, "warnings": warnings}
+
+
+def _phash_matches(conn, query_hash: str, *, exclude_campaign_id: Optional[str],
+                   current: Optional[dict], threshold: Optional[int] = None) -> list[dict]:
+    """Shared by check_image_provenance and the automatic deck-embedded-image path in
+    ingest_campaign — same pHash-match + region-flag logic either way."""
     threshold = config.PHASH_MATCH_THRESHOLD if threshold is None else threshold
     superseded_ids = store.get_superseded_campaign_ids(conn)
 
     matches = []
-    for cand in store.get_all_fingerprints(conn, exclude_campaign_id=campaign_id):
+    for cand in store.get_all_fingerprints(conn, exclude_campaign_id=exclude_campaign_id):
         if cand["campaign_id"] in superseded_ids:
             continue
         dist = images.hamming_distance(query_hash, cand["phash"])
@@ -433,7 +525,7 @@ def check_image_provenance(conn, *, asset_ref: dict, campaign_id: Optional[str] 
             "flag": _region_mismatch_flag(current, c),
         })
     matches.sort(key=lambda m: m["hamming_distance"])
-    return {"query_hash": query_hash, "matches": matches, "warnings": warnings}
+    return matches
 
 
 def find_similar_images(conn, *, asset_ref: dict, campaign_id: Optional[str] = None,
@@ -532,4 +624,15 @@ def _keep_asset(src: Path) -> str:
     config.ensure_dirs()
     dest = config.ASSET_DIR / f"{uuid.uuid4().hex[:16]}{src.suffix}"
     shutil.copy2(src, dest)
+    return dest.name
+
+
+def _keep_asset_bytes(data: bytes, ext: str) -> str:
+    """Write image bytes directly into the asset store under a unique name; return the
+    stored name. Companion to _keep_asset — used for images extracted from a deck (already
+    in memory, no source file to copy from) rather than a direct upload."""
+    import uuid
+    config.ensure_dirs()
+    dest = config.ASSET_DIR / f"{uuid.uuid4().hex[:16]}{ext}"
+    dest.write_bytes(data)
     return dest.name
