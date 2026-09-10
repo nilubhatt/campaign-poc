@@ -11,7 +11,7 @@
 
 [Setup]
 AppName={#AppName}
-AppVersion=0.2.0
+AppVersion=0.2.1
 DefaultDirName={autopf}\CampaignIntelligence
 DefaultGroupName={#AppName}
 OutputBaseFilename=CampaignIntelligence-Setup
