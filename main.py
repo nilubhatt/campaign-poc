@@ -37,11 +37,18 @@ def main() -> None:
         import http_app
         http_app.main()
     elif cmd == "stdio":
+        import clip_embed
         import config
         import store
         from mcp_server import mcp
         config.ensure_dirs()
         store.init_db()
+        # THE path the installers wire into Claude Desktop (configure-desktop writes
+        # args=["stdio"]), so skipping warm-up here meant every installed copy still loaded
+        # the vision model inside the first image tool call — the 60s transport timeout the
+        # product review hit. stdio_server.py (source checkouts) always did this; the frozen
+        # binary's own entry point did not.
+        clip_embed.warm_up()
         mcp.run(transport="stdio")
     elif cmd == "configure-desktop":
         _configure_desktop(http_url=args.http)

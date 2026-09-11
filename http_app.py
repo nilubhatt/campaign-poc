@@ -66,11 +66,22 @@ async def upload(request: Request):
 async def healthz(request: Request):
     conn = store.connect()
     try:
+        # Whether the vision weights actually resolved is the thing that was invisible in
+        # the field — the only way to discover visual search was off was a 60s timeout and
+        # a read of the server's source. Reported as a value, not by crashing at boot.
+        weights = clip_embed.weights_status()
         return JSONResponse({
             "status": "ok",
             "vector_backend": vectorstore.backend_name(conn),
             "embed_provider": config.EMBED_PROVIDER,
             "clip_provider": config.CLIP_PROVIDER,
+            "clip_weights": {
+                "ok": weights.ok,
+                "source": weights.source,
+                "path": weights.path or None,
+                "reason": weights.reason or None,
+                "remedy": weights.remedy or None,
+            },
             "auth_provider": config.AUTH_PROVIDER,
         })
     finally:

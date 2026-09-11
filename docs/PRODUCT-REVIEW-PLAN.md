@@ -38,16 +38,35 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 
 ## Phase 1 — P0: the product must work air-gapped
 
-- [ ] **1.1 `CLIP_WEIGHTS_PATH` override** (defect 02, ship-route C). `clip_embed._load_model`
-      passes a filesystem path straight through to `open_clip` when the env var/config key is
-      set. Removes the runtime Hub dependency for an admin holding the file.
+- [x] **1.1 `CLIP_WEIGHTS_PATH` override** (defect 02, ship-route C). A local checkpoint —
+      file *or* folder containing one — is passed straight through to `open_clip`.
+      Resolution is separated from loading (`resolve_weights()` is cheap, never raises,
+      returns source/ok/reason/remedy) so startup records it and `health_check` can report
+      it later; a bad path does **not** kill a server whose text tools don't need CLIP.
+      Reported via `/healthz` → `clip_weights` and a stderr line at startup.
+      *Two review findings folded in:* the frozen binary's `stdio` entry point never called
+      `warm_up()` at all — the actual root cause of defect 04, since the installers wire
+      exactly that path — and the first error message told the admin to fall back to the
+      network that defect 03 says is blocked.
+      Empirically verified by the adversarial reviewer: with a local path, loading makes
+      **zero** network calls and yields vectors bit-identical to the tag, while the tag path
+      issues live requests even with a warm cache.
 - [ ] **1.2 Bundle the weights in the installer payload** (defect 01, ship-route A). CI
       downloads the weights once, verifies SHA-256, ships them in the Windows/macOS/Linux
-      payloads; the app resolves the bundled path by default. fp16 to halve size if accuracy
-      holds for ranking.
+      payloads; the app **auto-discovers** them with nothing configured (the acceptance
+      criterion is zero egress on a clean machine, so the default path must work untouched).
+      Bundle next to the executable, *outside* `_internal`, resolved via `sys.executable`
+      when frozen — not `__file__`. When neither bundled nor configured weights exist, say
+      so; never silently fall back to a network fetch. fp16 to halve size if ranking
+      accuracy holds. Rewrite README's "one-time ~350MB download on first use" here.
 - [ ] **1.3 No Hub dependency at runtime** (defect 03). Verified, not assumed: with weights
-      present locally, assert **zero** network calls to huggingface.co. Install fails loudly
-      (hash-verified) if the payload is absent or corrupt.
+      present locally, assert **zero** network calls (socket/hf_hub blocked in the test) and
+      that path-loaded vectors match tag-loaded ones — the preprocess config is identical
+      for `ViT-B-32-quickgelu`/`openai`, but pin it rather than assume it. Set
+      `HF_HUB_OFFLINE=1` once local weights resolve, making it a property rather than only a
+      test. Install fails loudly (hash-verified) if the payload is absent or corrupt —
+      also the mitigation for a wrong-but-same-shape checkpoint, which `open_clip` loads
+      silently (the quickgelu mismatch warning only fires on the tag path).
 
 ## Phase 2 — P1 defects
 

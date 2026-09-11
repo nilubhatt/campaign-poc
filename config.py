@@ -41,6 +41,22 @@ CLIP_PROVIDER = os.getenv("CAMPAIGN_POC_CLIP_PROVIDER", "openclip").lower()
 # an activation-function mismatch otherwise, which would subtly degrade embeddings).
 CLIP_MODEL_NAME = os.getenv("CAMPAIGN_POC_CLIP_MODEL", "ViT-B-32-quickgelu")
 CLIP_PRETRAINED = os.getenv("CAMPAIGN_POC_CLIP_PRETRAINED", "openai")
+# Filesystem path to the CLIP checkpoint (a file, or a directory containing one), used
+# INSTEAD of resolving CLIP_PRETRAINED through the Hugging Face Hub. Set it and the product
+# never touches the network for weights — verified empirically, not assumed: with a local
+# path, loading makes zero network calls and produces vectors bit-identical to the tag,
+# while the tag path issues live requests even with a warm cache. This is the supported
+# answer for an air-gapped install, or one where huggingface.co is blocked by an endpoint
+# filter (both hit in the field; the fallback was hand-fabricating a HF cache entry).
+# The prefixed name is authoritative, matching every other setting here; the bare name is
+# accepted because it is what an admin would guess, and no library reads it.
+_CLIP_WEIGHTS_ENV_VARS = ("CAMPAIGN_POC_CLIP_WEIGHTS_PATH", "CLIP_WEIGHTS_PATH")
+CLIP_WEIGHTS_PATH = ""
+CLIP_WEIGHTS_ENV_VAR = _CLIP_WEIGHTS_ENV_VARS[0]  # which name to name in an error
+for _var in _CLIP_WEIGHTS_ENV_VARS:
+    if os.getenv(_var):
+        CLIP_WEIGHTS_PATH, CLIP_WEIGHTS_ENV_VAR = os.getenv(_var, ""), _var
+        break
 CLIP_EMBED_DIM = int(os.getenv("CAMPAIGN_POC_CLIP_DIM", "512"))  # ViT-B-32 = 512
 
 # §6.8: find_similar trims each evidence row's freeform `detail` to this many chars by

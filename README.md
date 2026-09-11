@@ -26,6 +26,29 @@ No Postgres, no Docker required. CLIP (`torch` + `open_clip_torch`) IS a depende
 aesthetic/regional image-similarity detection — a deliberate size tradeoff (~150-250MB of
 deps + a one-time ~350MB model download on first use); see `docs/PRODUCTION-ROADMAP.md` §6.6.
 
+### Offline / restricted networks — pointing at local CLIP weights
+
+Resolving the model by tag goes to **huggingface.co**, which plenty of corporate networks
+block outright (endpoint filters answering :443 in plaintext, so it fails as a TLS error
+rather than an obvious block). If you have the weights file already, point at it and the
+product never touches the network for it:
+
+```jsonc
+// claude_desktop_config.json — the env block is how a local server gets settings
+"env": { "CAMPAIGN_POC_CLIP_WEIGHTS_PATH": "C:\\path\\where\\you\\put\\the\\weights" }
+```
+
+Point it at the checkpoint file (`open_clip_model.safetensors` or
+`open_clip_pytorch_model.bin`) or the folder containing it. `CLIP_WEIGHTS_PATH` works too;
+the prefixed name wins if both are set. Verified to make **zero** network calls, producing
+vectors identical to the tag-resolved model.
+
+Nothing here is fatal: if the weights are missing, unreadable or corrupt, the server still
+starts and text search, upload and evaluation work normally — only visual similarity is
+off. It says which: an `[campaign-intelligence]` line on stderr at startup (in Claude
+Desktop's MCP log for a local stdio server), and `clip_weights` in `GET /healthz` when
+running over HTTP.
+
 ## Run it
 
 ```bash

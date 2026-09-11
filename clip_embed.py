@@ -11,7 +11,9 @@ slow.
 """
 from __future__ import annotations
 
+import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 import config
@@ -19,6 +21,8 @@ import config
 _model = None
 _preprocess = None
 _model_lock = threading.Lock()
+_resolution = None   # WeightsResolution recorded at warm_up()
+_load_error = None   # why the last load attempt failed, if it did
 
 
 def embed_image(path: Path) -> list[float]:
@@ -35,26 +39,153 @@ def _load_model():
     concurrent first calls could otherwise race into loading the model multiple times at
     once (transiently multiplying memory use and load time for no benefit; review found
     this with 3 concurrent calls each loading their own copy)."""
-    global _model, _preprocess
+    global _model, _preprocess, _load_error
     if _model is None:
+        # Resolve BEFORE importing open_clip: a config typo should not first pay the
+        # multi-second, hundreds-of-MB torch/open_clip import to be told about itself.
+        resolution = weights_status()
+        if not resolution.ok:
+            raise RuntimeError(f"{resolution.reason} {resolution.remedy}")
         with _model_lock:
             if _model is None:  # re-check: another thread may have finished while we waited
                 import open_clip
-                model, _, preprocess = open_clip.create_model_and_transforms(
-                    config.CLIP_MODEL_NAME, pretrained=config.CLIP_PRETRAINED
-                )
+                try:
+                    model, _, preprocess = open_clip.create_model_and_transforms(
+                        config.CLIP_MODEL_NAME, pretrained=resolution.pretrained
+                    )
+                except Exception as exc:
+                    # Remembered so weights_status() stops claiming the weights are fine
+                    # when the model never loaded. Still raised: whoever asked for an
+                    # embedding needs to know it did not happen.
+                    _load_error = str(exc)
+                    raise
                 model.eval()
                 _model, _preprocess = model, preprocess
+                _load_error = None  # a later retry succeeded; stop reporting the old failure
     return _model, _preprocess
+
+
+# open_clip 3.3.0 publishes and prefers safetensors; the .bin is the older name an admin is
+# more likely to already have. Both load from a path (verified against the real library).
+_CHECKPOINT_NAMES = ("open_clip_model.safetensors", "open_clip_pytorch_model.bin")
+
+# Deliberately does not say "reinstall to restore the bundled copy" — nothing bundles the
+# weights yet (plan item 1.2), and a remedy that cannot work is worse than none. 1.2 updates
+# this line when the claim becomes true.
+_LOCAL_WEIGHTS_REMEDY = (
+    f"Point {{var}} at a CLIP weights file ({' or '.join(_CHECKPOINT_NAMES)}), or at the "
+    f"folder holding it."
+)
+
+
+@dataclass(frozen=True)
+class WeightsResolution:
+    """What the vision weights resolved to, and — when they didn't — what to do about it.
+
+    Deliberately a value, not an exception: resolution is cheap and happens at startup,
+    where a vision-weights problem must NOT take down text search, upload or evaluation,
+    none of which need CLIP. health_check (plan 2.3) reports this; only an actual attempt
+    to embed an image turns a bad resolution into a raised error."""
+    ok: bool
+    source: str          # "env" | "tag" | "none" (provider needs no weights)
+    pretrained: str = ""  # what gets handed to open_clip
+    path: str = ""        # the resolved checkpoint file, when local
+    reason: str = ""
+    remedy: str = ""
+
+
+def resolve_weights() -> WeightsResolution:
+    """Decide what to load from, without loading anything and without raising.
+
+    A configured-but-unusable path is NOT silently replaced by the network tag: setting the
+    variable is an admin declaring "use this file", and quietly reaching for the Hub instead
+    is the exact failure the setting exists to prevent — on the network where this was first
+    hit, that fetch cannot succeed at all."""
+    if config.CLIP_PROVIDER != "openclip":
+        return WeightsResolution(ok=True, source="none")
+
+    configured = (config.CLIP_WEIGHTS_PATH or "").strip()
+    if not configured:
+        return WeightsResolution(ok=True, source="tag", pretrained=config.CLIP_PRETRAINED)
+
+    candidate = Path(configured).expanduser()
+    checkpoint = _find_checkpoint(candidate)
+    if checkpoint is None:
+        where = f"the folder {candidate}" if candidate.is_dir() else str(candidate)
+        return WeightsResolution(
+            ok=False, source="env",
+            reason=f"Visual search is off: {config.CLIP_WEIGHTS_ENV_VAR} points at {where}, "
+                   f"which has no usable CLIP weights file.",
+            remedy=_LOCAL_WEIGHTS_REMEDY.format(var=config.CLIP_WEIGHTS_ENV_VAR),
+        )
+    return WeightsResolution(ok=True, source="env", pretrained=str(checkpoint),
+                             path=str(checkpoint))
+
+
+def _find_checkpoint(candidate: Path) -> Path | None:
+    """Accept either the checkpoint file itself or a folder holding it — an admin is as
+    likely to point at one as the other, and the bundled-weights payload (plan 1.2) is a
+    folder, so both share this one resolver."""
+    if candidate.is_file():
+        return candidate
+    if candidate.is_dir():
+        for name in _CHECKPOINT_NAMES:
+            if (candidate / name).is_file():
+                return candidate / name
+    return None
+
+
+def weights_status() -> WeightsResolution:
+    """What to report about the vision weights right now.
+
+    Two different failures, handled differently. A RESOLUTION failure (the configured path
+    has no checkpoint) is re-checked every time: it is one `stat`, and an operator who drops
+    the missing file into place should not have to know a restart is needed, nor be told the
+    file is absent while it sits there. A LOAD failure (open_clip could not load what was
+    resolved — blocked network on the tag path, corrupt or unreadable checkpoint) is
+    remembered instead, because re-resolving cannot tell you anything new about it and
+    retrying a multi-second load on every status query would be worse than useless."""
+    global _resolution
+    if _resolution is None or not _resolution.ok:
+        _resolution = resolve_weights()
+    if _resolution.ok and _load_error:
+        return WeightsResolution(
+            ok=False, source=_resolution.source, path=_resolution.path,
+            reason=f"Visual search is off: the model could not be loaded ({_load_error}).",
+            remedy=_LOCAL_WEIGHTS_REMEDY.format(var=config.CLIP_WEIGHTS_ENV_VAR),
+        )
+    return _resolution
 
 
 def warm_up() -> None:
     """Load the model now, at server startup, instead of lazily on first tool call — a live
-    MCP tool call is the wrong place for a first-time model download (~350MB) plus load
-    time, which risks the calling client's tool-call timeout. No-op for the offline `hash`
-    test provider."""
-    if config.CLIP_PROVIDER == "openclip":
-        _load_model()
+    MCP tool call is the wrong place for a first-time model load, which risks the calling
+    client's tool-call timeout (the product review hit exactly that: a 60s transport timeout
+    inside upload_image_asset). No-op for the offline `hash` test provider.
+
+    Records the weights resolution and carries on if it failed. It must not raise: the
+    vision model is one feature of several, and text search, upload and evaluation do not
+    need it — killing the server at boot would take all of them down, hide the reason
+    (stdio servers are launched with no visible console), and prevent the post-install
+    health check from ever running to report which component is broken."""
+    global _resolution
+    _resolution = resolve_weights()
+    if _resolution.ok and config.CLIP_PROVIDER == "openclip":
+        try:
+            _load_model()
+        except Exception:
+            # Resolving successfully says nothing about loading successfully: the tag path
+            # resolves fine and then fails inside open_clip on a blocked network, and a
+            # corrupt or unreadable checkpoint fails the same way. _load_model has already
+            # recorded it; swallow it here. This runs at boot, and the text tools that do
+            # not need CLIP must still come up — before this guard existed, adding warm-up
+            # to the installed binary's entry point would have turned a blocked network
+            # from "images degrade" into "the whole server dies".
+            pass
+    status = weights_status()
+    if not status.ok:
+        print(f"[campaign-intelligence] {status.reason} {status.remedy}",
+              file=sys.stderr, flush=True)
 
 
 def _embed_openclip(path: Path) -> list[float]:
