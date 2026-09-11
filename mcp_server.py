@@ -75,7 +75,8 @@ TagInput = Union[str, TagObject]
 def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optional[str] = None,
                     record_type: RecordType = "campaign", status: Optional[Status] = None,
                     tags: Optional[list[TagInput]] = None, region: Optional[str] = None,
-                    market: Optional[str] = None, collection: Optional[str] = None,
+                    market: Optional[str] = None, markets: Optional[list[str]] = None,
+                    collection: Optional[str] = None,
                     supersedes: Optional[str] = None, asset_ref: Optional[dict] = None,
                     confirm: bool = False) -> dict:
     """Store a past or proposed campaign in the memory.
@@ -130,12 +131,19 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
     file, so it can only be set via update_campaign after add_metrics, never here on a
     brand-new campaign — or 'stated' if it's someone's claim; defaults to 'stated', the
     conservative assumption. Not restricted to the creative-reaction/performance vocabulary
-    above, but that's the vocabulary the "missing quadrant" analysis needs. region/market are freeform too (e.g.
-    region='APAC', market='Philippines'). collection links market/version variants of the
-    SAME creative — a symmetric grouping (e.g. all regional launches of one collection share
-    a collection value), unlike supersedes below (asymmetric replacement). These structured
-    fields let find_similar_campaigns / prepare_evaluation filter before ranking by
-    similarity.
+    above, but that's the vocabulary the "missing quadrant" analysis needs. region/market are
+    freeform, SINGLE-value fields (e.g. region='Malaysia', market='SEA' as the grouping
+    label) — exact-match on filter, so pick region as the one country/market this record is
+    primarily about. If the activation actually ran in more than one country (e.g. a SEA
+    campaign covering Malaysia, Singapore, and Indonesia), ALSO pass markets=["Malaysia",
+    "Singapore", "Indonesia"] — a list, matched by membership, not exact-match — otherwise
+    that campaign is invisible to a query for any country besides the one in region (a real
+    gap found in testing: tagging region alone made an Indonesia-inclusive campaign
+    unreachable by region='Indonesia', which reads as "no such campaign" rather than "field
+    can't represent this"). collection links market/version variants of the SAME creative —
+    a symmetric grouping (e.g. all regional launches of one collection share a collection
+    value), unlike supersedes below (asymmetric replacement). These structured fields let
+    find_similar_campaigns / prepare_evaluation filter before ranking by similarity.
 
     Pass supersedes=<campaign_id> if this record replaces an existing one (e.g. a corrected
     deck) — the old record is then excluded from future search evidence, so it stops
@@ -148,8 +156,9 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
     try:
         return core.ingest_campaign(conn, title=title, detail=detail, deck_text=deck_text,
                                     record_type=record_type, status=status, tags=tags,
-                                    region=region, market=market, collection=collection,
-                                    supersedes=supersedes, asset_ref=asset_ref, confirm=confirm)
+                                    region=region, market=market, markets=markets,
+                                    collection=collection, supersedes=supersedes,
+                                    asset_ref=asset_ref, confirm=confirm)
     finally:
         conn.close()
 
@@ -159,20 +168,25 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
 def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optional[str] = None,
                     record_type: Optional[RecordType] = None, status: Optional[Status] = None,
                     tags: Optional[list[TagInput]] = None, region: Optional[str] = None,
-                    market: Optional[str] = None, collection: Optional[str] = None) -> dict:
+                    market: Optional[str] = None, markets: Optional[list[str]] = None,
+                    collection: Optional[str] = None) -> dict:
     """Edit a campaign's metadata (title, detail, record_type, status, tags, region, market,
-    collection). Only the fields you pass change. tags, if given, fully REPLACES the
-    existing list (not a merge) — pass the complete new list, including any you're keeping.
-    This is also how you upgrade a tag's provenance once real data comes in — e.g. re-save
-    tags with {"value": "performed_well", "source": "verified"} instead of the plain string
-    once add_metrics has real numbers on file, so it stops reading as an unverified
-    impression. Does NOT change deck_text/chunks/embeddings; for content changes, upload a
-    new record and pass supersedes=campaign_id instead."""
+    markets, collection). Only the fields you pass change. tags/markets, if given, fully
+    REPLACE the existing list (not a merge) — pass the complete new list, including any
+    you're keeping. This is also how you upgrade a tag's provenance once real data comes in
+    — e.g. re-save tags with {"value": "performed_well", "source": "verified"} instead of
+    the plain string once add_metrics has real numbers on file, so it stops reading as an
+    unverified impression. It's also how you fix a campaign tagged with only a single
+    region when its activation actually spanned more (a real gap found in testing) — pass
+    markets=["Malaysia", "Indonesia", ...] to make it reachable by any of those countries,
+    without touching region/market. Does NOT change deck_text/chunks/embeddings; for content
+    changes, upload a new record and pass supersedes=campaign_id instead."""
     conn = store.connect()
     try:
         ok = store.update_campaign(conn, campaign_id, title=title, detail=detail,
                                    record_type=record_type, status=status, tags=tags,
-                                   region=region, market=market, collection=collection)
+                                   region=region, market=market, markets=markets,
+                                   collection=collection)
         if not ok:
             return {"error": f"campaign {campaign_id} not found"}
         return store.get_campaign(conn, campaign_id)
@@ -331,7 +345,8 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
                            top_k: int = 5, record_type: Optional[RecordType] = None,
                            status: Optional[Status] = None, tags: Optional[list[TagInput]] = None,
                            match_all_tags: bool = False, region: Optional[str] = None,
-                           market: Optional[str] = None, collection: Optional[str] = None,
+                           market: Optional[str] = None, markets: Optional[Union[str, list[str]]] = None,
+                           collection: Optional[str] = None,
                            full_detail: bool = False) -> dict:
     """Semantic search: find prior campaigns most similar to a description (text) or to an
     existing campaign (campaign_id). Matches at the slide/section level and rolls up to the
@@ -339,7 +354,12 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
 
     Pass record_type/status/tags/region/market/collection to filter to that criteria FIRST,
     then rank by similarity within it — e.g. status='concluded', region='APAC' to only weigh
-    concluded APAC precedent instead of everything in the memory.
+    concluded APAC precedent instead of everything in the memory. region/market are exact-
+    match on a SINGLE value, which can't find a campaign whose activation spanned several
+    countries if it's only tagged with one of them as region — pass markets='Indonesia' (or
+    markets=["Indonesia","Thailand"] for ANY-match across several) instead to match any
+    campaign whose stored markets list includes at least one, regardless of what its
+    region/market fields say.
 
     tags is a list of plain strings (match that value, any source) and/or {value, source}
     objects (match that value AND require that specific source) — mix freely. Defaults to
@@ -362,7 +382,8 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
                                              top_k=top_k, record_type=record_type,
                                              status=status, tags=tags,
                                              match_all_tags=match_all_tags, region=region,
-                                             market=market, collection=collection,
+                                             market=market, markets=markets,
+                                             collection=collection,
                                              full_detail=full_detail)}
     finally:
         conn.close()
@@ -374,11 +395,14 @@ def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
                        record_type: Optional[RecordType] = None, status: Optional[Status] = None,
                        tags: Optional[list[TagInput]] = None, match_all_tags: bool = False,
                        region: Optional[str] = None, market: Optional[str] = None,
-                       collection: Optional[str] = None, full_detail: bool = True) -> dict:
+                       markets: Optional[Union[str, list[str]]] = None, collection: Optional[str] = None,
+                       full_detail: bool = True) -> dict:
     """Evaluate a NEW campaign proposal against the memory. Returns the most similar prior
     campaigns WITH their outcomes as an evidence package (full detail by default — this is
     for judging, not browsing). Optionally narrow to structured criteria first (e.g.
-    region='APAC') so only relevant precedent is weighed.
+    region='APAC') so only relevant precedent is weighed. region/market are single-value
+    exact-match; pass markets='Indonesia' (or a list for ANY-match) instead to reach a
+    campaign whose multi-country activation only has ONE of those countries in region/market.
 
     Pass a tag as {"value": "underperformed", "source": "verified"} to weigh only precedent
     whose matching performance claim is backed by real metric data, not someone's stated
@@ -395,7 +419,7 @@ def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
                                        proposal_text=proposal_text, top_k=top_k,
                                        record_type=record_type, status=status, tags=tags,
                                        match_all_tags=match_all_tags, region=region,
-                                       market=market, collection=collection,
+                                       market=market, markets=markets, collection=collection,
                                        full_detail=full_detail)
     finally:
         conn.close()

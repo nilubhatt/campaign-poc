@@ -592,6 +592,59 @@ verification of real-Windows behavior for this feature or the §6.6 PyInstaller 
 `.pyd` fix it depends on; both remain inspection-verified only. Recommend testing on the
 actual Windows box before the demo, ideally tonight.
 
+## 8.8 `markets`: multi-country activation, found in live testing (2026-09-10)
+
+Real usage testing the night before a demo, on freshly re-tagged data (the "collection/tag-
+provenance" work landing meant `region`/`market`/`collection` were finally populated on
+every record) surfaced a genuine gap the collection/tag-provenance work didn't anticipate:
+`region`/`market` are single-value, exact-match strings. A campaign whose actual activation
+spanned several countries (e.g. a SEA launch that ran in Malaysia AND Indonesia) can only be
+tagged with ONE of them as `region` — querying `region="Indonesia"` for a record tagged
+`region="Malaysia"` returns nothing, even though the activation genuinely included
+Indonesia. That reads as "no such campaign," which is worse than no filter at all.
+
+Confirmed via live testing, not assumed: filtering itself works correctly once fields are
+populated (a filtered query on the real corpus went from a flat 0.75–0.81 similarity band to
+a real 0.81/0.75/0.64 spread, correctly excluding unrelated campaigns and ranking a
+no-campaign "stub" record last) — the gap was specifically that a multi-country activation
+has no single truthful value for a single-value field. Storing a delimited composite
+("Malaysia, Indonesia") doesn't work either (confirmed by testing it): exact-match filtering
+needs atomic values, so a human-readable composite matches nothing.
+
+- New `markets` column: `list[str]`, additive (mirrors `tags`' storage shape/philosophy, no
+  provenance concept needed here), matched by case-insensitive **membership** rather than
+  exact-match — the opposite of region/market on purpose. `region`/`market` are unchanged in
+  meaning: `region` stays the single primary country/geo tag, `market` stays the freeform
+  grouping label (e.g. "SEA"); `markets` is additive, carrying the full list of countries/
+  sub-markets an activation actually touched.
+- `store.normalize_markets`/`_parse_stored_markets`, additive `_migrate_schema` column (NOT
+  NULL with a `'[]'` default — SQLite allows this on `ADD COLUMN`, backfilling existing
+  rows, verified against a reconstructed pre-`markets` database), threaded through
+  `insert_campaign`/`update_campaign`/`get_campaign`/`list_campaigns`/`filter_campaign_ids`
+  and up through `core.find_similar`/`prepare_evaluation` and the
+  `upload_campaign`/`update_campaign`/`find_similar_campaigns`/`prepare_evaluation` tools.
+- **Independent review round** (adversarial + design, same process as prior rounds) found no
+  correctness bugs in the storage/migration/filtering logic itself, but caught one real
+  ergonomics bug before merge: the write-side `markets` param is a list
+  (`markets=["Malaysia","Indonesia"]`) but the query-side param was typed as a single `str`
+  — an LLM that just wrote a list will plausibly query with one too, which failed at the
+  MCP/pydantic schema layer with a generic input-validation error. Also identified as the
+  answer to a real design question: an "Indonesia OR Thailand" query was otherwise
+  unreachable in one call. Fixed by accepting `Union[str, list[str]]` on the query side
+  (`filter_campaign_ids`/`find_similar`/`prepare_evaluation`/the two search tools) with
+  ANY-match semantics for a list — verified both directly and over a real MCP
+  `streamable_http_client` round-trip (single-string and list-of-two-countries queries both
+  return the correct campaigns). 244 tests passing (was 227 before this round).
+- **Deferred, flagged rather than silently fixed:** `region`/`market`/`collection` still
+  apply no normalization (no whitespace trim) on write, a pre-existing inconsistency the
+  review surfaced (not introduced by this change) — `region=" Malaysia "` is stored verbatim
+  and unreachable by `region="Malaysia"`, while `markets` now holds a stricter standard
+  (strips, rejects empty entries). `find_similar_images`'s region-mismatch flag (§6.6) still
+  compares only the single `region` field, not `markets` — a campaign tagged
+  `region="Malaysia", markets=["Malaysia","Indonesia"]` versus one tagged
+  `region="Indonesia"` still flags as "different region" even though both activations
+  touched Indonesia. Neither blocks tonight's use case; both are real follow-ups.
+
 ## 9. Sequence
 
 1. **Now:** local Windows end-to-end green (Desktop + server + Ollama), campaigns loaded. **Done**

@@ -50,3 +50,43 @@ def test_init_db_adds_collection_column_to_a_pre_collection_database(conn):
 def test_init_db_is_a_noop_on_a_database_that_already_has_collection(conn):
     store.init_db()
     store.init_db()  # must not raise when called twice / column already present
+
+
+def test_init_db_adds_markets_column_to_a_pre_markets_database(conn):
+    """Same scenario, one column later: a v0.2.4-and-earlier database (has `collection`,
+    not yet `markets`) must upgrade in place too - this is the exact real-world case anyone
+    reinstalling over an existing database tonight will hit."""
+    store_conn = store.connect()
+    store_conn.execute("DROP TABLE IF EXISTS campaigns")
+    store_conn.execute("""
+        CREATE TABLE campaigns (
+            id TEXT PRIMARY KEY, title TEXT NOT NULL,
+            record_type TEXT NOT NULL DEFAULT 'campaign', status TEXT,
+            tags TEXT NOT NULL DEFAULT '[]', region TEXT, market TEXT, collection TEXT,
+            supersedes TEXT, detail TEXT, deck_text TEXT,
+            asset_path TEXT, embedded INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL, updated_at REAL NOT NULL
+        )
+    """)
+    store_conn.execute(
+        "INSERT INTO campaigns (id, title, created_at, updated_at) VALUES ('camp_old', 'Old', 0, 0)"
+    )
+    store_conn.commit()
+
+    columns_before = {r["name"] for r in store_conn.execute("PRAGMA table_info(campaigns)").fetchall()}
+    assert "markets" not in columns_before
+    store_conn.close()
+
+    store.init_db()
+
+    conn2 = store.connect()
+    columns_after = {r["name"] for r in conn2.execute("PRAGMA table_info(campaigns)").fetchall()}
+    assert "markets" in columns_after
+
+    old = store.get_campaign(conn2, "camp_old")
+    assert old is not None
+    assert old["markets"] == []
+
+    new_id = store.insert_campaign(conn2, title="New", markets=["Malaysia", "Indonesia"])
+    assert store.get_campaign(conn2, new_id)["markets"] == ["Malaysia", "Indonesia"]
+    conn2.close()

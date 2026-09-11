@@ -15,7 +15,7 @@ import json
 import sqlite3
 import time
 import uuid
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import config
 import vectorstore
@@ -28,8 +28,14 @@ CREATE TABLE IF NOT EXISTS campaigns (
     status        TEXT,            -- proposed | in_flight | concluded (campaigns only)
     tags          TEXT NOT NULL DEFAULT '[]',   -- JSON array of {value, source}, no fixed
                                     -- taxonomy; source is verified|stated (§ tag provenance)
-    region        TEXT,            -- freeform, e.g. "APAC"
-    market        TEXT,            -- freeform, e.g. "Philippines"
+    region        TEXT,            -- freeform, single value, e.g. "Malaysia" (exact-match
+                                    -- filter - a multi-country activation needs `markets`
+                                    -- below too; region alone can't express membership)
+    market        TEXT,            -- freeform, single value, e.g. "SEA" (grouping label)
+    markets       TEXT NOT NULL DEFAULT '[]',  -- JSON array of strings: every country/sub-
+                                    -- market a campaign's activation actually touched,
+                                    -- matched by membership (region/market are single-value
+                                    -- exact-match and can't represent "ran in MY and ID")
     collection    TEXT,            -- freeform: links market/version variants of the same
                                     -- creative (e.g. "Khloe Q2 2026") - symmetric grouping,
                                     -- unlike supersedes (asymmetric replacement)
@@ -111,11 +117,14 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     (in _SCHEMA) does nothing for an EXISTING table, so a column added since someone's last
     install (e.g. `collection`, added after v0.2.0 shipped with installers) would otherwise
     make every insert/read against their real database fail outright (reviewed and
-    reproduced against a pre-collection schema). Never destructive — only ever adds a
-    nullable column to an existing table; a fresh DB already has it via _SCHEMA."""
+    reproduced against a pre-collection schema). Never destructive — only ever adds a column
+    (nullable, or NOT NULL with a constant default — SQLite allows the latter on ADD COLUMN,
+    backfilling existing rows) to an existing table; a fresh DB already has it via _SCHEMA."""
     existing = {r["name"] for r in conn.execute("PRAGMA table_info(campaigns)").fetchall()}
     if "collection" not in existing:
         conn.execute("ALTER TABLE campaigns ADD COLUMN collection TEXT")
+    if "markets" not in existing:
+        conn.execute("ALTER TABLE campaigns ADD COLUMN markets TEXT NOT NULL DEFAULT '[]'")
     conn.commit()
 
 
@@ -213,6 +222,32 @@ def normalize_tags(tags, *, has_actual_metrics: bool = False) -> list[dict]:
     return list(deduped.values())
 
 
+def normalize_markets(markets) -> list[str]:
+    """Normalize markets to a deduped list of stripped strings. Mirrors tags' list-not-a-
+    single-value philosophy but with no provenance concept - this is a plain membership list
+    (every country/sub-market an activation touched), matched by filter_campaign_ids'
+    `markets` param via case-insensitive membership, not exact-match like region/market."""
+    if markets is None:
+        return []
+    if not isinstance(markets, list):
+        raise ValueError(f"markets must be a list, got {markets!r}")
+    out = []
+    seen: set[str] = set()
+    for m in markets:
+        if not isinstance(m, str) or not m.strip():
+            raise ValueError(f"each market must be a non-empty string, got {m!r}")
+        value = m.strip()
+        key = value.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(value)
+    return out
+
+
+def _parse_stored_markets(raw: Optional[str]) -> list[str]:
+    return json.loads(raw) if raw else []
+
+
 def _parse_stored_tags(raw: Optional[str]) -> list[dict]:
     """Parse a campaign's stored tags JSON, tolerating legacy plain-string entries (from
     before tags carried provenance) — reviewed and found the strict-dict-only reader crashed
@@ -265,21 +300,22 @@ def _parse_tag_query(tags) -> list[tuple[str, Optional[str]]]:
 
 def insert_campaign(conn, *, title, record_type="campaign", status=None, detail=None,
                     deck_text=None, asset_path=None, tags=None, region=None, market=None,
-                    collection=None, supersedes=None) -> str:
+                    markets=None, collection=None, supersedes=None) -> str:
     _validate_record_type(record_type)
     _validate_status(status)
     tags = normalize_tags(tags, has_actual_metrics=False)  # brand-new: no metrics can exist yet
+    markets = normalize_markets(markets)
     cid = _id("camp")
     now = _now()
     if status is None and record_type == "campaign":
         status = "concluded"  # reference/stub records have no lifecycle status by default
     conn.execute(
         """INSERT INTO campaigns (id, title, record_type, status, tags, region, market,
-                                  collection, supersedes, detail, deck_text, asset_path,
-                                  created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (cid, title, record_type, status, json.dumps(tags), region, market, collection,
-         supersedes, detail, deck_text, asset_path, now, now),
+                                  markets, collection, supersedes, detail, deck_text,
+                                  asset_path, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (cid, title, record_type, status, json.dumps(tags), region, market,
+         json.dumps(markets), collection, supersedes, detail, deck_text, asset_path, now, now),
     )
     conn.commit()
     return cid
@@ -301,6 +337,7 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
         return None
     d = dict(row)
     d["tags"] = _parse_stored_tags(d["tags"])
+    d["markets"] = _parse_stored_markets(d["markets"])
     d["metrics"] = [dict(m) for m in conn.execute(
         "SELECT * FROM metrics WHERE campaign_id = ? ORDER BY created_at", (campaign_id,)
     ).fetchall()]
@@ -361,6 +398,7 @@ def list_campaigns(conn, *, record_type: Optional[str] = None,
     for r in rows:
         d = dict(r)
         d["tags"] = _parse_stored_tags(d["tags"])
+        d["markets"] = _parse_stored_markets(d["markets"])
         d["has_metrics"] = d["id"] in with_metrics
         d["is_superseded"] = d["id"] in superseded_ids
         d["has_evaluations"] = d["id"] in with_evaluations
@@ -371,13 +409,23 @@ def list_campaigns(conn, *, record_type: Optional[str] = None,
 def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Optional[str] = None,
                         tags: Optional[list] = None, match_all_tags: bool = False,
                         region: Optional[str] = None, market: Optional[str] = None,
+                        markets: Optional[Union[str, list[str]]] = None,
                         collection: Optional[str] = None,
                         exclude_campaign_id: Optional[str] = None) -> list[str]:
     """
     Structured filtering BEFORE similarity ranking (§6.2) — on a single-brand corpus, pure
     vector search returns noise; narrow to the matching campaigns first (e.g. "concluded
     seeding campaigns in APAC"), then rank what's left by similarity. region/market/
-    collection are freeform and matched case-insensitively.
+    collection are freeform, single-value, and matched case-insensitively (exact match).
+
+    markets is different on purpose: a real activation can span several countries (e.g. a
+    SEA launch touching Malaysia, Singapore, and Indonesia), which a single-value region/
+    market can't represent — tagging region="Malaysia" makes that same campaign invisible
+    to a query for region="Indonesia", even though the activation genuinely included it.
+    Pass a single country/sub-market string, or a list of them for ANY-match (e.g.
+    markets=["Indonesia", "Thailand"] — matches a campaign whose activation touched EITHER,
+    not both); matches any campaign whose stored `markets` list contains at least one of the
+    given values (case-insensitive membership, not exact-match on the whole field).
 
     tags is a list of plain strings (match that value, any source) and/or {value, source}
     objects (match that value AND require that specific source) — mix freely. Defaults to
@@ -412,7 +460,7 @@ def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Opti
         clauses.append("id != ?")
         params.append(exclude_campaign_id)
 
-    sql = "SELECT id, tags FROM campaigns WHERE " + " AND ".join(clauses)
+    sql = "SELECT id, tags, markets FROM campaigns WHERE " + " AND ".join(clauses)
     sql += " ORDER BY created_at"
     rows = conn.execute(sql, params).fetchall()
 
@@ -427,14 +475,21 @@ def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Opti
 
         rows = [r for r in rows if campaign_matches(r)]
 
+    if markets:
+        query_values = [markets] if isinstance(markets, str) else markets
+        wanted_markets = {v.strip().lower() for v in query_values}
+        rows = [r for r in rows
+                if wanted_markets & {m.lower() for m in _parse_stored_markets(r["markets"])}]
+
     return [r["id"] for r in rows]
 
 
 def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_type=None,
-                    status=None, tags=None, region=None, market=None, collection=None) -> bool:
+                    status=None, tags=None, region=None, market=None, markets=None,
+                    collection=None) -> bool:
     """Update campaign metadata (§6.4) — NOT deck_text/chunks/embeddings; re-upload (or
-    supersede) for content changes. Only given fields change; tags, if given, fully replaces
-    the existing list rather than merging. Returns whether the campaign exists."""
+    supersede) for content changes. Only given fields change; tags/markets, if given, fully
+    replace the existing list rather than merging. Returns whether the campaign exists."""
     fields, params = [], []
     if title is not None:
         fields.append("title = ?"); params.append(title)
@@ -457,6 +512,8 @@ def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_t
         fields.append("region = ?"); params.append(region)
     if market is not None:
         fields.append("market = ?"); params.append(market)
+    if markets is not None:
+        fields.append("markets = ?"); params.append(json.dumps(normalize_markets(markets)))
     if collection is not None:
         fields.append("collection = ?"); params.append(collection)
 
