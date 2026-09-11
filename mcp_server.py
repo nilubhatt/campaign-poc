@@ -355,7 +355,8 @@ def get_campaign(campaign_id: str) -> dict:
 @_catch_value_errors
 def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str] = None,
                            top_k: int = 5, record_type: Optional[RecordType] = None,
-                           status: Optional[Status] = None, tags: Optional[list[TagInput]] = None,
+                           status: Optional[Status] = None,
+                           tags: Optional[Union[TagInput, list[TagInput]]] = None,
                            match_all_tags: bool = False, region: Optional[str] = None,
                            market: Optional[str] = None, markets: Optional[Union[str, list[str]]] = None,
                            collection: Optional[str] = None,
@@ -405,7 +406,8 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
 @_catch_value_errors
 def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
                        record_type: Optional[RecordType] = None, status: Optional[Status] = None,
-                       tags: Optional[list[TagInput]] = None, match_all_tags: bool = False,
+                       tags: Optional[Union[TagInput, list[TagInput]]] = None,
+                       match_all_tags: bool = False,
                        region: Optional[str] = None, market: Optional[str] = None,
                        markets: Optional[Union[str, list[str]]] = None, collection: Optional[str] = None,
                        full_detail: bool = True) -> dict:

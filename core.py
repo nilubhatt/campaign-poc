@@ -230,7 +230,7 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
 
 def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str] = None,
                  top_k: int = 5, record_type: Optional[str] = None, status: Optional[str] = None,
-                 tags: Optional[list] = None, match_all_tags: bool = False,
+                 tags: Optional[Union[str, dict, list]] = None, match_all_tags: bool = False,
                  region: Optional[str] = None, market: Optional[str] = None,
                  markets: Optional[Union[str, list]] = None, collection: Optional[str] = None,
                  full_detail: bool = False) -> list[dict]:
@@ -355,7 +355,7 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
 
 def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: int = 5,
                        record_type: Optional[str] = None, status: Optional[str] = None,
-                       tags: Optional[list] = None, match_all_tags: bool = False,
+                       tags: Optional[Union[str, dict, list]] = None, match_all_tags: bool = False,
                        region: Optional[str] = None, market: Optional[str] = None,
                        markets: Optional[Union[str, list]] = None, collection: Optional[str] = None,
                        full_detail: bool = True) -> dict:
