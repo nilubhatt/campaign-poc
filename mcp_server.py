@@ -92,6 +92,15 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
     in one free-text paragraph instead of field-by-field, parse it into these fields
     yourself rather than asking again.
 
+    Whether a campaign genuinely belongs to a collection is a judgment call for the
+    marketer, not you — "features the same product/collection" and "IS one of that
+    collection's own launches" are different things (e.g. a store launch that promotes a
+    collection's products is not itself a collection launch), and guessing wrong either way
+    quietly corrupts the collection_siblings set every later query relies on. If it's not
+    obvious which one this is from what they've told you, ask directly ("is this itself
+    part of the Khloe Q2 2026 launch, or just related to it?") rather than picking one — do
+    not leave this to be silently decided outside the conversation.
+
     Then call this tool with confirm=False (the default) to get a PREVIEW — nothing is
     stored yet. Show the user the breakdown you parsed ("Here's what I got: type=future,
     region=APAC, ... — anything to fix?"), let them correct it, then call again with
@@ -179,8 +188,11 @@ def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optio
     unverified impression. It's also how you fix a campaign tagged with only a single
     region when its activation actually spanned more (a real gap found in testing) — pass
     markets=["Malaysia", "Indonesia", ...] to make it reachable by any of those countries,
-    without touching region/market. Does NOT change deck_text/chunks/embeddings; for content
-    changes, upload a new record and pass supersedes=campaign_id instead."""
+    without touching region/market. Setting/changing collection is a judgment call for the
+    marketer, not you — see upload_campaign's docstring on asking rather than guessing when
+    it's unclear whether this record IS a collection launch versus merely related to one.
+    Does NOT change deck_text/chunks/embeddings; for content changes, upload a new record
+    and pass supersedes=campaign_id instead."""
     conn = store.connect()
     try:
         ok = store.update_campaign(conn, campaign_id, title=title, detail=detail,
