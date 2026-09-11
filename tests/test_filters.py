@@ -67,6 +67,18 @@ def test_filter_campaign_ids_by_tags_any_match(conn):
     assert store.filter_campaign_ids(conn, tags=["nonexistent"]) == []
 
 
+def test_filter_campaign_ids_tags_accepts_a_bare_string_or_object_not_just_a_list(conn):
+    """The write side takes a single string/object inline within a list; a caller with only
+    ONE tag to filter on will plausibly pass it bare (tags="liked") rather than wrapping it
+    in a list, same ergonomic gap markets was widened for - a bare string used to raise
+    ValueError('tags filter must be a list...') instead of just matching."""
+    a = store.insert_campaign(conn, title="A", tags=["liked"])
+    store.insert_campaign(conn, title="B", tags=["not_liked"])
+
+    assert store.filter_campaign_ids(conn, tags="liked") == [a]
+    assert store.filter_campaign_ids(conn, tags={"value": "liked"}) == [a]
+
+
 def test_filter_campaign_ids_combines_all_filters(conn):
     a = store.insert_campaign(conn, title="A", record_type="campaign", status="concluded",
                               region="APAC", tags=["seeding"])

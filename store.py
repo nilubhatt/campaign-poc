@@ -272,11 +272,17 @@ def _parse_tag_query(tags) -> list[tuple[str, Optional[str]]]:
     verified-only flag can't express this — reviewed and found it forces every queried tag
     (including ones that can never be "verified," like a creative-reaction tag) through the
     same requirement, making the actual quadrant query unanswerable.
+
+    A bare string or {value, source} object (not wrapped in a list) is also accepted for a
+    single-tag query — the same ergonomic gap found in testing for `markets`: a caller with
+    only one tag to filter on will plausibly pass it unwrapped.
     """
     if tags is None:
         return []
+    if isinstance(tags, (str, dict)):
+        tags = [tags]
     if not isinstance(tags, list):
-        raise ValueError(f"tags filter must be a list, got {tags!r}")
+        raise ValueError(f"tags filter must be a list (or a single string/object), got {tags!r}")
     out = []
     for t in tags:
         if isinstance(t, str):
@@ -407,7 +413,7 @@ def list_campaigns(conn, *, record_type: Optional[str] = None,
 
 
 def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Optional[str] = None,
-                        tags: Optional[list] = None, match_all_tags: bool = False,
+                        tags: Optional[Union[str, dict, list]] = None, match_all_tags: bool = False,
                         region: Optional[str] = None, market: Optional[str] = None,
                         markets: Optional[Union[str, list[str]]] = None,
                         collection: Optional[str] = None,
