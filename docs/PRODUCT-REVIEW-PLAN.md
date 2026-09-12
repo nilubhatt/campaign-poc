@@ -471,9 +471,29 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       is offline, so image similarity and reuse checks will miss this one. Ask IT to run
       setup on this machine — everything else works normally.", with the original "Failed to
       download weights for tag 'openai'" text intact in `detail`.
-- [ ] **3.2 Version surface + stale-schema documentation** (defect 10). Build version in the
+- [x] **3.2 Version surface + stale-schema documentation** (defect 10). Build version in the
       server description; README documents that the host app must be fully quit and reopened
       after a rebuild (closing the window leaves the server running).
+      **Done:** `version.py` is the single source — `VERSION` by hand at release, `BUILD`
+      stamped by CI with the commit and date, because two builds of one version from
+      different commits are not the same thing to anybody debugging one. It imports nothing
+      and touches no I/O beyond one optional file read, so `--version` answers on a machine
+      where the database is corrupt, the embedder is down and the model is missing, which is
+      exactly when somebody asks. Surfaced in the server's own `instructions` (where a host
+      shows it, next to the connector), in `health_check`, in `/healthz`, and as
+      `campaign-intelligence --version`.
+      **The half the review asked for is the weaker half.** A version string says the server
+      changed; it does not say which of the parameters in your hand are missing, and the
+      reported symptom was silent absence — "several parameters that were live and working
+      were absent from the schemas in use, and had to be rediscovered by trial and error".
+      So `health_check` also publishes `tools`: every tool mapped to the parameters it
+      actually takes, read off the function signatures rather than maintained by hand, since
+      a hand-written copy would drift from the tools exactly the way the client's cache did —
+      the defect reproduced inside its own fix. `core.stale_schema_parameters()` diffs a
+      caller's schema against it, so the gap gets named instead of guessed at, and the server
+      `instructions` tell Claude to do that and then say to fully quit and reopen the app.
+      The tool inventory is best-effort: an import failure costs the inventory, never the
+      report that says which component is down.
 - [x] **3.3 Shipped scripts must be encoding-safe** (defect 11). Any `.ps1` ASCII-only or
       UTF-8 **with** BOM, asserted in CI; audit the macOS/Linux shell scripts for the
       analogous trap rather than assuming it is Windows-only.

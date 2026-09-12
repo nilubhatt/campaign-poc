@@ -144,6 +144,23 @@ main.py          unified binary entry (serve | stdio)
 stdio_server.py  stdio entrypoint for a local Claude Desktop connector
 ```
 
+### After rebuilding: fully quit the host app
+
+An MCP host caches each tool's schema when it connects. Rebuild the server mid-session and
+the client keeps the old schemas — parameters that are live and working simply are not
+there, with no error to say so. This cost a reviewer an afternoon of rediscovering
+`markets`, `status`, tag `source`, `match_all_tags` and `confirm` by trial and error against
+a server that already supported all five.
+
+**Closing the window is not enough** — the host keeps the server process running. Fully quit
+the app (`Cmd-Q` / File → Exit) and reopen it.
+
+To check what the running server actually accepts: `health_check` returns `version`, `build`
+and a `tools` map of every tool to its real parameter list, read off the functions
+themselves. Compare that against the schema in hand and the gap is named rather than
+guessed at. `campaign-intelligence --version` answers the same question from a terminal, and
+works on a machine where the database, the model and the embedder are all broken.
+
 ## Install / packaging
 
 Run from source, or ship a self-contained bundle (no Python on the target):

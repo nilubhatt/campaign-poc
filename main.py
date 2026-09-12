@@ -10,10 +10,19 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
+
+# Dependency-free by design: --version must answer on a machine where config, the model
+# and the database are all broken, which is precisely when somebody asks.
+import version
 
 
 def main() -> int:
     p = argparse.ArgumentParser(prog="campaign-intelligence")
+    # The first question support asks, and it has to work on a machine where the product is
+    # broken — so it touches no database, no embedder and no model (§3.2, defect 10).
+    p.add_argument("--version", action="version",
+                   version=f"campaign-intelligence {version.FULL}")
     sub = p.add_subparsers(dest="cmd")
 
     s = sub.add_parser("serve", help="run the HTTP server (MCP /mcp + /upload + /healthz)")

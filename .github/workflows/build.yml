@@ -62,6 +62,14 @@ jobs:
           CAMPAIGN_WEIGHTS_REQUIRE_MIRROR: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '0' }}
         run: python scripts/fetch_weights.py .weights-cache
 
+      # Stamped before PyInstaller so the bundled copy carries it. Two builds of the same
+      # version from different commits are not the same thing to anybody debugging one
+      # (§3.2, defect 10) — and the reviewer's session was against a server that had been
+      # rebuilt mid-session with nothing to say so.
+      - name: Stamp the build
+        shell: bash
+        run: echo "${{ github.sha }} $(date -u +%Y-%m-%dT%H:%M:%SZ)" > build_info.txt
+
       - name: Build bundle
         run: pyinstaller --clean --noconfirm campaign-poc.spec
 

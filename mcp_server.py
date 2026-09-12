@@ -13,10 +13,25 @@ from typing import Literal, NotRequired, Optional, TypedDict, Union
 
 from mcp.server.mcpserver import MCPServer
 
+import config
 import core
 import store
 
-mcp = MCPServer("campaign-intelligence")
+# The version goes in the server's own description because that is where a host shows it,
+# next to the connector — "visible at a glance", rather than behind a call somebody has to
+# know to make (§3.2, defect 10). The restart sentence is here for the same reason: the
+# reviewer lost time to a rebuilt server whose old schema the client was still holding, and
+# closing the window does not stop the server.
+INSTRUCTIONS = f"""Campaign Intelligence {config.VERSION_FULL} — a marketing team's own
+campaign library: past campaigns, what they achieved, and judgments about new proposals
+weighed against that record.
+
+If a parameter documented in a tool's description is missing from the schema you hold, the
+host has cached an older one: call health_check, compare its `tools` list against your
+schema, and tell the user to fully QUIT and reopen the app — closing the window leaves this
+server running, so the schema will not refresh."""
+
+mcp = MCPServer("campaign-intelligence", version=config.VERSION, instructions=INSTRUCTIONS)
 
 
 def _catch_value_errors(fn):
@@ -733,3 +748,29 @@ def save_reconciliation(evaluation_id: str, comparison: str, actual: Optional[st
         return {"reconciliation_id": rid, "status": "saved"}
     finally:
         conn.close()
+
+# Every tool this server publishes, in the order they are defined. Named explicitly so
+# health_check can report what each one actually takes (§3.2): a caller holding a schema
+# cached before a rebuild can then name the parameters it is missing instead of
+# rediscovering them by trial and error.
+TOOL_NAMES = (
+    "upload_campaign",
+    "update_campaign",
+    "delete_campaign",
+    "upload_image_asset",
+    "check_image_provenance",
+    "find_similar_images",
+    "add_metrics",
+    "bulk_import_metrics",
+    "health_check",
+    "finish_indexing",
+    "list_campaigns",
+    "get_campaign",
+    "find_similar_campaigns",
+    "prepare_evaluation",
+    "save_evaluation",
+    "get_evaluation",
+    "list_evaluations",
+    "reconcile_evaluation",
+    "save_reconciliation",
+)

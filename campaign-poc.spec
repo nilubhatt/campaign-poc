@@ -1,3 +1,4 @@
+import os
 # PyInstaller spec — one-folder bundle for the campaign-intelligence lean product.
 # Build (on the TARGET OS): pyinstaller campaign-poc.spec
 # Produces dist/campaign-intelligence/  (a self-contained folder; zip/tar it to distribute).
@@ -36,6 +37,11 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 datas, binaries, hiddenimports = [], [], []
+
+# The build stamp, when CI wrote one. Optional on purpose: a local build has no stamp and
+# reports itself as a source checkout, which is the honest answer (§3.2).
+if os.path.exists("build_info.txt"):
+    datas += [("build_info.txt", ".")]
 
 # Bundle sqlite-vec fully (its compiled extension is a binary + package data).
 for pkg in ("sqlite_vec",):

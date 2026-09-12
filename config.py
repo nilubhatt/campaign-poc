@@ -3,6 +3,8 @@ import os
 import sys
 from pathlib import Path
 
+from version import BUILD, FULL as VERSION_FULL, VERSION
+
 
 def app_dir() -> Path:
     """The directory the application lives in — where data shipped *with* it is found.

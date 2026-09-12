@@ -879,14 +879,68 @@ def health_check(conn, *, probe: bool = True) -> dict:
     else:
         headline = f"Everything is working; {campaigns} record(s) fully searchable."
 
-    report = {"ok": live, "headline": headline, "components": components,
-              "coverage": coverage}
+    report = {"ok": live, "headline": headline, "version": config.VERSION,
+              "build": config.VERSION_FULL, "components": components,
+              "coverage": coverage, "tools": published_tool_parameters()}
     if backlog:
         report["backlog_remedy"] = (
             f"{backlog} items are stored but not searchable, so results will be incomplete. "
             f"Run finish_indexing to complete them — nothing needs re-uploading."
         )
     return report
+
+
+def published_tool_parameters() -> dict[str, list[str]]:
+    """What each tool actually takes, right now, read off the functions themselves (§3.2).
+
+    The version is the half the review asked for, and the weaker half: a version string says
+    the server changed, not that the schema in your hand is missing a parameter — and the
+    reported symptom was silent absence. "Several parameters that were live and working —
+    markets, status, tag source, match_all_tags, confirm — were absent from the schemas in
+    use, and had to be rediscovered by trial and error against a server that already
+    supported them."
+
+    This is the list a caller holding a cached schema can compare against, so the gap can be
+    named instead of guessed at. Generated from the signatures rather than maintained by
+    hand, because a hand-written copy would drift from the tools exactly the way the client's
+    cache did — the defect reproduced inside its own fix.
+    """
+    import inspect
+
+    try:
+        import mcp_server
+    except Exception:                              # noqa: BLE001
+        # health_check has to answer on a machine where things are broken — that is when
+        # somebody runs it. An import failure here must cost the tool inventory, never the
+        # report that says which component is down.
+        return {}
+
+    published: dict[str, list[str]] = {}
+    for name in getattr(mcp_server, "TOOL_NAMES", ()):
+        fn = getattr(mcp_server, name, None)
+        if fn is None:
+            continue
+        published[name] = [p for p in inspect.signature(fn).parameters
+                           if p not in ("self", "ctx")]
+    return published
+
+
+def stale_schema_parameters(published: dict, cached: dict) -> dict[str, list[str]]:
+    """Per tool, the parameters this server accepts that the caller's schema does not list.
+
+    Empty means the caller is current. Anything else is the answer to "why did passing
+    markets= do nothing" without a round of trial and error — and the cue to tell them to
+    fully quit and reopen the host app, since closing the window leaves the server running.
+    """
+    missing = {}
+    for tool, params in published.items():
+        if tool not in cached:
+            missing[tool] = list(params)
+            continue
+        gap = [p for p in params if p not in set(cached[tool])]
+        if gap:
+            missing[tool] = gap
+    return missing
 
 
 def finish_indexing(conn, *, campaign_id: Optional[str] = None) -> dict:
