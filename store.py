@@ -1104,6 +1104,20 @@ def campaigns_with_actual_metrics(conn) -> set:
         "SELECT DISTINCT campaign_id FROM metrics WHERE metric_type = 'actual'").fetchall()}
 
 
+def finding_exists(conn, finding_id: str) -> bool:
+    """Whether any stored judgment contains a finding with this id.
+
+    Finding ids are `{evaluation_id}#n`, so the evaluation is identifiable from the id
+    itself — no scan required.
+    """
+    evaluation_id = str(finding_id).split("#")[0]
+    row = conn.execute("SELECT findings FROM evaluations WHERE id = ?",
+                       (evaluation_id,)).fetchone()
+    if not row or not row["findings"]:
+        return False
+    return any(f.get("id") == finding_id for f in json.loads(row["findings"]))
+
+
 def latest_evaluation_for_campaign(conn, campaign_id: str):
     """The most recent judgment of this campaign, or None.
 

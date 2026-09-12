@@ -186,6 +186,15 @@ _REGISTRY: dict[str, tuple] = {
         "same one again, the earlier record can be removed.",
         "",
     ),
+    "version_order_unverified": (
+        "note", "record",
+        "Nothing in the library records which of these two versions came first, so the "
+        "order you gave was assumed. If it is the wrong way round, every "
+        "\u201cadopted\u201d and \u201craised again\u201d below is inverted.",
+        "If one of these replaces the other, say so when uploading it, and the comparison "
+        "will not have to assume.",
+        "",
+    ),
     "results_may_be_incomplete": (
         "note", "call",
         "",     # always supplied per call: it has to carry the counts

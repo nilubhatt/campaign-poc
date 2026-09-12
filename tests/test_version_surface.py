@@ -232,3 +232,20 @@ def test_reading_a_desktop_config_with_a_non_ascii_path_does_not_corrupt_it(tmp_
     after = json.loads(cfg.read_text(encoding="utf-8"))
     assert after["mcpServers"]["notes"]["command"] == "C:\\Users\\José\\notes.exe"
     assert "campaign-intelligence" in after["mcpServers"]
+
+
+def test_the_readme_lists_every_tool_the_server_publishes():
+    """It has drifted twice — once missing `finish_indexing`/`health_check`, once missing
+    `diff_campaigns`/`gaps`. A hand-maintained list beside a generated one is the failure
+    this project keeps rediscovering, so this is the cheap version of the guard."""
+    import re
+
+    import mcp_server
+
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    section = text[text.index("## Tools (what Claude calls)"):text.index("## Files")]
+    listed = set(re.findall(r"`([a-z_]+)`", section))
+    published = {t.name for t in mcp_server.mcp._tool_manager.list_tools()}
+
+    assert published - listed == set(), f"README omits {sorted(published - listed)}"
+    assert listed - published == set(), f"README lists non-tools {sorted(listed - published)}"

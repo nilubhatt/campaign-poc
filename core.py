@@ -547,7 +547,7 @@ def _clean_precedent(value, where: str) -> Optional[dict]:
     return cleaned
 
 
-def _clean_resolved(value) -> list:
+def _clean_resolved(value, conn=None) -> list:
     """`[{was, now}]` was accepted as literally anything — a bare string, a number, a dict
     of unrelated keys — so the one field that records whether the library's own advice was
     taken could hold something nothing could read back."""
@@ -568,6 +568,15 @@ def _clean_resolved(value) -> list:
             raise ValueError(f"{where}needs both 'was' (what the earlier evaluation asked "
                              f"for) and 'now' (what changed)")
         entry = {"was": was, "now": now}
+        # A `finding_id` pointing at nothing, or at another campaign's judgment, used to save
+        # without complaint and then vanish from the diff — so "we fixed that" was recorded
+        # and silently lost, on the one field `adopted` depends on.
+        if item.get("finding_id") and conn is not None:
+            if not store.finding_exists(conn, item["finding_id"]):
+                raise ValueError(
+                    f"{where}finding_id {item['finding_id']!r} does not match any finding "
+                    f"on record. Take it from get_evaluation, or from the `earlier_version` "
+                    f"block prepare_evaluation returns.")
         # §5.4 and §6.3 both need "this specific earlier finding is now addressed", and
         # free text cannot be joined back to one.
         if item.get("finding_id"):
@@ -646,7 +655,7 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
     if not summary:
         raise ValueError("summary is required — one line a person can act on")
     approve_if = _bounded(approve_if, "approve_if", _MAX_APPROVE_IF)
-    resolved = _clean_resolved(resolved)
+    resolved = _clean_resolved(resolved, conn)
 
     cleaned = []
     for i, finding in enumerate(findings):
@@ -660,6 +669,11 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         text = _bounded(finding.get("finding"), "'finding'", _MAX_FINDING, where=where)
         if not text:
             raise ValueError(f"{where}'finding' is required — one line naming the problem")
+        # §5.4: which earlier finding this repeats, when the model knows. This is the feeder
+        # `adopted`/`raised_again` needed: without it the only signal was how alike two
+        # sentences read, which scored "adidas-affiliated" against "Nike-affiliated" at 0.89
+        # and the same problem reworded at 0.36.
+        repeats = _bounded(finding.get("repeats"), "'repeats'", 80, where=where)
         kind = finding.get("kind")
         if kind is not None and kind not in _KINDS:
             raise ValueError(f"{where}kind must be one of {list(_KINDS)}, got {kind!r}")
@@ -685,6 +699,7 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
             "basis": basis,
             "category": _category(finding.get("category"), where),
             "finding": text,
+            "repeats": repeats,
             "detail": _bounded(finding.get("detail"), "'detail'", _MAX_DETAIL, where=where),
             "precedent": _clean_precedent(finding.get("precedent"), where),
             "fix": _bounded(finding.get("fix"), "'fix'", _MAX_FIX, where=where),
@@ -1303,20 +1318,48 @@ def _looks_like(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, (a or "").lower(), (b or "").lower()).ratio()
 
 
-def _match(finding: dict, candidates: list[dict]) -> Optional[dict]:
-    """The candidate that most likely describes the same problem, or None.
+def _pair_score(earlier: dict, later: dict) -> float:
+    """How likely these two describe the same problem.
 
-    Category is a hint rather than a gate: the same defect can be filed under different
-    categories by two reviewers, but when both agree on one it is strong evidence.
+    Category is a hint rather than a gate: the same defect gets filed under different
+    categories by two reviewers, but when both agree on one it is the only signal available
+    to separate two findings whose wording is equally close.
     """
-    best, best_score = None, 0.0
-    for candidate in candidates:
-        score = _looks_like(finding.get("finding"), candidate.get("finding"))
-        if finding.get("category") and finding["category"] == candidate.get("category"):
-            score += 0.1
-        if score > best_score:
-            best, best_score = candidate, score
-    return best if best_score >= _SAME_FINDING else None
+    score = _looks_like(earlier.get("finding"), later.get("finding"))
+    if earlier.get("category") and earlier["category"] == later.get("category"):
+        score += 0.1
+    return score
+
+
+def _pair_up(earlier: list[dict], later: list[dict]) -> dict:
+    """Best-first assignment over ALL candidate pairs, one earlier to one later.
+
+    The first version walked the earlier findings in order and gave each the best REMAINING
+    later one, so with two earlier findings competing for one later finding the one processed
+    first won — even at 0.79 against the other's 0.98. Which correction was reported as
+    raised again therefore depended on the order somebody typed them, or on the severity sort
+    that reorders them before ids are assigned. The same two decks must not diff differently.
+
+    Scoring every pair and taking them best-first makes the result a property of the two sets
+    rather than of their order. Ties break on the findings' own text, so it is deterministic
+    rather than merely consistent.
+    """
+    pairs = sorted(
+        ((_pair_score(e, l), (e.get("finding") or ""), (l.get("finding") or ""), i, j)
+         for i, e in enumerate(earlier) for j, l in enumerate(later)),
+        key=lambda t: (-t[0], t[1], t[2]))
+    taken_earlier: set = set()
+    taken_later: set = set()
+    assignment: dict = {}
+    for score, _et, _lt, i, j in pairs:
+        if score < _SAME_FINDING:
+            break
+        if i in taken_earlier or j in taken_later:
+            continue
+        taken_earlier.add(i)
+        taken_later.add(j)
+        assignment[i] = (j, score)
+    return assignment
 
 
 def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
@@ -1342,71 +1385,172 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
                          "compared"}
 
     # Which version is earlier decides what "adopted" means, so getting it backwards inverts
-    # the entire answer. The record knows: supersession states it outright, and creation
-    # order is the fallback.
+    # the entire answer — which is why it is corrected only on evidence somebody RECORDED.
+    # Creation order is UPLOAD order: an organisation seeding its archive uploads v1 after
+    # v2 as a matter of course, and silently reversing their question, with a JSON field they
+    # never see as the only tell, answers something they did not ask.
     reordered = False
+    order_basis = "as_given"
+    warnings: list[dict] = []
     if second.get("supersedes") == earlier:
-        pass
-    elif first.get("supersedes") == later or second["created_at"] < first["created_at"]:
+        order_basis = "supersession"
+    elif first.get("supersedes") == later:
         first, second = second, first
         earlier, later = later, earlier
         reordered = True
+        order_basis = "supersession"
+    else:
+        warnings.append(notices.notice(
+            "version_order_unverified",
+            detail=f"no supersedes link between {earlier} and {later}",
+            next_actions=[]))
 
     before = store.latest_evaluation_for_campaign(conn, earlier)
     after = store.latest_evaluation_for_campaign(conn, later)
+
+    # `comparable` means both sides carry a STRUCTURED judgment. A pre-§2.4 evaluation reads
+    # back with no verdict and an empty findings list, and treating it as comparable made
+    # every later finding "newly introduced" — a v2 blamed for everything its own v1 review
+    # had also found.
+    #
+    # The marker is the VERDICT, not a non-empty findings list: an approve with nothing wrong
+    # is a complete structured judgment that happens to have no findings, and the whole point
+    # of this tool is to recognise the version where everything got fixed. (`get_evaluation`
+    # draws the legacy line the same way.)
+    structured = [bool(e and e.get("verdict")) for e in (before, after)]
 
     result = {
         "earlier": {"campaign_id": earlier, "title": first["title"]},
         "later": {"campaign_id": later, "title": second["title"]},
         "arguments_reordered": reordered,
-        "adopted": [], "ignored": [], "newly_introduced": [], "no_longer_raised": [],
-        "carried_stale": _stale_citations(conn, before),
-        "comparable": bool(before and after),
+        "order_basis": order_basis,
+        "adopted": [], "raised_again": [], "newly_introduced": [], "no_longer_raised": [],
+        # BOTH judgments' citations. Only the earlier one was checked, so a later judgment
+        # resting on a record since replaced reported nothing — and the later judgment is
+        # the one somebody is about to act on.
+        "carried_stale": (_stale_citations(conn, before, "earlier")
+                          + _stale_citations(conn, after, "later")),
+        "record_changes": _record_changes(first, second),
+        "comparable": all(structured),
+        "warnings": warnings,
     }
 
-    if not (before and after):
-        missing = "earlier" if not before else "later"
-        result["why_not_comparable"] = (
-            f"The {missing} version has never been evaluated, so there are no findings to "
-            f"compare. What changed between the decks is readable, but which corrections "
-            f"were taken is not — that is a judgment about the earlier review, and guessing "
-            f"it would mean telling somebody they ignored advice nobody checked.")
+    result["counts"] = {name: len(result[name]) for name in
+                        ("adopted", "raised_again", "newly_introduced", "no_longer_raised",
+                         "carried_stale")}
+
+    if not all(structured):
+        if not (before and after):
+            missing = "earlier" if not before else "later"
+            result["why_not_comparable"] = (
+                f"The {missing} version has never been evaluated, so there are no findings "
+                f"to compare. What changed between the decks is readable, but which "
+                f"corrections were taken is not — that is a judgment about the earlier "
+                f"review, and guessing it would mean telling somebody they ignored advice "
+                f"nobody checked.")
+        else:
+            side = "earlier" if not structured[0] else "later"
+            result["why_not_comparable"] = (
+                f"The {side} version's judgment predates the structured findings schema, so "
+                f"it has no findings to compare — only the original free text. Treating it "
+                f"as comparable would report every finding in the other version as newly "
+                f"introduced.")
+            return result
         unjudged = earlier if not before else later
+        unjudged_record = store.get_campaign(conn, unjudged)
         result["next_actions"] = actions.trim([actions.action(
             f"Evaluate \u201c{store.get_campaign(conn, unjudged)['title']}\u201d, so the "
             f"two versions can be compared",
             "prepare_evaluation",
             why="A version with no judgment on file cannot be compared with one that has.",
-            consent="ask", subject_title=store.get_campaign(conn, unjudged)["title"],
-            proposal_text=(store.get_campaign(conn, unjudged)["detail"]
-                           or store.get_campaign(conn, unjudged)["title"]))])
+            # Whatever text the record actually has. `detail or title` sent the title alone
+            # for a deck-only upload, so accepting "evaluate this version" judged eleven
+            # characters — a prefilled placeholder, which §5.2 forbids.
+            consent="ask", subject_title=unjudged_record["title"],
+            campaign_id=unjudged,
+            proposal_text="\n\n".join(
+                part for part in (unjudged_record.get("detail"),
+                                  unjudged_record.get("deck_text"))
+                if part) or unjudged_record["title"])])
         return result
 
-    resolved_ids = {r.get("finding_id") for r in (after.get("resolved") or [])
-                    if r.get("finding_id")}
     resolved_by_id = {r["finding_id"]: r for r in (after.get("resolved") or [])
                       if r.get("finding_id")}
     later_findings = list(after.get("findings") or [])
+    repeats_by_id = {f["repeats"]: f for f in later_findings if f.get("repeats")}
     matched_later: list = []
+    later_categories = {f.get("category") for f in later_findings if f.get("category")}
 
-    for finding in before.get("findings") or []:
+    # Everything identity already settles is taken out before wording is consulted at all,
+    # so a resemblance can never outrank a statement somebody made.
+    earlier_findings = list(before.get("findings") or [])
+    settled = {f.get("id") for f in earlier_findings
+               if f.get("id") in resolved_by_id or f.get("id") in repeats_by_id}
+    by_text = _pair_up(
+        [f for f in earlier_findings if f.get("id") not in settled],
+        [f for f in later_findings if not f.get("repeats")])
+    text_match = {}
+    unsettled = [f for f in earlier_findings if f.get("id") not in settled]
+    candidates = [f for f in later_findings if not f.get("repeats")]
+    for i, (j, score) in by_text.items():
+        text_match[id(unsettled[i])] = (candidates[j], score)
+
+    for finding in earlier_findings:
         entry = {k: finding.get(k) for k in ("id", "severity", "kind", "category",
                                              "finding")}
-        entry["basis"] = "computed"
-        if finding.get("id") in resolved_ids:
-            closure = resolved_by_id[finding["id"]]
-            entry["now"] = closure.get("now")
+        if finding.get("id") in resolved_by_id:
+            entry["basis"] = "computed"
+            entry["now"] = resolved_by_id[finding["id"]].get("now")
             result["adopted"].append(entry)
             continue
-        again = _match(finding, [f for f in later_findings if f not in matched_later])
-        if again is not None:
-            matched_later.append(again)
-            entry["raised_again_as"] = again.get("finding")
-            result["ignored"].append(entry)
+
+        # Identity first. A later finding that names the earlier one it repeats is a claim
+        # somebody made, and the only basis on which "this correction was not taken" can be
+        # stated as fact.
+        named = repeats_by_id.get(finding.get("id"))
+        if named is not None:
+            matched_later.append(named)
+            result["raised_again"].append({**entry, "basis": "computed", "match": "id",
+                                           "raised_again_as": named.get("finding")})
             continue
-        entry["caveat"] = ("Neither recorded as resolved nor raised again, so this was "
-                           "either fixed without being recorded or not looked at the second "
-                           "time. The record cannot tell which.")
+
+        # Wording, as a fallback that is labelled as one. Character similarity scored
+        # "adidas-affiliated" against "Nike-affiliated" at 0.89 and the same problem reworded
+        # at 0.36 — it measures phrasing, not meaning, so it is reported as a resemblance
+        # and marked `judged` so nothing downstream states it as fact.
+        paired = text_match.get(id(finding))
+        if paired is not None:
+            again, _score = paired
+            matched_later.append(again)
+            result["raised_again"].append({
+                **entry, "basis": "judged", "match": "text",
+                "similarity": round(_looks_like(finding.get("finding"),
+                                                again.get("finding")), 2),
+                "raised_again_as": again.get("finding"),
+                "caveat": "Matched on how alike the two read, not on either review saying "
+                          "they are the same problem. Check both before telling anyone a "
+                          "correction was not taken.",
+            })
+            continue
+
+        entry["basis"] = "computed"
+        # The caveat is split by what the later review actually covered, because "we cannot
+        # tell" is not equally true in both cases.
+        if after.get("verdict") == "approve" and not later_findings:
+            entry["caveat"] = ("The later review approved this version with no findings at "
+                               "all, which is a positive statement that nothing blocks it — "
+                               "so this was most likely addressed, though no one recorded "
+                               "it against this finding.")
+        elif finding.get("category") and finding["category"] in later_categories:
+            entry["caveat"] = (f"The later review did raise other {finding['category']} "
+                               f"findings, so it looked at this area and did not raise this "
+                               f"one — more likely fixed than overlooked, though nobody "
+                               f"recorded it.")
+        else:
+            entry["caveat"] = ("Neither recorded as resolved nor raised again, and the later "
+                               "review raised nothing in this area at all — so it was either "
+                               "fixed without being recorded or not looked at. The record "
+                               "cannot tell which.")
         result["no_longer_raised"].append(entry)
 
     for finding in later_findings:
@@ -1418,12 +1562,56 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
         result["newly_introduced"].append(entry)
 
     result["counts"] = {name: len(result[name]) for name in
-                        ("adopted", "ignored", "newly_introduced", "no_longer_raised",
+                        ("adopted", "raised_again", "newly_introduced", "no_longer_raised",
                          "carried_stale")}
     return result
 
 
-def _stale_citations(conn, evaluation) -> list[dict]:
+def _record_changes(first: dict, second: dict) -> dict:
+    """What the two records themselves say differently.
+
+    A v2 that drops a market from a LATAM brief is the largest change a version can carry,
+    and it diffed as identical — the comparison only ever looked at findings. Same for a
+    performance tag that lost its `verified` source, which changes how the record weighs as
+    precedent. Set differences on structured fields, so all of it is genuinely computed.
+
+    Unchanged fields are absent rather than listed as empty: a diff that lists everything it
+    checked is a diff nobody reads.
+    """
+    changes: dict = {}
+
+    for field in ("markets",):
+        before, after = set(first.get(field) or []), set(second.get(field) or [])
+        if before != after:
+            changes[field] = {"removed": sorted(before - after),
+                              "added": sorted(after - before)}
+
+    def tag_set(record):
+        return {(t.get("value"), t.get("source")) for t in (record.get("tags") or [])}
+
+    before_tags, after_tags = tag_set(first), tag_set(second)
+    if before_tags != after_tags:
+        before_values = {v for v, _ in before_tags}
+        after_values = {v for v, _ in after_tags}
+        entry = {"removed": sorted(before_values - after_values),
+                 "added": sorted(after_values - before_values)}
+        # A tag whose value survived but whose source did not: a performance claim that was
+        # backed by measurement and now is not weighs differently as precedent.
+        downgraded = sorted(v for v, source in before_tags
+                            if source == "verified" and (v, "verified") not in after_tags
+                            and v in after_values)
+        if downgraded:
+            entry["no_longer_verified"] = downgraded
+        changes["tags"] = entry
+
+    for field in ("status", "collection", "market", "region"):
+        if (first.get(field) or None) != (second.get(field) or None):
+            changes[field] = {"was": first.get(field), "now": second.get(field)}
+
+    return changes
+
+
+def _stale_citations(conn, evaluation, cited_by: str) -> list[dict]:
     """Citations the earlier judgment rested on that the library no longer treats as current.
 
     The computable half of "which facts went stale": a verdict that leaned on a campaign
@@ -1441,6 +1629,7 @@ def _stale_citations(conn, evaluation) -> list[dict]:
             continue
         stale.append({
             "campaign_id": cited,
+            "cited_by": cited_by,
             "title": record["title"],
             "superseded_by": record["superseded_by"],
             "basis": "computed",
@@ -1914,12 +2103,46 @@ def _incompleteness_warnings(conn) -> list[dict]:
         detail=f"{outstanding} unembedded items across {records} campaigns")]
 
 
+def _earlier_version_findings(conn, campaign_id: Optional[str]) -> Optional[dict]:
+    """The judgment of the version this one replaces, with its finding ids.
+
+    Without this, `diff_campaigns`'s `adopted` bucket had no feeder at all: it is populated
+    only from `resolved[].finding_id`, and nothing ever put those ids in front of the model
+    at the moment it was judging the new version. `find_similar` excludes superseded records
+    by design, so the earlier judgment was invisible in the evidence too — every fixed
+    finding landed in `no_longer_raised` and `adopted` was empty in production. The test
+    suite missed it because the fixture wrote the id in by hand.
+    """
+    if not campaign_id:
+        return None
+    record = store.get_campaign(conn, campaign_id)
+    if not record:
+        return None
+    previous = record.get("supersedes")
+    if not previous:
+        return None
+    judgment = store.latest_evaluation_for_campaign(conn, previous)
+    if not judgment or not judgment.get("findings"):
+        return None
+    earlier = store.get_campaign(conn, previous)
+    return {
+        "campaign_id": previous,
+        "title": earlier["title"] if earlier else None,
+        "evaluation_id": judgment["id"],
+        "verdict": judgment.get("verdict"),
+        "findings": [{k: f.get(k) for k in ("id", "severity", "kind", "category",
+                                            "finding", "fix")}
+                     for f in judgment["findings"]],
+    }
+
+
 def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: int = 5,
                        record_type: Optional[str] = None, status: Optional[str] = None,
                        tags: Optional[Union[str, dict, list]] = None, match_all_tags: bool = False,
                        region: Optional[str] = None, market: Optional[str] = None,
                        markets: Optional[Union[str, list]] = None, collection: Optional[str] = None,
-                       full_detail: bool = True) -> dict:
+                       full_detail: bool = True,
+                       campaign_id: Optional[str] = None) -> dict:
     """
     Package the evidence Claude needs to judge a new proposal: the most similar prior
     campaigns WITH their outcomes. full_detail defaults to True here (unlike find_similar) —
@@ -1945,6 +2168,13 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
             # The vocabulary here has to be the vocabulary save_evaluation accepts. This
             # said "proceed/revise/reject" while the enum takes "approve" — so the prompt
             # that shapes the judgment taught a word the next tool rejects.
+            ("When `earlier_version` is present this proposal revises a judged record. For "
+             "each of its findings: if this version addresses it, put it in `resolved` with "
+             "its `finding_id`; if the problem is still there, raise it as your own finding "
+             "carrying `repeats` set to that id. That is what lets diff_campaigns state "
+             "which corrections were taken instead of guessing from how alike two sentences "
+             "read. "
+             if _earlier_version_findings(conn, campaign_id) else "") +
             "Reason over this evidence, then call save_evaluation with a verdict "
             "(approve / revise / reject), a one-line summary, and one short finding per "
             "problem — each with its severity, its kind, and a quote from the campaign or "
@@ -1959,6 +2189,9 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
         # Filtered to MEASURED outcomes: `find_similar` includes predicted rows in
         # `metrics`, so the unfiltered version reported a judgment resting entirely on a
         # forecast as complete. The save_evaluation path was fixed and this one was not.
+        # §5.4: the findings this version is a revision OF, so each can be resolved by id
+        # or repeated by id rather than left to be matched by wording later.
+        "earlier_version": _earlier_version_findings(conn, campaign_id),
         "most_valuable_missing_input": most_valuable_missing_input([
             {**e, "metrics": [m for m in (e.get("metrics") or [])
                               if m.get("metric_type") == "actual"]}

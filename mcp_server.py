@@ -177,6 +177,8 @@ class Finding(TypedDict):
     severity: Severity
     finding: str                      # <= 120 chars, names the problem
     kind: NotRequired[FindingKind]    # is it a rule broken, or a precedent departed from?
+    repeats: NotRequired[str]         # the earlier finding's id, when this is the same
+                                      # problem raised again (see diff_campaigns)
     basis: NotRequired[Basis]         # computed by the server, or judged (default: judged)
     category: NotRequired[str]        # timeline | influencer | compliance | budget | ...
     detail: NotRequired[str]          # the paragraph, read on demand
@@ -725,9 +727,15 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
     it: "dates on every deliverable and the two conflicted profiles removed". It doubles as
     the note the partner receives.
 
-    `resolved` is for a later version of a brief: `[{was, now}]` records what an earlier
-    evaluation asked for and what changed — that is how the library learns whether its own
-    advice was taken.
+    `resolved` is for a later version of a brief: `[{finding_id, was, now}]` records what an
+    earlier evaluation asked for and what changed — that is how the library learns whether
+    its own advice was taken. **Always include `finding_id`** when `prepare_evaluation` gave
+    you an `earlier_version` block: it is what lets diff_campaigns state that a correction
+    was adopted instead of guessing from how alike two sentences read. An id that matches no
+    stored finding is rejected rather than silently ignored.
+
+    For the other direction, a problem that is still there: raise it as your own finding and
+    set `repeats` to the earlier finding's id.
 
     At most 12 findings. The response gives back the verdict, the summary, the counts, and
     the blocking and should_fix lines themselves — give the user those. The reasoning behind
@@ -751,27 +759,37 @@ def diff_campaigns(earlier: str, later: str) -> dict:
     The question a marketer has when v2 arrives, and the one thing here that was previously
     done by hand. Computed from the two versions' EVALUATION findings, not from their decks:
 
-      `adopted`           a finding the later judgment explicitly resolved.
-      `ignored`           a finding the later judgment raised again.
+      `adopted`           a finding the later judgment explicitly resolved by id.
+      `raised_again`      a finding the later judgment raised too.
       `newly_introduced`  a problem only the later version has.
-      `no_longer_raised`  neither resolved nor repeated — read the caveat before saying
-                          anything about it. It was either fixed without being recorded or
-                          not looked at the second time, and the record cannot tell which.
-                          Do NOT report it as adopted.
-      `carried_stale`     a record the earlier judgment cited that has since been replaced.
+      `no_longer_raised`  neither resolved nor repeated. Read the caveat, which differs by
+                          case: an approve with no findings, or a later review that covered
+                          the same category, both make "fixed but unrecorded" the likelier
+                          reading. Never report it as adopted.
+      `carried_stale`     a record either judgment cited that has since been replaced;
+                          `cited_by` says which.
+      `record_changes`    what the records themselves say differently — markets dropped,
+                          tags added or no longer verified, status or collection changed.
 
-    Everything carries `basis: "computed"`, so you can say it as fact. When `comparable` is
-    false a version has never been evaluated, there is nothing to compute, and
-    `why_not_comparable` says which — do not fill the gap by reading the decks, because
-    "you ignored my correction" is an accusation and that would be a judgment presented as
-    arithmetic.
+    **Read `basis` and `match` before you characterise anything.** `basis: "computed"` with
+    `match: "id"` means a review said these are the same finding: you can state it as fact.
+    `basis: "judged"` with `match: "text"` means only that the two READ alike — character
+    similarity scores "adidas-affiliated" against "Nike-affiliated" at 0.89, and the same
+    problem reworded at 0.36. Say "these look like the same point, worth checking", never
+    "this correction was ignored". The word "ignored" is an accusation the marketer will
+    carry to their agency, and nothing here can support it on wording alone.
 
-    The argument order decides what "adopted" means. If supersession or creation order says
-    you have them the wrong way round it is corrected and `arguments_reordered` is true; say
-    so, rather than letting the user think they asked the question they did not.
+    When `comparable` is false, a version has no structured judgment on file and
+    `why_not_comparable` says which side — do not fill the gap by reading the decks, because
+    that would be a judgment presented as arithmetic.
 
-    This gets better as judgments accumulate: `resolved` entries carrying a `finding_id`
-    (see save_evaluation) are what turn "probably fixed" into `adopted`."""
+    `order_basis` says how the earlier version was decided: `"supersession"` means the
+    library records it and `arguments_reordered` may be true; `"as_given"` means nothing does
+    and your order was assumed — say so, because if it is backwards every bucket is inverted.
+
+    This gets better as judgments accumulate. When `prepare_evaluation` returns an
+    `earlier_version` block, resolve each of its findings by `finding_id` or repeat it with
+    `repeats` — that is what turns a resemblance into a fact."""
     conn = store.connect()
     try:
         return core.diff_campaigns(conn, earlier=earlier, later=later)

@@ -966,8 +966,59 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       — the mechanism §2.4 built for precisely this — are what turn "probably fixed" into
       `adopted`. The feature 2.4 was accused of over-engineering is the one this depends on.
       Verified end to end over the protocol on a three-version Colombia chain: 1 adopted, 1
-      ignored, 1 newly introduced, 1 no-longer-raised, and a `carried_stale` citation to a
-      Peru record that had been superseded in between.
+      raised again, 1 newly introduced, 1 no-longer-raised, and a `carried_stale` citation to
+      a Peru record that had been superseded in between.
+      **Both reviewers found the same thing, and it reframed the item: `adopted` had no
+      feeder.** It is populated only from `resolved[].finding_id`, and nothing in the product
+      ever put those ids in front of the model at the moment it was judging v2 —
+      `prepare_evaluation` took a title and some text, and `find_similar` excludes superseded
+      records by design, so v1's judgment was invisible in v2's evidence. In production every
+      fixed finding would have landed in `no_longer_raised` and `adopted` would have been
+      permanently empty. The suite missed it because the fixture reads the id out of the
+      store and writes it in by hand. `prepare_evaluation` now takes an optional
+      `campaign_id` and returns an `earlier_version` block with the prior findings and their
+      ids, and the note tells Claude to resolve each by id or repeat it with `repeats`.
+      **`ignored` is gone, and the measurements are why.** Character similarity scored
+      "Two influencers are adidas-affiliated" against "...Nike-affiliated" at **0.89**,
+      "Budget is over the approved ceiling" against "...under..." at **0.93**, and
+      "Slide 4 has no posting dates" against "Slide 9..." at **0.96** — all different
+      problems, all reported as a correction somebody ignored, on a surface the marketer
+      carries to their agency. It scored the SAME problem reworded at **0.36**. So it
+      measures phrasing, not meaning, in both directions. The bucket is now `raised_again`,
+      every entry carries `match: "id" | "text"`, a text match is stamped `basis: "judged"`
+      with its similarity and a caveat, and the docstring forbids the word "ignored" on
+      anything but an id match. "Deliberately generous" was exactly wrong: it was generous to
+      near-duplicates and strict on rewording.
+      **Matching is no longer order-dependent.** Taking each earlier finding in turn and
+      giving it the best remaining later one meant that with two competing for one, the one
+      processed first won — at 0.79 against the other's 0.98. Which correction was accused
+      therefore depended on the order somebody typed the findings, or on the severity sort
+      that reorders them before ids are assigned. All pairs are now scored and assigned
+      best-first, with ties broken on the text itself, so the answer is a property of the two
+      sets rather than of their order.
+      **The order is corrected only on recorded evidence.** Creation order is *upload* order,
+      and an organisation seeding its archive uploads v1 after v2 as a matter of course —
+      silently reversing their question with a JSON field they never see as the only tell.
+      `order_basis` is now `"supersession"` or `"as_given"`, and the latter carries a warning.
+      **A pre-2.4 judgment is not comparable.** It reads back with no verdict and no
+      findings, so it was treated as comparable and every later finding came back as newly
+      introduced — a v2 blamed for everything its own v1 review had found. The marker is the
+      verdict rather than a non-empty findings list, because an approve with nothing wrong is
+      a complete judgment that happens to have no findings, and recognising the version where
+      everything got fixed is the whole point.
+      **Also:** `carried_stale` looked only at the earlier judgment, though the later one is
+      the one somebody is about to act on; `counts` was missing on the not-comparable branch,
+      so the shape depended on which branch ran; `record_changes` was added because a v2 that
+      drops a market from a LATAM brief is the largest change a version can carry and diffed
+      as identical, as did a performance tag that lost its `verified` source; a `finding_id`
+      pointing at nothing saved without complaint and then vanished from the diff, so "we
+      fixed that" was recorded and silently lost; and the offer to evaluate an unjudged
+      version sent `detail or title`, so for a deck-only upload accepting "evaluate this
+      version" judged eleven characters.
+      **Three mutations survived** the first round: a later finding matching twice, the
+      category tie-break, and the creation-order fallback. All three now have tests.
+      **And I broke the tracker's own rule** — 5.4 created eight deferrals and recorded none
+      in the same commit. D57-D64, plus amendments to D41 and D46.
 - [ ] **5.5 (E) Coverage view** — market × collection × stage, counts and evidence quality.
 - [ ] **5.6 (F) Guided first run** on an empty or thin library.
 
