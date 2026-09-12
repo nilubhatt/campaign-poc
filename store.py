@@ -273,8 +273,14 @@ def normalize_tags(tags, *, has_actual_metrics: bool = False) -> list[dict]:
     """
     if tags is None:
         return []
-    if not isinstance(tags, list):
-        raise ValueError(f"tags must be a list, got {tags!r}")
+    # One tag, given as itself. "A bare string where a list was required" was one of the
+    # three rejections idea A was written about, and only the FILTER side had been fixed —
+    # writing `tags="liked"` still failed with "Input should be a valid list".
+    if isinstance(tags, (str, dict)):
+        tags = [tags]
+    if not isinstance(tags, (list, tuple)):
+        raise ValueError(f"tags must be a list of strings or {{value, source}} objects, "
+                         f"got {type(tags).__name__}")
     out = []
     for t in tags:
         if isinstance(t, str):
@@ -619,7 +625,12 @@ def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_t
     if record_type is not None:
         fields.append("record_type = ?"); params.append(_normalise_record_type(record_type))
     if status is not None:
-        fields.append("status = ?"); params.append(_normalise_status(status))
+        # A blank normalises to None, which means "not saying" — the same as omitting the
+        # argument. Appending it anyway would clear a status that was already set, so a
+        # spreadsheet row with an empty cell would silently erase one.
+        normalised_status = _normalise_status(status)
+        if normalised_status is not None:
+            fields.append("status = ?"); params.append(normalised_status)
     if tags is not None:
         has_actual = conn.execute(
             "SELECT 1 FROM metrics WHERE campaign_id = ? AND metric_type = 'actual' LIMIT 1",

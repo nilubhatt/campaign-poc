@@ -695,11 +695,15 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 
 - [x] **5.1 (A) Forgiving enums, teaching errors.** Every enum error returns the valid set
       and the closest match; normalise on the way in ("client stated" → `stated`).
-      **Reproduced first, and one case was worse than reported.** The tag-source rejection
-      came from `Union[str, TagObject]`, which reports only its FIRST branch's failure — so
-      an unknown source produced *"tags.0.str: Input should be a valid string"* about a
-      dict, telling a marketer their object should be a string and never mentioning `source`
-      at all. The bare-string-where-a-list-was-required case was already fixed.
+      **Reproduced first — and my reading of one case was wrong, caught in review.** I
+      claimed `Union[str, TagObject]` reported only its first branch and never named
+      `source`. It names both. My own probe printed *"2 validation errors"* and I truncated
+      the output to 300 characters before reading the second, then stated the conclusion as
+      reproduced fact in four places. The change is still worth having — a 66-character
+      message naming one field beats a two-branch dump whose first line tells a marketer
+      their object should be a string — but for that reason, not the one I gave.
+      The bare-string case was fixed on the FILTER only: writing `tags="liked"` still failed
+      with *"Input should be a valid list"* until this round.
       **Done:** `enums.py`, in three layers because they are three different claims. *Shape*
       — case, spacing and punctuation are not meaning, so "In Flight", "in-flight" and
       "in_flight" are one value and no synonym table has to list all three. *Synonyms* — an
@@ -750,11 +754,25 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       docstring said "'predicted' (a forecast/**target** set before launch)", so Claude would
       map "our target is 2% CTR" to `predicted` on that authority and never reach the teaching
       error at all.
+      **Scope, stated plainly:** this makes the vocabularies a *marketer* authors forgiving.
+      The model-authored ones (verdict, severity, finding `kind`, `basis`, precedent `layer`,
+      `include_commentary`) still return raw pydantic errors — deliberately, see below — so
+      "every enum error returns the valid set and the closest match" is true of the ones this
+      item is about, not of every enum on the surface.
       **The forgiving/strict split is now written down** rather than left looking like where
       the work stopped: vocabularies a *marketer* authors are forgiving; vocabularies the
       *model* authors (verdict, severity, kind, basis, layer) stay strict, because §2.4's
       lesson was that an easy exit in an error message gets taken, and auto-mapping "minor"
       to `note` would hand the model a severity downgrade path.
+      **From adversarial review.** The suggestion layer was offering antonyms: difflib rated
+      `unverified` at 0.89 against `verified` — the highest-scoring suggestion in the whole
+      vocabulary and the most harmful one possible, since a caller retrying with it marks an
+      unverified claim as measured evidence, on the single field this library weighs
+      judgments by. The cutoff moved from 0.6 to 0.75 (measured: real typos score 0.82 and
+      up, coincidences like `approved`/`proposed` 0.63 and `cancelled`/`concluded` 0.67 fall
+      below it) and a negation guard suppresses any suggestion the input is the denial of.
+      A blank value now consistently means "not saying" rather than clearing a set one — a
+      spreadsheet row with an empty cell was erasing a status.
 - [ ] **5.2 (B) `next_actions`** on every result — `{label, tool, prefilled_args}`.
 - [ ] **5.3 (C) `gaps()`** + a standing line on every evaluation naming the single most
       valuable missing input for that judgment.

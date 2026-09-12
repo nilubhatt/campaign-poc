@@ -14,13 +14,14 @@ Idea A: "Make the tools forgiving, and make errors teach."
 Reproduced before changing anything. The bare-string case is already fixed. The other two
 are rejected by pydantic at the schema boundary, before any of this project's code runs, so
 the message is pydantic's: it names the valid set but never the closest match, and it cannot
-normalise because it never sees the value. The tag-source case is worse than reported — the
-union of `str | {value, source}` reports only the first branch's failure:
+normalise because it never sees the value.
 
-    tags.0.str
-      Input should be a valid string [input_value={'value': 'liked', 'source': 'client_stated'}]
-
-which tells a marketer their object should be a string, and never mentions `source` at all.
+A correction, from review: the first version of this file claimed the `str | {value, source}`
+union reported only its first branch and never named `source`. It names both. The probe
+printed "2 validation errors" and the output was truncated at 300 characters before the
+second was read. What loosening the type actually buys is a 66-character message naming one
+field, rather than a two-branch dump whose first line tells a marketer their object should be
+a string.
 
 So the schema keeps advertising the enum (it is what stops a well-behaved caller guessing),
 while the Python types accept a superset and this code does the normalising and the teaching.
@@ -131,9 +132,8 @@ def test_a_metric_type_a_marketer_typed_is_accepted(conn):
 
 
 def test_a_bad_tag_source_names_the_field_and_not_the_union(conn):
-    """The reproduced failure: `str | {value, source}` reported the first branch, so the
-    message was "Input should be a valid string" about a dict, and `source` was never
-    mentioned."""
+    """Pydantic named `source` too (see the module docstring's correction); what it could not
+    do is say it in one line, or normalise. This pins the one-line version."""
     with pytest.raises(ValueError) as exc:
         store.insert_campaign(conn, title="Colombia",
                               tags=[{"value": "liked", "source": "hearsay"}])
@@ -335,3 +335,93 @@ def test_the_docstring_does_not_teach_the_word_the_server_refuses():
     assert not re.search(r"forecast/target|target set before", docstring), (
         "the docstring still equates a target with a prediction"
     )
+
+
+# ══ adversarial review of 5.1 ════════════════════════════════════════════════
+
+def test_the_error_message_never_suggests_the_opposite_of_what_was_typed():
+    """The worst possible suggestion, and difflib rated it 0.89: `unverified` is three
+    letters from `verified` and its exact denial. A model retrying with the suggestion would
+    mark an unverified claim as measured evidence — a provenance upgrade delivered BY the
+    error message, on the one field this library weighs judgments by."""
+    for given in ("unverified", "not verified", "un-verified", "not_verified"):
+        with pytest.raises(ValueError) as exc:
+            enums.normalise(given, field="tag 'source'", valid=store.VALID_TAG_SOURCES,
+                            synonyms=enums.TAG_SOURCE_SYNONYMS)
+        assert "did you mean" not in str(exc.value).lower(), given
+
+
+def test_a_coincidence_of_letters_is_not_a_suggestion():
+    """`approved` scores 0.625 against `proposed` and `cancelled` 0.667 against `concluded`
+    — both above the old cutoff, both meaning something else. A real typo scores 0.82 and up,
+    so the line goes between them."""
+    for given, wrong in (("approved", "proposed"), ("cancelled", "concluded")):
+        with pytest.raises(ValueError) as exc:
+            enums.normalise(given, field="status", valid=store.VALID_STATUSES,
+                            synonyms=enums.STATUS_SYNONYMS)
+        assert f"Did you mean {wrong!r}" not in str(exc.value), given
+
+
+@pytest.mark.parametrize("typo,expected", [
+    ("predicated", "predicted"), ("in_flite", "in_flight"), ("conclude", "concluded"),
+])
+def test_a_real_typo_still_gets_its_suggestion(typo, expected):
+    """The other half: tightening the cutoff must not cost the case the feature exists for."""
+    valid = store.VALID_METRIC_TYPES if expected == "predicted" else store.VALID_STATUSES
+    with pytest.raises(ValueError) as exc:
+        enums.normalise(typo, field="f", valid=valid, synonyms={})
+
+    assert f"Did you mean {expected!r}" in str(exc.value)
+
+
+def test_the_suggestion_half_is_actually_asserted():
+    """The earlier version of this check read
+        `"predicted" in message.split("closest")[-1] or "did you mean" in message.lower()`
+    and with no "closest" in the message, `split` returns the whole message — in which
+    "predicted" appears anyway, as part of the valid set. Deleting the suggestion branch
+    entirely left the suite green."""
+    with pytest.raises(ValueError) as exc:
+        enums.normalise("predicated", field="metric_type", valid=store.VALID_METRIC_TYPES,
+                        synonyms=enums.METRIC_TYPE_SYNONYMS)
+
+    assert "Did you mean 'predicted'?" in str(exc.value)
+
+
+def test_the_explanations_are_keyed_to_field_names_that_are_actually_used():
+    """`_EXPLAIN` is keyed by the `field` string, so a caller passing "metric type" instead
+    of "metric_type" would silently lose every explanation and fall back to a bare list."""
+    import re
+    from pathlib import Path
+
+    used = set(re.findall(r'field="([^"]+)"', Path("store.py").read_text(encoding="utf-8")))
+    used |= set(re.findall(r"field='([^']+)'", Path("core.py").read_text(encoding="utf-8")))
+    used |= set(re.findall(r'field="([^"]+)"', Path("core.py").read_text(encoding="utf-8")))
+
+    for (field, _value) in enums._EXPLAIN:
+        assert field in used, (
+            f"_EXPLAIN is keyed on {field!r}, which no call site passes — the explanation is "
+            f"unreachable"
+        )
+
+
+def test_a_bare_tag_is_accepted_when_writing_as_well_as_when_filtering(conn):
+    """"A bare string where a list was required" was one of the reviewer's three rejections.
+    Only the FILTER had been fixed: `upload_campaign(tags="liked")` still failed with
+    "Input should be a valid list"."""
+    cid = store.insert_campaign(conn, title="Colombia", tags="liked")
+
+    assert store.get_campaign(conn, cid)["tags"][0]["value"] == "liked"
+
+
+def test_a_blank_value_means_not_saying_rather_than_something_else(conn):
+    """Blank used to raise everywhere. It now means "unset", which is defensible — but it
+    has to mean the same thing on both paths, and a spreadsheet import hits it constantly."""
+    created = store.insert_campaign(conn, title="Colombia", status="")
+    omitted = store.insert_campaign(conn, title="Colombia 2")
+
+    assert store.get_campaign(conn, created)["status"] == \
+        store.get_campaign(conn, omitted)["status"]
+
+    store.update_campaign(conn, created, status="   ")
+    assert store.get_campaign(conn, created)["status"] == \
+        store.get_campaign(conn, omitted)["status"], "blank must not clear a set value"

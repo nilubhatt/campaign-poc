@@ -34,8 +34,19 @@ import difflib
 import re
 from typing import Iterable, Optional
 
-# How close a suggestion has to be before offering it is help rather than noise.
-_SUGGESTION_CUTOFF = 0.6
+# How close a suggestion has to be before offering it is help rather than noise. Measured
+# rather than guessed: real typos in this project's vocabularies score 0.82 and up
+# ("predicated"/"predicted" 0.95, "in_flite"/"in_flight" 0.82), while the coincidences score
+# below 0.7 — "approved"/"proposed" 0.63 and "cancelled"/"concluded" 0.67, both of which
+# mean something else entirely and would have been suggested at 0.6.
+_SUGGESTION_CUTOFF = 0.75
+
+# Prefixes that make a word the DENIAL of what follows. difflib rates "unverified" at 0.89
+# against "verified" — the highest-scoring suggestion in the whole vocabulary, and the most
+# harmful one possible: a caller retrying with it marks an unverified claim as measured
+# evidence, on the single field this library weighs judgments by. A suggestion that inverts
+# the input is never help.
+_NEGATIONS = ("un", "non", "not_", "no_", "never_", "dis")
 
 _SHAPE = re.compile(r"[\s\-]+")
 
@@ -215,7 +226,16 @@ def _teach(given: str, shaped: str, field: str, valid: tuple) -> str:
         return f"{message} {explanation}"
     close = difflib.get_close_matches(shaped, [canonical_shape(v) for v in valid],
                                       n=1, cutoff=_SUGGESTION_CUTOFF)
-    if close:
+    if close and not _is_denial_of(shaped, close[0]):
         suggestion = {canonical_shape(v): v for v in valid}[close[0]]
         return f"{message} Did you mean {suggestion!r}?"
     return message
+
+
+def _is_denial_of(shaped: str, candidate: str) -> bool:
+    """True when the input is the candidate with a negation in front of it."""
+    for prefix in _NEGATIONS:
+        stripped = shaped[len(prefix):].lstrip("_-") if shaped.startswith(prefix) else None
+        if stripped == candidate:
+            return True
+    return False

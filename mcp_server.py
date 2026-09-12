@@ -110,10 +110,14 @@ SUGGESTED_TAGS = {
 # agent will weight it as if it were measured.
 class TagObject(TypedDict):
     value: str
-    # A plain string, not a Literal: the union below reports only its FIRST branch's
-    # failure, so an unknown source produced "tags.0.str: Input should be a valid string"
-    # about a dict — telling a marketer their object should be a string, and never
-    # mentioning `source` at all. store.normalize_tags names the field and its values.
+    # A plain string, not a Literal, so store.normalize_tags can normalise
+    # "client stated" rather than the value dying at pydantic's boundary. The original
+    # justification for this was WRONG and is corrected here: I claimed the union reported
+    # only its first branch and never named `source`. It names both — my probe printed
+    # "2 validation errors" and I truncated the output to 300 characters before reading the
+    # second. What the change actually buys is a 66-character message naming one field,
+    # instead of a two-branch dump whose first line tells a marketer their object should be
+    # a string.
     source: NotRequired[TagSource]  # omitted -> defaults to 'stated'
 
 TagInput = Union[str, TagObject]
@@ -168,7 +172,7 @@ class Finding(TypedDict):
 @_catch_value_errors
 def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optional[str] = None,
                     record_type: RecordType = "campaign", status: Optional[Status] = None,
-                    tags: Optional[list[TagInput]] = None, region: Optional[str] = None,
+                    tags: Optional[Union[TagInput, list[TagInput]]] = None, region: Optional[str] = None,
                     market: Optional[str] = None, markets: Optional[list[str]] = None,
                     collection: Optional[str] = None,
                     supersedes: Optional[str] = None, asset_ref: Optional[dict] = None,
@@ -282,7 +286,7 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
 @_catch_value_errors
 def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optional[str] = None,
                     record_type: Optional[RecordType] = None, status: Optional[Status] = None,
-                    tags: Optional[list[TagInput]] = None, region: Optional[str] = None,
+                    tags: Optional[Union[TagInput, list[TagInput]]] = None, region: Optional[str] = None,
                     market: Optional[str] = None, markets: Optional[list[str]] = None,
                     collection: Optional[str] = None) -> dict:
     """Edit a campaign's metadata (title, detail, record_type, status, tags, region, market,
