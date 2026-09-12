@@ -754,15 +754,25 @@ def get_commentary(conn, campaign_id: str) -> list[dict]:
 def text_on_file(conn, campaign_id: str) -> Optional[dict]:
     """Everything this record actually says, split by layer — or None if there is no record.
 
-    §6.1 verifies a finding's quote against this. Two things matter about the shape. It is a
-    LIST per layer and never one joined blob, because a quote must land inside a single
-    stored unit: joining them would let an elided quote span two chunks that were never
-    adjacent, and stitch a sentence the record does not contain out of two it does.
+    §6.1 verifies a finding's quote against this.
 
-    And it includes `title`/`detail` from the row as well as the chunks. Those are normally
-    packed into chunk 0 by `ingest_campaign`, but `update_campaign` rewrites the row without
-    re-chunking, so a quote from an edited brief would otherwise verify against the text as
-    it was before the edit and fail against the text as it reads now.
+    **The body is the row's own columns, not its chunks**, and that is the whole design.
+    Chunks are a derived copy, split by `chunking.pack` at 1800 characters — a boundary the
+    model cannot see and the document does not have. Verifying against them refused quotes
+    that were verbatim and contiguous in the record, told the model "do not paraphrase", and
+    could not be satisfied by re-copying more carefully. They are also STALE: `update_campaign`
+    rewrites `title`/`detail` without re-chunking, so chunk 0 keeps the old wording and a
+    citation of what the record no longer says verified against it. Both were found in review.
+    `title`/`detail`/`deck_text` are current by definition and contiguous by construction, and
+    every body chunk derives from them (`ingest_campaign` sets `deck_text` from the extracted
+    units when the caller did not supply it), so nothing quotable is lost.
+
+    Commentary has no column — the chunks ARE the storage — so it stays chunk-based, with one
+    concession: consecutive pieces carrying the SAME attribution are joined, because a comment
+    longer than a chunk is split into pieces that all keep the same author, and a quote across
+    that split is one person's sentence. Pieces with different attributions are never joined:
+    stitching two people's remarks into one quotation is the misattribution the layer rule
+    exists to stop.
     """
     # Named columns are not safe to assume here. A database that predates a release is
     # missing whatever that release added, which is the whole reason `_migrate_schema`
@@ -774,26 +784,32 @@ def text_on_file(conn, campaign_id: str) -> Optional[dict]:
     row = conn.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
     if not row:
         return None
-    layers: dict[str, list[str]] = {"body": [], "commentary": []}
-    for field in ("title", "detail"):
-        if field in columns and row[field]:
-            layers["body"].append(row[field])
+    body = [row[field] for field in ("title", "detail", "deck_text")
+            if field in columns and row[field]]
+
+    commentary: list[str] = []
     chunk_columns = _columns(conn, "campaign_chunks")
-    chunk_rows = conn.execute(
-        "SELECT text, kind FROM campaign_chunks WHERE campaign_id = ? ORDER BY chunk_index",
-        (campaign_id,)).fetchall() if "kind" in chunk_columns else []
-    for chunk in chunk_rows:
-        # An unrecognised kind is body: a chunk whose layer we cannot name is not evidence
-        # that somebody commented, and defaulting the other way would let unknown text be
-        # cited as a reviewer's remark.
-        layers["commentary" if chunk["kind"] == "commentary" else "body"].append(chunk["text"])
-    # A title is quotable text but it is not a brief. The caller needs the difference to tell
-    # "your quote is wrong" from "there is nothing here to quote" — a stub imported from a
-    # KPI workbook has a title and no more, and sending a model off to reword a quote against
-    # one is a loop with no exit.
-    layers["brief"] = bool(layers["commentary"]) or any(
-        text != row["title"] for text in layers["body"])
-    return layers
+    # No `kind` column means a database from before §2.5, which had no commentary at all —
+    # so an empty list is the right answer, not a reason to skip the query and lose the body
+    # (the body no longer comes from here anyway).
+    if "kind" in chunk_columns:
+        last_source = object()
+        for chunk in conn.execute(
+                "SELECT text, source, kind FROM campaign_chunks WHERE campaign_id = ? AND "
+                "kind = 'commentary' ORDER BY chunk_index", (campaign_id,)).fetchall():
+            if chunk["source"] == last_source and commentary:
+                commentary[-1] += " " + chunk["text"]
+            else:
+                commentary.append(chunk["text"])
+            last_source = chunk["source"]
+
+    # A title is text, but it is not a brief, and a record that has nothing else cannot
+    # support a citation — "the record says 'Imported KPI row Q3 Jakarta'" is evidence of
+    # nothing. The caller needs the difference to refuse it as the right thing ("there is
+    # nothing here to quote") rather than the wrong one ("your quote is not in it"), which
+    # would send a model off to reword a quote in a loop with no exit.
+    has_brief = bool(commentary) or any(text != row["title"] for text in body)
+    return {"body": body, "commentary": commentary, "brief": has_brief}
 
 
 def set_chunk_embedded(conn, chunk_id: str) -> None:

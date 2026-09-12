@@ -230,7 +230,12 @@ def test_a_finding_records_what_kind_of_problem_it_is(conn):
     judgment a partner may legitimately argue with. A reader cannot tell them apart from
     severity alone, because severity says how much it matters, not whether it is arguable."""
     result = core.save_evaluation(conn, **_evaluation(findings=[
-        _finding(kind="guardrail_breach", finding="Uses AI-generated imagery"),
+        # A breach cites the rulebook and a departure cites a campaign — §6.1 makes the slot
+        # match the kind, because otherwise "a rule was broken" could be anchored to
+        # somebody's Q3 deck, which is the distinction this test is about.
+        _finding(kind="guardrail_breach", finding="Uses AI-generated imagery",
+                 precedent={"rule_id": "no_ai_imagery",
+                            "quote": "No AI-generated imagery in any paid placement"}),
         _finding(severity="should_fix", kind="precedent_departure",
                  finding="Seeds four colourways where Peru used one"),
     ]))

@@ -332,7 +332,8 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 
 - [x] **2.4 Structured findings array replaces free-text `analysis`** (defect 07). verdict,
       summary (≤240), closest_precedent, findings[] (severity enum ×3, category, finding
-      ≤120, detail, precedent{id,quote}, fix ≤120), resolved[]. Caps and enums enforced
+      ≤120, detail, precedent{campaign_id|rule_id, quote}, fix ≤120), resolved[]. Caps and
+      enums enforced
       server-side. Clean cutover.
       **Done:** a judgment is now `verdict` + `summary` + `findings[]`, with every field a
       model can write into bounded — `summary` 240, `finding` 120, `fix` 120, `detail` 600,
@@ -377,11 +378,15 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       passed as `findings` was iterated as keys and blamed the wrong thing; the approve-with-
       blocking message offered "or lower the severity" as an equal exit, which is one token
       against rewriting the summary.
-      **Not done here, named so it is not assumed:** the quote is bounded but not *checked
-      against what was retrieved* (6.1, which needs 7.2's server-owned retrieval first —
-      `prepare_evaluation` is stateless, so the server cannot today tell a real quote from a
-      plausible one); `closest_precedent`, `evidence` and `provenance` are still whatever the
-      caller passes (7.2/7.6); `findings` has no per-evaluation golden set yet (7.7).
+      **Not done here, named so it is not assumed:** the quote is bounded but not checked at
+      all — 6.1 checks it against the record it cites, and D77 still owes the separate
+      question of whether it was inside the retrieval window. (This paragraph used to assert
+      that 6.1 "needs 7.2's server-owned retrieval first, because `prepare_evaluation` is
+      stateless". That was wrong, and 6.1 says why: the statelessness argument applies to the
+      window question and not to the fabrication one.) `evidence` and `provenance` are still
+      whatever the caller passes (7.6), and `closest_precedent` is model-asserted (D8/7.2) —
+      6.1 checks that its id resolves and any quote in it is real, which is a different thing
+      from the server choosing it; `findings` has no per-evaluation golden set yet (7.7).
 - [x] **2.5 Commentary layer: comments, annotations, speaker notes** (defect 08). PDF
       `/Annots` (Text/FreeText/Highlight/StrikeOut/Underline/Square/Caret/Ink) with
       `/Contents`, `/T`, `/M`, page index; PPTX `notesSlide` + `ppt/comments/` +
@@ -1183,6 +1188,60 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       The rule is in `save_evaluation`'s description AND in `prepare_evaluation`'s note,
       because a rule a model only meets as a rejection afterwards costs a retry every time.
       Closes D6 and D7.
+      **From review, and the first version was wrong in both directions at once — it let
+      unsupported citations through and refused faithful ones.**
+      *Ways past it.* Filling BOTH `campaign_id` and `rule_id` made the campaign decorative:
+      the quote was checked against the rule, and the campaign could be invented and still be
+      stored beside a passing check. A `guardrail_breach` could anchor itself to an ordinary
+      campaign simply by using the other slot — the thing the rule_id type check was written
+      to prevent, reachable by a different door. And there was no floor: `"a"` and `"."`
+      verified against every record in the library, so the tick certified nothing. The slots
+      now have to match the kind, only one may be filled, and a quote is at least 12
+      characters with at least 8 either side of an elision.
+      *The elision was the worst of it.* The per-unit rule was described as stopping a quote
+      being "stitched out of two chunks that were never adjacent" — but `chunking.pack` merges
+      slides up to 1800 characters, so a short deck is ONE unit, and an unbounded elision
+      inside it stitched two unrelated slides into a sentence the deck never contained, with
+      the meaning inverted. Elisions are now bounded to 200 characters: leave out more than
+      that and it is two quotes, which is two findings.
+      *Ways it blocked honest work.* Verification read CHUNKS, and chunk boundaries are an
+      1800-character packing artefact the model cannot see and the document does not have — a
+      verbatim, contiguous quote across one was refused with "do not paraphrase into a quote",
+      and no amount of re-copying could satisfy it. Chunks are also stale: `update_campaign`
+      rewrites `detail` without re-chunking, so a citation of what the marketer had already
+      corrected verified against the old wording. Body verification now reads the row's own
+      `title`/`detail`/`deck_text` — current by definition, contiguous by construction, and a
+      superset of every body chunk. Commentary keeps chunks, because there is no column, with
+      consecutive pieces of ONE person's comment joined and two people's never.
+      Review also ran real PDF and PPTX files through the extractor: a soft hyphen inside
+      "require­ments", "sched-\nule" hyphenated across a justified line, a decomposed accent,
+      U+2010, a zero-width space — each refused a quote a person would call verbatim, while
+      accusing the model of paraphrase. Folding is now NFKC plus the invisibles plus
+      line-break hyphenation. And `find_similar`'s own `... [truncated]` marker was held
+      against a model quoting the tail of what we showed it.
+      *The word.* `verified: true` became `basis: "computed"` + `checked: ["record", "layer"]`.
+      "Verified" already means something exact in this product — a performance claim backed by
+      real metric data — and on a finding the nearer reading is that the FINDING is verified,
+      which is not what was checked. `basis` is the vocabulary this codebase already uses for
+      "the server worked this out"; `checked` names what was actually established, so 7.6 can
+      add `"window"` without a schema change. A model that sends either is refused, like every
+      other server fact.
+      *Two loops with no exit.* The refusal said "drop the citation and say it as an
+      observation" — which `_CITING_KINDS` then refuses a second time, leaving deleting `kind`
+      as the only way out, which no message mentioned. And the rule-type refusal said "doing
+      it differently from a past campaign is a precedent_departure", an in-error offer to
+      downgrade the one class the product calls not debatable — §2.4's own lesson is that an
+      easy exit offered inside a validation message gets taken.
+      *Reach.* `closest_precedent` carries the same id-and-quote shape and was outside the
+      check entirely — an invented citation at the top of the judgment, where a summary is
+      most likely to read it aloud. And the worked example in `save_evaluation`'s description
+      — the shared prompt §7.4 is built on — hung a `camp_jdsea` precedent off a
+      `missing_information` finding: an id that resolves to nothing, on the one kind the same
+      docstring says should not go looking for a campaign to quote at.
+      *One thing typed too strictly.* `quote: str` in the `Precedent` TypedDict made pydantic
+      refuse the call at its own boundary, so the caller got "Field required" instead of this
+      project's sentence about what an uncited assertion is — the exact failure `_enum`'s
+      comment describes. Required in core, `NotRequired` in the type.
 - [ ] **6.2 (H) Guardrail breach vs departure from precedent** — two classes, different
       vocabulary, only one is debatable. *2.4 defined `kind` and the rule that a guardrail
       breach cannot be a note; what remains is making `kind` required, requiring a `rule_id`
@@ -1211,8 +1270,10 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       model-authored `proposal_text`; derive filters from the subject's attributes; pin
       `top_k`; stable deterministic tie-breaking; record embedding-model version per vector.
 - [x] **7.3 Enforce the output shape server-side** — reject writes missing a precedent quote
-      or exceeding caps, rather than accepting and hoping. *Caps done by 2.4; the missing-quote
-      half done by 6.1, which also verifies the quote rather than only requiring one.*
+      or exceeding caps, rather than accepting and hoping. *Caps done by 2.4; the
+      missing-quote half done by 6.1, which also verifies the quote rather than only
+      requiring one. Complete for findings that carry a `kind`; a finding with no `kind` at
+      all still needs no citation, and making `kind` required is 6.2 (D1).*
 - [ ] **7.4 Tool descriptions as the shared prompt** — the evaluation procedure into
       `prepare_evaluation`'s description; set the MCP server-level `instructions` field.
 - [ ] **7.5 Ship the procedure with the evidence** — `prepare_evaluation`'s `note` carries

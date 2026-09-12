@@ -12,6 +12,7 @@ import base64
 import binascii
 import re
 import sqlite3
+import unicodedata
 import time
 from pathlib import Path
 from typing import Optional, Union
@@ -511,46 +512,100 @@ def _category(value, where: str) -> Optional[str]:
 # A quote is faithful when it says what the record says, not when it matches byte for byte.
 # Refusing a re-cased or re-wrapped quote would not improve provenance; it would teach the
 # model that quoting is a game it loses, and the way a model wins that game is by quoting
-# less. So the comparison folds case and whitespace and the typographic variants a model
-# emits without being asked — but nothing that changes a word.
+# less. So the comparison folds everything that changes how text LOOKS and nothing that
+# changes a word.
+#
+# The list below is not decorative. Review ran real PDF and PPTX files through
+# `extract.extract_units` and back: a hand-built PDF extracts "requirements" as
+# "require\u00adments" (a soft hyphen), justified text arrives hyphenated across the line
+# break as "sched-\nule", python-pptx emits U+000B for a soft line break and U+00A0 for a
+# non-breaking space, and an accented word can arrive decomposed. Every one of those refused
+# a quote a person would call verbatim, with a message accusing the model of paraphrasing.
 _QUOTE_EQUIVALENTS = {
-    "‘": "'", "’": "'", "‛": "'",
-    "“": '"', "”": '"', "‟": '"',
-    "–": "-", "—": "-", "−": "-",
-    " ": " ",
+    "\u2018": "'", "\u2019": "'", "\u201b": "'",
+    "\u201c": '"', "\u201d": '"', "\u201f": '"',
+    "\u2010": "-", "\u2011": "-", "\u2013": "-", "\u2014": "-", "\u2212": "-",
 }
-# What a model writes when it leaves the middle out. Treated as "and then, later in the same
-# stored unit" — never as "and somewhere else in the record", which would let two unrelated
-# sentences be stitched into one quotation.
+# Characters that carry no word and no space: a soft hyphen marks where a word MAY break, a
+# zero-width space marks where a line may. Both are invisible, and a model retyping what it
+# read never reproduces them.
+_QUOTE_INVISIBLES = dict.fromkeys(
+    "\u00ad\u200b\u200c\u200d\u2060\ufeff", "")
+# Hyphenation at a line break: "sched-\nule" is one word the layout split, not two. Applied
+# to both sides, so the only thing it can do is join a word that was split; it cannot make a
+# quote match text with a different word in it.
+_LINE_HYPHEN_RE = re.compile(r"-\s+")
+# What a model writes when it leaves the middle out. Treated as "and then, further on in the
+# same stored unit" — never as "and somewhere else in the record".
 _ELISION_RE = re.compile(r"\s*(?:\u2026|\.\.\.)\s*")
+# `find_similar` marks a trimmed brief with this. A model quoting the tail of what it was
+# shown includes the marker; refusing that would be refusing our own punctuation.
+_TRUNCATION_MARKER = "[truncated]"
+# A quote has to be a quotation. Without a floor, "a" and "." both verified against every
+# record in the library — a substring test with a one-character floor certifies nothing, and
+# the word "verified" beside it is then a claim the check cannot support.
+_MIN_QUOTE = 12
+_MIN_QUOTE_SEGMENT = 8
+# How far an elision may reach. Unbounded, "Budget \u2026 cannot \u2026 post before the embargo"
+# stitched three unrelated slides into one sentence the deck never contained and the meaning
+# inverted — review reproduced exactly that. The per-unit rule alone does not stop it, because
+# `chunking.pack` merges slides up to 1800 characters, so a short deck is ONE unit. Leaving
+# out more than this is not an elision; it is two quotes, and they belong to two findings.
+_MAX_ELISION_GAP = 200
 
 
 def _fold_for_quote_match(text: str) -> str:
-    for raw, plain in _QUOTE_EQUIVALENTS.items():
+    # NFKC first: it folds ligatures, decomposed accents and several width variants, so the
+    # explicit tables below only have to carry what it leaves alone.
+    text = unicodedata.normalize("NFKC", text)
+    for raw, plain in {**_QUOTE_INVISIBLES, **_QUOTE_EQUIVALENTS}.items():
         text = text.replace(raw, plain)
+    text = _LINE_HYPHEN_RE.sub("", text)
     return " ".join(text.split()).casefold()
 
 
-def _quote_is_in(quote: str, texts: list) -> bool:
-    """Is this quote present in any ONE of these stored units, segments in order?
+def _quote_segments(quote: str, where: str) -> list:
+    """The pieces of a quote either side of its elisions, or a refusal saying why not.
 
-    Per unit, not across the joined list: a quote that spans two chunks which were never
-    adjacent is a sentence the record does not contain.
+    Raises rather than returning empty, because "this is too short to be a quotation" and
+    "these words are not in the record" are different problems with different fixes, and
+    telling a model to reword a quote that was never long enough is a loop with no exit.
     """
     folded = _fold_for_quote_match(quote)
-    # Split on the ELISION marks only — never on whitespace. Matching word by word in order
-    # would accept "every deliverable must be dated" against a record carrying those words
-    # scattered through three unrelated sentences, which is not a quotation.
+    if folded.endswith(_TRUNCATION_MARKER):
+        folded = folded[:-len(_TRUNCATION_MARKER)].rstrip(" .")
     segments = [s.strip(" \"'") for s in _ELISION_RE.split(folded)]
     segments = [s for s in segments if s]
-    if not segments:
-        return False
+    if sum(len(s) for s in segments) < _MIN_QUOTE:
+        raise ValueError(
+            f"{where}precedent.quote is too short to be a quotation ({_MIN_QUOTE} characters "
+            f"minimum, excluding anything elided). A word or two appears in almost any "
+            f"record, so matching it certifies nothing — quote the phrase that makes the "
+            f"point.")
+    short = [s for s in segments if len(s) < _MIN_QUOTE_SEGMENT]
+    if short:
+        raise ValueError(
+            f"{where}precedent.quote has a fragment of {len(short[0])} characters either "
+            f"side of an elision; each piece needs {_MIN_QUOTE_SEGMENT}. Fragments that "
+            f"short match by accident, and an elision between them asserts a sentence the "
+            f"record may not contain.")
+    return segments
+
+
+def _quote_is_in(segments: list, texts: list) -> bool:
+    """Are these segments present, in order and close together, in any ONE of these units?
+
+    Per unit, not across the joined list: a quote spanning two units that were never adjacent
+    is a sentence the record does not contain. And within a unit the gap is bounded, because
+    `chunking.pack` merges slides up to 1800 characters — so "one unit" can be a whole short
+    deck, and an unbounded elision inside it can stitch two unrelated slides together.
+    """
     for unit in texts:
         haystack = _fold_for_quote_match(unit)
         at = 0
-        for segment in segments:
+        for n, segment in enumerate(segments):
             found = haystack.find(segment, at)
-            if found < 0:
+            if found < 0 or (n and found - at > _MAX_ELISION_GAP):
                 break
             at = found + len(segment)
         else:
@@ -558,8 +613,8 @@ def _quote_is_in(quote: str, texts: list) -> bool:
     return False
 
 
-def _verify_quote(conn, cited: str, quote: str, layer: str, where: str, *,
-                  is_rule: bool) -> None:
+def _verify_quote(conn, cited: str, segments: list, layer: str, where: str, *,
+                  is_rule: bool, kind=None) -> None:
     """Refuse a citation the cited record does not support (§6.1).
 
     Refusal rather than a `verified: false` flag, for the reason consistency idea 3 gives
@@ -568,37 +623,50 @@ def _verify_quote(conn, cited: str, quote: str, layer: str, where: str, *,
     be able to tell them apart once a summary quoted either.
     """
     on_file = store.text_on_file(conn, cited)
+    # What to say INSTEAD of quoting, which depends on the kind: a finding that is a claim
+    # about another record cannot simply drop its citation, because `_CITING_KINDS` refuses
+    # it a second time. Offering that exit to a precedent_departure sent the model round a
+    # loop whose only exit was deleting `kind` — review walked it.
+    instead = ("or, if this is not really a claim about that record, say it as a "
+               "missing_information or internal_contradiction finding about the brief itself"
+               if kind in _CITING_KINDS else
+               "or drop the citation and say it as an observation")
     if on_file is None:
         raise ValueError(
             f"{where}precedent cites {cited!r}, which is not a record in this library. Cite "
-            f"a campaign_id from the evidence you were given, or state the point without a "
-            f"citation.")
+            f"a campaign_id from the evidence you were given, {instead}.")
     if is_rule:
-        record_type = conn.execute("SELECT record_type FROM campaigns WHERE id = ?",
-                                   (cited,)).fetchone()["record_type"]
+        row = conn.execute("SELECT record_type FROM campaigns WHERE id = ?",
+                           (cited,)).fetchone()
+        record_type = row["record_type"] if row else None
         # `rule_id` means the rulebook. Left interchangeable with `campaign_id`, "a rule was
         # broken" could be anchored to somebody's Q3 deck, and the one class of finding the
         # product says is not debatable would rest on a campaign that merely did it that way.
+        # Deliberately NOT phrased as "so call it a precedent_departure instead": §2.4's
+        # lesson is that any easy exit offered inside a validation message gets taken, and
+        # that one is a downgrade from "not debatable" to "arguable".
         if record_type != "reference":
             raise ValueError(
-                f"{where}precedent cites {cited!r} as a rule_id, but that record is "
-                f"{record_type!r}, not reference material. A guardrail breach cites the "
-                f"guidelines; doing it differently from a past campaign is a "
-                f"precedent_departure.")
-    if _quote_is_in(quote, on_file[layer]):
-        return
+                f"{where}precedent cites {cited!r} as a rule_id, but that record is stored "
+                f"as {record_type!r}, not as reference material. A guardrail breach cites "
+                f"the guidelines. If no rulebook is on file, then this library cannot "
+                f"support a breach finding at all — say what you can support instead of "
+                f"anchoring a rule to a campaign.")
     if not on_file["brief"]:
-        # Checked AFTER the match, not before: a title is quotable text, so a record whose
-        # only text is its title still verifies a quote of that title. What it cannot do is
-        # support anything else — and telling the model to reword a quote when the record has
-        # no brief in it at all sends it round a loop it cannot win. A stub imported from a
-        # KPI workbook is the common case.
+        # Before the match, not after. The first version checked it afterwards so that a
+        # record whose only text is its title would still verify a quote OF that title — but
+        # a title is not evidence, and "the record says 'Imported KPI row Q3 Jakarta'"
+        # supports no finding about anything. Checking first also keeps the message honest:
+        # telling a model to reword a quote against a record that has nothing to quote is a
+        # loop with no exit. A stub from a KPI workbook is the common case.
         raise ValueError(
             f"{where}precedent cites {cited!r}, which has no brief on file to quote — it is "
             f"a stub or a metrics-only record, title and numbers and nothing else. Cite a "
-            f"record with a brief in it.")
+            f"record with a brief in it, {instead}.")
+    if _quote_is_in(segments, on_file[layer]):
+        return
     other = "commentary" if layer == "body" else "body"
-    if _quote_is_in(quote, on_file[other]):
+    if _quote_is_in(segments, on_file[other]):
         # The misattribution §2.5 predicted this item would otherwise bless: the text IS in
         # the record, so verifying the text alone returns a green tick on a false statement.
         if other == "commentary":
@@ -612,11 +680,11 @@ def _verify_quote(conn, cited: str, quote: str, layer: str, where: str, *,
             f"it. Set precedent.layer to \"body\".")
     raise ValueError(
         f"{where}that quote is not in {cited!r}. Quote the evidence you were given — the "
-        f"words as they are written, an elision (…) for anything left out — or drop the "
-        f"citation and say it as an observation. Do not paraphrase into a quote.")
+        f"words as they are written, an elision (…) for a short gap — {instead}. Do not "
+        f"paraphrase into a quote.")
 
 
-def _clean_precedent(value, where: str, conn=None) -> Optional[dict]:
+def _clean_precedent(conn, value, where: str, *, kind=None) -> Optional[dict]:
     """A finding cites either a campaign that did it differently or a rule it breached.
     Before this there was only `id`, meaning a campaign — so a guardrail breach, which is
     anchored to the rulebook rather than to any campaign, had nowhere to cite the thing it
@@ -626,11 +694,29 @@ def _clean_precedent(value, where: str, conn=None) -> Optional[dict]:
     if not isinstance(value, dict):
         raise ValueError(f"{where}precedent must be an object with a quote and either a "
                          f"campaign_id or a rule_id, got {type(value).__name__}")
+    # §6.1: the server's own verdict on this citation, never the model's. `basis` is the
+    # vocabulary this codebase already uses for the difference (a computed thing is a server
+    # fact; a judged one is an assertion), and letting the model write it would be the exact
+    # case `save_evaluation` refuses one level up.
+    asserted = [key for key in ("basis", "checked", "verified") if key in value]
+    if asserted:
+        raise ValueError(f"{where}precedent.{asserted[0]} is set by the server, not by you — "
+                         f"it records what the server checked about your quote. Send the "
+                         f"quote and the id; the check is not yours to assert.")
     campaign_id = value.get("campaign_id") or value.get("id")
     rule_id = value.get("rule_id")
     if not campaign_id and not rule_id:
         raise ValueError(f"{where}precedent must name what it cites — a campaign_id for a "
                          f"departure from precedent, or a rule_id for a guardrail breach")
+    # Both slots at once made the campaign_id decorative: the quote was checked against the
+    # rule and the campaign could then be anything, invented included, and still be stored
+    # beside a passing check. A finding is anchored to ONE thing; two anchors are two
+    # findings.
+    if campaign_id and rule_id:
+        raise ValueError(f"{where}precedent names both a campaign_id ({campaign_id!r}) and a "
+                         f"rule_id ({rule_id!r}). A finding is anchored to one thing: the "
+                         f"rule it breaches, or the campaign it departs from. If both are "
+                         f"true, they are two findings.")
     quote = _bounded(value.get("quote"), "precedent.quote", _MAX_QUOTE, where=where)
     # §6.1: required, not merely bounded. A citation naming a campaign and quoting nothing is
     # the assertion this whole item was written about with an id stapled to it — and it was
@@ -655,10 +741,18 @@ def _clean_precedent(value, where: str, conn=None) -> Optional[dict]:
     # connection this function could only check that a quote was short — so a finding could
     # cite a campaign that does not exist and quote a sentence nobody ever wrote, and the
     # server stored it with exactly the authority of a faithful one.
-    if conn is not None:
-        _verify_quote(conn, rule_id or campaign_id, quote, layer, where,
-                      is_rule=bool(rule_id))
-    cleaned = {"quote": quote, "layer": layer, "verified": conn is not None}
+    segments = _quote_segments(quote, where)
+    _verify_quote(conn, rule_id or campaign_id, segments, layer, where,
+                  is_rule=bool(rule_id), kind=kind)
+    # `basis: computed`, not `verified: true`. Two reasons, and the second is the one that
+    # matters. "Verified" already means something specific in this product — a performance
+    # claim backed by real metric data — and a marketer reading it on a finding whose cited
+    # campaign is tagged `stated` sees one word meaning two things on one screen, with the
+    # wrong reading (the FINDING is verified) the nearer one. And a bare boolean cannot grow:
+    # `checked` names what was actually established, so 7.6 can add "window" without a
+    # schema change and without a reader having to guess what the tick covered.
+    cleaned = {"quote": quote, "layer": layer,
+               "basis": "computed", "checked": ["record", "layer"]}
     if campaign_id:
         cleaned["campaign_id"] = campaign_id
     if rule_id:
@@ -671,6 +765,35 @@ def _clean_precedent(value, where: str, conn=None) -> Optional[dict]:
             if kept:
                 cleaned[field] = kept
     return cleaned
+
+
+def _clean_closest_precedent(conn, value) -> Optional[dict]:
+    """The same id-and-quote shape as a finding's precedent, and it was outside the check.
+
+    Review stored `{"campaign_id": "camp_nonexistent", "quote": "made up"}` here verbatim —
+    an invented citation at the top of the judgment, where a summary is most likely to read
+    it aloud. The id has to resolve, and a quote has to be real, for the same reason it does
+    one field down. It is still MODEL-asserted rather than computed: D8 owns making the
+    server pick it, which needs 7.2's server-owned retrieval.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"closest_precedent must be an object with a campaign_id, got "
+                         f"{type(value).__name__}")
+    cited = value.get("campaign_id") or value.get("id")
+    if not cited:
+        raise ValueError("closest_precedent must name the campaign it points at "
+                         "(campaign_id)")
+    if store.text_on_file(conn, cited) is None:
+        raise ValueError(f"closest_precedent names {cited!r}, which is not a record in this "
+                         f"library. It is the id a summary quotes first — an invented one "
+                         f"there is the most visible wrong citation the product can make.")
+    quote = _bounded(value.get("quote"), "closest_precedent.quote", _MAX_QUOTE)
+    if quote:
+        _verify_quote(conn, cited, _quote_segments(quote, "closest_precedent: "),
+                      value.get("layer") or "body", "closest_precedent: ", is_rule=False)
+    return value
 
 
 def _clean_resolved(value, conn=None) -> list:
@@ -781,6 +904,7 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
     if not summary:
         raise ValueError("summary is required — one line a person can act on")
     approve_if = _bounded(approve_if, "approve_if", _MAX_APPROVE_IF)
+    closest_precedent = _clean_closest_precedent(conn, closest_precedent)
     resolved = _clean_resolved(resolved, conn)
 
     cleaned = []
@@ -809,16 +933,27 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
             raise ValueError(f"{where}a guardrail_breach cannot be a note — if the rule "
                              f"applies the finding is blocking, and if it does not apply "
                              f"this is not a guardrail breach")
-        precedent = _clean_precedent(finding.get("precedent"), where, conn)
+        precedent = _clean_precedent(conn, finding.get("precedent"), where, kind=kind)
         # §6.1/6.2: a finding that makes a claim ABOUT a precedent has to cite one. The other
         # two kinds are anchored to the subject — "the brief gives no end date" has no
         # precedent to quote, and demanding one there would send the model looking for a
         # campaign to quote at, which is the invented evidence this item exists to stop.
+        wanted = "rule_id" if kind == "guardrail_breach" else "campaign_id"
         if kind in _CITING_KINDS and not precedent:
             raise ValueError(
                 f"{where}a {kind} has to cite what it departs from: precedent with a "
-                f"{'rule_id' if kind == 'guardrail_breach' else 'campaign_id'} and a quote. "
-                f"Without one it is an opinion in the vocabulary of a citation.")
+                f"{wanted} and a quote. Without one it is an opinion in the vocabulary of a "
+                f"citation.")
+        # The SLOT has to match the kind, or the rule_id check is only half a check: the
+        # comment on `_verify_quote` says a rule must not be anchored to "somebody's Q3
+        # deck", and without this a guardrail_breach could cite exactly that by using the
+        # campaign_id slot instead.
+        if kind in _CITING_KINDS and precedent and wanted not in precedent:
+            raise ValueError(
+                f"{where}a {kind} cites a {wanted}, and this precedent has a "
+                f"{'campaign_id' if wanted == 'rule_id' else 'rule_id'}. A rule in your "
+                f"guidelines and a campaign that did it differently are not "
+                f"interchangeable — one is not debatable and the other invites a rationale.")
         basis = finding.get("basis") or "judged"
         if basis not in _BASES:
             raise ValueError(f"{where}basis must be one of {list(_BASES)}, got {basis!r}")

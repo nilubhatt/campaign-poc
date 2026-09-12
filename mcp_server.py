@@ -160,9 +160,18 @@ class Precedent(TypedDict):
     quote its source is a judgment call, not a citation.
 
     **The quote is checked against the record you name, and the write is refused if it is
-    not there.** Case, line wrapping and curly quotes do not matter; words do. Leave a gap
-    out with … and both halves are still checked, in order. Paraphrase is not quotation."""
-    quote: str                        # REQUIRED, <= 300 chars, verified against the record
+    not there.** Case, line wrapping, curly quotes and the artefacts of PDF extraction do not
+    matter; words do. Leave a short gap out with … and both halves are still checked, in
+    order. Paraphrase is not quotation.
+
+    `basis` and `checked` come BACK on a stored precedent — they are the server's record of
+    what it established about your citation, never something you send."""
+    # Required in every sense that matters, and deliberately NOT `quote: str`. Typed as
+    # required, pydantic refuses the call at its own boundary and the caller gets "Field
+    # required" instead of the sentence this project wrote — the exact failure the comment
+    # on `_enum` above describes. The requirement is enforced in core, where the message can
+    # name the record and say what to do.
+    quote: NotRequired[str]           # REQUIRED, <= 300 chars, checked against the record
     campaign_id: NotRequired[str]     # for a departure from precedent
     rule_id: NotRequired[str]         # for a guardrail breach — a rule, not a campaign
     # Which layer the quote came from. Default "body" = the deck itself. Set "commentary"
@@ -737,14 +746,19 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
     unmarked it is stored as something the campaign's own deck claimed, which is a different
     and false statement.
 
-    A worked finding:
+    Two worked findings. Note that the first carries NO precedent — it is a claim about the
+    brief in front of you, and attaching a citation to it would mean going and finding a
+    campaign to quote at:
       {"severity": "blocking", "kind": "missing_information", "category": "timeline",
        "finding": "No posting dates on any deliverable",
        "detail": "All 14 assets in the flighting table are undated, so nothing can be
                   sequenced or held to the embargo.",
-       "precedent": {"campaign_id": "camp_jdsea",
-                     "quote": "content angle, posting date and requirements per asset"},
        "fix": "Add a posting date per asset to the flighting table"}
+      {"severity": "should_fix", "kind": "precedent_departure", "category": "influencer",
+       "finding": "Seeds four colourways where the Jakarta launch seeded one",
+       "precedent": {"campaign_id": "<a campaign_id from your evidence>",
+                     "quote": "<its own words, copied — not written from memory>"},
+       "fix": "Seed one colourway, or say why four is right here"}
 
     `approve_if` is what would flip a `revise` to `approve`, stated so someone could check
     it: "dates on every deliverable and the two conflicted profiles removed". It doubles as
