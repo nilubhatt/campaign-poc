@@ -1041,6 +1041,9 @@ def wait_until_ready(timeout: float = 60.0, interval: float = 3.0) -> dict:
 #   3  a whole market has none, so judgments about that market rest on nothing local
 #   4  records are stored but not searchable, so the evidence exists and cannot be found
 #   5  decks whose commentary was never read — real content, never ingested
+# How many names a gap may list before it is a paragraph rather than a sentence.
+_MAX_NAMED = 5
+
 _GAP_RANK = {
     "library_is_empty": 1,
     "few_verified_outcomes": 2,
@@ -1057,8 +1060,11 @@ def gaps(conn) -> dict:
     LIBRARY, that is about one verdict, and they routinely disagree — a library that is 90%
     measured can still produce a judgment resting entirely on the unmeasured tenth.
     """
+    # Superseded records are excluded from every search, so counting one as the library's
+    # measured evidence describes something no judgment can reach.
+    superseded = store.get_superseded_campaign_ids(conn)
     campaigns = [c for c in store.list_campaigns(conn)
-                 if c.get("record_type") != "reference"]
+                 if c.get("record_type") != "reference" and c["id"] not in superseded]
     # A campaign that has not run cannot be missing its results, and asking for them is a
     # request nobody can satisfy — the permanent-complaint failure, on the highest-ranked
     # gap. `after_upload` already drew this line; this did not.
@@ -1109,31 +1115,54 @@ def gaps(conn) -> dict:
 
     # A gap located in a SLICE rather than in the total. A marketer asking about Colombia
     # does not care that the library is 60% measured overall if the LATAM part is 0%.
+    # Grouped the way the rest of the product groups: the `markets` LIST counts (it is the
+    # only way to reach a multi-country activation), blanks are not markets, and matching is
+    # case-insensitive because `filter_campaign_ids` treats "LATAM" and "latam" as one.
     by_market: dict[str, list] = {}
+    display: dict[str, str] = {}
     for campaign in ran:
-        market = campaign.get("market") or campaign.get("region")
-        if market:
-            by_market.setdefault(market, []).append(campaign)
-    # Ordered by how many campaigns are affected, not alphabetically. The one place magnitude
-    # decides anything was deciding it by the alphabet, offering Andorra's single campaign
-    # ahead of LATAM's twenty.
+        for raw in (campaign.get("market"), campaign.get("region"),
+                    *(campaign.get("markets") or [])):
+            if not raw or not str(raw).strip():
+                continue
+            key = str(raw).strip().lower()
+            display.setdefault(key, str(raw).strip())
+            if campaign not in by_market.setdefault(key, []):
+                by_market[key].append(campaign)
+
+    # Ordered by how many campaigns are affected, not alphabetically: the one place magnitude
+    # decided anything was deciding it by the alphabet, offering Andorra's single campaign
+    # ahead of LATAM's twenty. And no `len(barren) < len(by_market)` guard — it was meant to
+    # avoid noise and instead silenced the review's own example, since "no LATAM store launch
+    # has ever carried a budget" in a library holding only LATAM campaigns said nothing.
     barren = sorted((m for m, rows in by_market.items()
                      if not any(c["id"] in measured_ids for c in rows)),
                     key=lambda m: (-len(by_market[m]), m))
-    if barren and len(barren) < len(by_market):
+    if barren:
+        # Capped: 35 markets produced a 3,185-character sentence inside a tool result
+        # somebody has to read.
+        shown = [display[m] for m in barren[:_MAX_NAMED]]
+        more = f" (and {len(barren) - _MAX_NAMED} more)" if len(barren) > _MAX_NAMED else ""
+        # Not a campaign an earlier gap already sent them to: the oldest unmeasured record is
+        # usually also the barren market's first, and accepting both offers appended two
+        # rows to it.
+        already = {a["prefilled_args"].get("campaign_id")
+                   for g in found for a in g["next_actions"]}
+        target = next((c for m in barren for c in by_market[m]
+                       if c["id"] not in already), by_market[barren[0]][0])
         found.append({
             "code": "market_without_outcomes",
-            "what": f"No campaign in {', '.join(barren)} has measured results.",
+            "what": f"No campaign in {', '.join(shown)}{more} has measured results.",
             "why_it_matters": "Judgments about these markets can only be compared against "
                               "campaigns elsewhere, which is a weaker comparison than it "
                               "looks.",
-            "counts": {"markets": barren},
+            "counts": {"markets": shown, "markets_total": len(barren)},
             "next_actions": actions.trim([actions.action(
-                f"Record results for a campaign in {barren[0]}",
+                f"Record results for a campaign in {display[barren[0]]}",
                 "add_metrics",
-                why=f"{barren[0]} has campaigns on file but nothing measured.",
+                why=f"{display[barren[0]]} has campaigns on file but nothing measured.",
                 consent="ask", needs=["which campaign, and the numbers"],
-                campaign_id=by_market[barren[0]][0]["id"])]),
+                campaign_id=target["id"])]),
         })
 
     outstanding = store.count_unembedded(conn)
@@ -1164,6 +1193,23 @@ def _ranked(found: list[dict]) -> dict:
     for gap in found:
         gap["rank"] = _GAP_RANK[gap["code"]]
     found.sort(key=lambda g: g["rank"])
+
+    # Two gaps can be closed by one act — a library whose single unmeasured campaign is also
+    # its only LATAM campaign has two true facts and one thing to do. Offering the same call
+    # twice is how somebody accepts both and appends two identical metric rows to the same
+    # record. The later gap keeps the fact and points at what closes it.
+    seen: dict[tuple, str] = {}
+    for gap in found:
+        kept = []
+        for offer in gap["next_actions"]:
+            key = (offer["tool"], tuple(sorted(offer["prefilled_args"].items())))
+            if key in seen:
+                gap["closed_by"] = seen[key]
+                continue
+            seen[key] = gap["code"]
+            kept.append(offer)
+        gap["next_actions"] = kept
+
     return {"gaps": found, "most_valuable": found[0]["code"] if found else None}
 
 
@@ -1680,8 +1726,10 @@ def _incompleteness_warnings(conn) -> list[dict]:
     outstanding = left["chunks"] + left["assets"]
     if not outstanding:
         return []
-    records = len(store.outstanding_by_campaign(conn))
+    # One query, not two: the same list was being fetched twice, once for its length and
+    # once for its head.
     by_campaign = store.outstanding_by_campaign(conn)
+    records = len(by_campaign)
     return [notices.notice(
         "results_may_be_incomplete",
         affects=f"{records} record(s) are only partly searchable ({outstanding} items "
@@ -1734,7 +1782,13 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
         # §5.3: the single thing that would most change THIS verdict, or None when nothing
         # is. About the evidence cited, not about the library — a library that is 90%
         # measured can still produce a judgment resting entirely on the unmeasured tenth.
-        "most_valuable_missing_input": most_valuable_missing_input(evidence),
+        # Filtered to MEASURED outcomes: `find_similar` includes predicted rows in
+        # `metrics`, so the unfiltered version reported a judgment resting entirely on a
+        # forecast as complete. The save_evaluation path was fixed and this one was not.
+        "most_valuable_missing_input": most_valuable_missing_input([
+            {**e, "metrics": [m for m in (e.get("metrics") or [])
+                              if m.get("metric_type") == "actual"]}
+            for e in evidence]),
         # The one surface where a half-indexed library matters most was the one that said
         # nothing about it: find_similar_campaigns warns, and this — a verdict about to be
         # saved against this evidence — did not. "How many precedents did this rest on" is

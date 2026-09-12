@@ -107,7 +107,9 @@ def test_every_gap_says_what_would_close_it(conn):
     for gap in core.gaps(conn)["gaps"]:
         assert gap["what"], gap
         assert gap["why_it_matters"], gap
-        assert gap["next_actions"], f"{gap['code']} names nothing that would close it"
+        assert gap["next_actions"] or gap.get("closed_by"), (
+            f"{gap['code']} names nothing that would close it"
+        )
 
 
 def test_the_gaps_are_ranked_so_the_first_one_is_the_one_to_fix(conn):
@@ -354,3 +356,145 @@ def test_the_line_survives_to_be_read_back_later(conn):
 
     stored = store.get_evaluation(conn, saved["evaluation_id"])
     assert stored["evidence"]["most_valuable_missing_input"]["code"] == "no_measured_precedent"
+
+
+# ══ adversarial review of 5.3 ════════════════════════════════════════════════
+
+def test_the_reviews_own_example_works_in_a_library_of_one_market(conn):
+    """`len(barren) < len(by_market)` suppressed the gap whenever EVERY market was barren —
+    so "no LATAM store launch has ever carried a budget", in a library that holds only LATAM
+    campaigns, said nothing at all. The guard was meant to avoid noise and instead silenced
+    the review's own example."""
+    _concluded(conn, "Bogota launch", market="LATAM")
+    _concluded(conn, "Lima launch", market="LATAM")
+
+    codes = [g["code"] for g in core.gaps(conn)["gaps"]]
+
+    assert "market_without_outcomes" in codes
+
+
+def test_a_forecast_only_precedent_is_missing_its_outcomes_on_the_judgment_path_too(conn):
+    """The fix round filtered `save_evaluation` and left `prepare_evaluation` reading the
+    raw evidence, where `find_similar` includes predicted rows in `metrics`. So the earlier
+    of the two calls still reported a judgment resting entirely on a forecast as complete."""
+    cid = _concluded(conn, "Peru seeding", detail="influencer seeding")
+    store.add_metrics(conn, cid, metric_type="predicted", detail="expect CTR 2%")
+
+    packaged = core.prepare_evaluation(conn, subject_title="Colombia",
+                                       proposal_text="influencer seeding")
+
+    assert packaged["most_valuable_missing_input"]["code"] == "no_measured_precedent"
+
+
+def test_markets_are_grouped_the_way_the_rest_of_the_product_groups_them(conn):
+    """Three disagreements with the product's own semantics, all reproduced. A campaign
+    reached only through the `markets` list was invisible to this gap. A whitespace market
+    was reported as a market — "No campaign in    , NA has measured results." And `LATAM`
+    was called barren while `latam` had results, though `filter_campaign_ids` matches them
+    case-insensitively and returns both."""
+    _concluded(conn, "Manila", markets=["Philippines"])
+    _concluded(conn, "Bogota", market="LATAM")
+    measured = _concluded(conn, "Lima", market="latam")
+    store.add_metrics(conn, measured, metric_type="actual", detail="CTR 1%")
+    _concluded(conn, "Nowhere", market="   ")
+
+    gap = next(g for g in core.gaps(conn)["gaps"] if g["code"] == "market_without_outcomes")
+
+    assert "Philippines" in gap["what"], "a markets-list campaign is still in a market"
+    assert "LATAM" not in gap["what"].upper().replace("PHILIPPINES", ""), \
+        "latam has measured results, and the product treats the two spellings as one"
+    assert "   " not in gap["what"]
+
+
+def test_a_superseded_record_is_not_counted_as_library_evidence(conn):
+    """A measured v1 that v2 replaces can never be cited — `find_similar` excludes it — so
+    counting it as one of the library's measured campaigns describes evidence no judgment
+    can reach."""
+    v1 = _with_results(conn, "Colombia v1")
+    store.insert_campaign(conn, title="Colombia v2", status="concluded", supersedes=v1)
+
+    report = core.gaps(conn)
+
+    outcomes = next(g for g in report["gaps"] if g["code"] == "few_verified_outcomes")
+    assert outcomes["counts"] == {"campaigns": 1, "with_outcomes": 0}
+
+
+def test_a_wide_library_does_not_produce_a_paragraph(conn):
+    """35 markets produced a 3,185-character sentence and an uncapped list, inside a tool
+    result somebody has to read."""
+    for i in range(35):
+        _concluded(conn, f"Campaign {i}", market=f"Market {i:02d}")
+    measured = _concluded(conn, "Measured", market="Measured market")
+    store.add_metrics(conn, measured, metric_type="actual", detail="CTR 1%")
+
+    gap = next(g for g in core.gaps(conn)["gaps"] if g["code"] == "market_without_outcomes")
+
+    assert len(gap["what"]) < 300, len(gap["what"])
+    assert len(gap["counts"]["markets"]) <= 5
+
+
+def test_two_gaps_do_not_send_the_user_to_the_same_campaign_twice(conn):
+    """The oldest unmeasured campaign is usually also the barren market's first, so accepting
+    both offers appended two `actual` rows to the same record."""
+    _with_results(conn, "Jakarta", market="SEA")
+    _concluded(conn, "Bogota", market="LATAM")
+
+    report = core.gaps(conn)
+    targets = [a["prefilled_args"].get("campaign_id")
+               for g in report["gaps"] for a in g["next_actions"]
+               if a["tool"] == "add_metrics"]
+
+    assert len(targets) == len(set(targets)), targets
+    # And the gap that lost its offer says which one closes it, rather than going silent.
+    market = next(g for g in report["gaps"] if g["code"] == "market_without_outcomes")
+    assert market["closed_by"] == "few_verified_outcomes"
+
+
+def test_the_ranking_is_asserted_against_a_library_that_has_several_gaps(conn, monkeypatch):
+    """Mutation-proof: reversing the sort left the suite green, because the ranking test
+    built a library with exactly one gap in it."""
+    import config
+
+    monkeypatch.setattr(config, "TOOL_TIME_BUDGET_SECONDS", 0.0)
+    core.ingest_campaign(conn, title="Cut short", status="concluded", deck_text="\n\n".join(
+        f"section {i} " + "word " * 200 for i in range(4)), confirm=True)
+    _concluded(conn, "Bogota", market="LATAM")
+
+    report = core.gaps(conn)
+
+    assert len(report["gaps"]) >= 3, [g["code"] for g in report["gaps"]]
+    assert [g["rank"] for g in report["gaps"]] == sorted(g["rank"] for g in report["gaps"])
+    assert report["gaps"][0]["code"] == "few_verified_outcomes"
+
+
+def test_an_empty_library_reports_only_that_even_when_other_branches_would_fire(conn,
+                                                                               monkeypatch):
+    """Mutation-proof: deleting the early return left the suite green, because on an empty
+    library every later branch is naturally silent anyway. This makes the early return carry
+    its own weight."""
+    import config
+
+    monkeypatch.setattr(config, "TOOL_TIME_BUDGET_SECONDS", 0.0)
+    core.ingest_campaign(conn, title="Reference only", record_type="reference",
+                         deck_text="\n\n".join(f"section {i} " + "word " * 200
+                                               for i in range(4)), confirm=True)
+
+    report = core.gaps(conn)
+
+    assert [g["code"] for g in report["gaps"]] == ["library_is_empty"], report["gaps"]
+
+
+def test_every_gap_code_is_reached_by_the_test_that_checks_them_all(conn, monkeypatch):
+    """`test_every_gap_says_what_would_close_it` was reaching one code of three."""
+    import config
+
+    monkeypatch.setattr(config, "TOOL_TIME_BUDGET_SECONDS", 0.0)
+    core.ingest_campaign(conn, title="Cut short", status="concluded", market="LATAM",
+                         deck_text="\n\n".join(f"section {i} " + "word " * 200
+                                               for i in range(4)), confirm=True)
+    measured = _concluded(conn, "Jakarta", market="SEA")
+    store.add_metrics(conn, measured, metric_type="actual", detail="CTR 1%")
+
+    codes = {g["code"] for g in core.gaps(conn)["gaps"]}
+
+    assert codes == {"few_verified_outcomes", "market_without_outcomes", "partly_indexed"}

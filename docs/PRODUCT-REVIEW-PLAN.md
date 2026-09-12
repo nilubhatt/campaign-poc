@@ -911,6 +911,31 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       And the one place magnitude decided anything decided it **alphabetically**: the market
       offered for repair was `barren[0]`, so Andorra's single campaign was offered ahead of
       LATAM's twenty.
+      **From adversarial review, four more.** The guard `len(barren) < len(by_market)` was
+      meant to avoid noise and instead **silenced the review's own example**: in a library
+      that holds only LATAM campaigns, "no LATAM store launch has ever carried a budget" said
+      nothing at all, because every market was barren. Gone.
+      The first fix round filtered forecasts out of the `save_evaluation` path and left
+      `prepare_evaluation` reading the raw evidence, where `find_similar` includes predicted
+      rows — so the earlier of the two calls still reported a judgment resting entirely on a
+      forecast as complete.
+      Markets were grouped in a way the rest of the product does not recognise: a campaign
+      reached only through the `markets` LIST was invisible, a whitespace market was reported
+      as a market ("No campaign in    , NA has measured results"), and `LATAM` was called
+      barren while `latam` had results — though `filter_campaign_ids` matches them
+      case-insensitively and returns both. And 35 markets produced a 3,185-character
+      sentence, now capped at five names plus a count.
+      Superseded records were counted as library evidence, though `find_similar` excludes
+      them — so a measured v1 replaced by an unmeasured v2 made the library look measured
+      while no judgment could reach the measurement.
+      Two gaps could send the user to the same campaign, so accepting both appended two
+      identical metric rows. A gap that is closed by an earlier one's action now says
+      `closed_by` and keeps the fact without repeating the offer.
+      **Two mutations survived** the first round's tests — reversing the rank order, and
+      deleting the empty-library early return — because the ranking test built a library with
+      one gap in it and an empty library is naturally silent on every later branch. Both now
+      have tests that bite, and `test_every_gap_says_what_would_close_it` was reaching one
+      code of three.
 - [ ] **5.4 (D) `diff_campaigns(a, b)`** — adopted / ignored / newly-introduced /
       carried-stale, computed against the earlier version's evaluation findings. Flagged by
       the reviewer as the highest-value feature not already on the list.
