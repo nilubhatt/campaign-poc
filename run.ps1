@@ -1,5 +1,5 @@
 <#
-  Campaign Intelligence (lean) — Windows launcher.
+  Campaign Intelligence (lean) - Windows launcher.
 
   Usage:
     .\run.ps1 -Setup                 # one-time: venv + deps + auto-install Ollama + pull model
@@ -39,7 +39,7 @@ function Ensure-Ollama {
   if (Get-Command ollama -ErrorAction SilentlyContinue) {
     Write-Host "Ollama already installed." -ForegroundColor Green
   } else {
-    Write-Host "Ollama not found — downloading the official Windows installer..." -ForegroundColor Yellow
+    Write-Host "Ollama not found - downloading the official Windows installer..." -ForegroundColor Yellow
     $inst = Join-Path $env:TEMP 'OllamaSetup.exe'
     Invoke-WebRequest -Uri 'https://ollama.com/download/OllamaSetup.exe' -OutFile $inst
     Write-Host "Installing Ollama silently..."

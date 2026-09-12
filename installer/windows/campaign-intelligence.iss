@@ -1,4 +1,4 @@
-; Inno Setup script — end-user Windows installer for Campaign Intelligence (lean).
+; Inno Setup script - end-user Windows installer for Campaign Intelligence (lean).
 ; Compile ON Windows: iscc campaign-intelligence.iss  (Inno Setup 6+).
 ; Expects the PyInstaller bundle already built at ..\..\dist\campaign-intelligence\ (build.ps1).
 ;

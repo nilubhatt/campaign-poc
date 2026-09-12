@@ -474,7 +474,7 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 - [ ] **3.2 Version surface + stale-schema documentation** (defect 10). Build version in the
       server description; README documents that the host app must be fully quit and reopened
       after a rebuild (closing the window leaves the server running).
-- [ ] **3.3 Shipped scripts must be encoding-safe** (defect 11). Any `.ps1` ASCII-only or
+- [x] **3.3 Shipped scripts must be encoding-safe** (defect 11). Any `.ps1` ASCII-only or
       UTF-8 **with** BOM, asserted in CI; audit the macOS/Linux shell scripts for the
       analogous trap rather than assuming it is Windows-only.
       **Already confirmed present while working item 1.2** — `run.ps1` is BOM-less and
@@ -484,6 +484,25 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       curly quote, the string terminates mid-sentence and every brace after it mismatches.
       `installer/windows/campaign-intelligence.iss:1` also has one (in a comment, so
       harmless, but it should not survive the CI check either). `build.ps1` is clean.
+      **Done:** the mechanism was confirmed byte for byte before fixing anything — `e2 80 94`
+      on `run.ps1:42`, decoded as cp1252, yields `â€”`, and the `”` is a character PowerShell
+      accepts as a closing double quote. Both files are now ASCII, chosen over a BOM because
+      a BOM makes the file correct while leaving the next person free to paste in a smart
+      quote; ASCII is a property CI can state plainly. `tests/test_shipped_script_encoding.py`
+      asserts it over every `.ps1`, `.cmd`, `.bat` and `.iss` in the tree, and runs in CI on
+      every push — the review's own note that "this passes on a developer machine" is exactly
+      why it is a test and not a habit.
+      **The Unix audit the item asked for, rather than assuming Windows-only:** the encoding
+      half genuinely is Windows-only, since sh reads bytes and a UTF-8 locale handles the
+      rest. The SHAPE of the defect is not — a script that parses where it was written and
+      not where it runs — and on Unix that is line endings: a CRLF turns the shebang into
+      `/usr/bin/env bash\r`, and the kernel then reports "bad interpreter: no such file or
+      directory" about a file that plainly exists. All four `.sh` files are clean and now
+      tested, along with a shebang check.
+      **`.gitattributes` added** for the way those bytes change with nobody editing the file:
+      a checkout with `core.autocrlf=true` rewrites every LF, so the shipped scripts are
+      pinned per-interpreter (`eol=lf` for `.sh`, `eol=crlf` for the Windows ones) rather
+      than left to local git config.
 
 ## Phase 4 — Installer acceptance criteria
 
