@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Optional, Union
 
+import actions
 import chunking
 import clip_embed
 import config
@@ -242,8 +243,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                     affects=f"{images_embedded} of {len(image_assets)} images in this deck "
                             f"are in visual search so far. All of them were stored and "
                             f"checked for reuse, so nothing is lost.",
-                    next_step=f"Offer to finish it now — "
-                              f"finish_indexing(campaign_id='{cid}'); no re-upload needed.",
+                    next_actions=actions.to_finish_indexing(cid),
                     detail=f"visually embedded {images_embedded} of {len(image_assets)} "
                            f"deck images before the "
                            f"{config.TOOL_TIME_BUDGET_SECONDS:g}s time budget ran out"))
@@ -316,8 +316,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                 "indexing_incomplete",
                 affects=f"The campaign is saved and {embedded_count} of "
                         f"{len(chunk_texts)} sections are searchable so far.",
-                next_step=f"Say that, and offer to finish it now — "
-                          f"finish_indexing(campaign_id='{cid}'); no re-upload needed.",
+                next_actions=actions.to_finish_indexing(cid),
                 detail=f"embedded {embedded_count} of {len(chunk_texts)} sections before "
                        f"the {config.TOOL_TIME_BUDGET_SECONDS:g}s time budget ran out"))
             break
@@ -355,6 +354,9 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         "commentary_found": len(commentary),
         "commentary_checked": commentary_checked,
         "normalised": changed,
+        "next_actions": actions.after_upload(
+            campaign_id=cid, status=status,
+            has_metrics=bool(store.get_campaign(conn, cid)["metrics"])),
         "warnings": notices.collapse(warnings),
     }
 
@@ -723,8 +725,18 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         "findings": [{k: f[k] for k in ("id", "severity", "kind", "finding", "fix")}
                      for f in cleaned if f["severity"] in ("blocking", "should_fix")],
         "approve_if": approve_if,
+        # §5.2: the three things anyone actually does after a judgment, prefilled. The
+        # supersession offer only appears when there IS an earlier version — an approval of
+        # a new brief supersedes nothing, and an offer that is always there stops being read.
+        "next_actions": actions.after_evaluation(
+            subject_title=subject_title, evaluation_id=eid, verdict=verdict,
+            campaign_id=campaign_id,
+            supersedes=(closest_precedent or {}).get("campaign_id")
+            if verdict != "approve" else None),
         "note": "Give the user the verdict, the one-line summary and what has to change. "
-                "The reasoning behind any finding is in get_evaluation, not here.",
+                "The reasoning behind any finding is in get_evaluation, not here. "
+                "`next_actions` are offers — say them in your own words and act on the one "
+                "the user picks; do not call them unasked.",
     }
 
 
@@ -1211,7 +1223,11 @@ def find_similar_with_context(conn, **kwargs) -> dict:
     still waiting to be indexed. An absent result cannot announce itself, so the search has
     to."""
     matches = find_similar(conn, **kwargs)
-    return {"matches": matches, "warnings": _incompleteness_warnings(conn)}
+    # Deliberately empty. Searching is not a step in a sequence — what somebody does after
+    # reading results depends entirely on why they searched, and an offer that is always
+    # present is the one nobody reads. The key is still here so every surface has one shape.
+    return {"matches": matches, "next_actions": [],
+            "warnings": _incompleteness_warnings(conn)}
 
 
 # The three ways somebody's words end up attached to a deck. `speaker_note` is what the

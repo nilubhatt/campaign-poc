@@ -195,16 +195,19 @@ def normalise(value: Optional[str], *, field: str, valid: Iterable[str],
     if value is None:
         if allow_none:
             return None
-        raise ValueError(f"{field} is required; it is one of {list(valid)}")
+        raise BadValue(f"{field} is required; it is one of {list(valid)}",
+                       field=field, given="", valid=valid)
     if not isinstance(value, str):
-        raise ValueError(f"{field} must be one of {list(valid)}, got "
-                         f"{type(value).__name__}")
+        raise BadValue(f"{field} must be one of {list(valid)}, got "
+                       f"{type(value).__name__}", field=field, given=str(value),
+                       valid=valid)
 
     shaped = canonical_shape(value)
     if not shaped:
         if allow_none:
             return None
-        raise ValueError(f"{field} is required; it is one of {list(valid)}")
+        raise BadValue(f"{field} is required; it is one of {list(valid)}",
+                       field=field, given="", valid=valid)
 
     by_shape = {canonical_shape(v): v for v in valid}
     if shaped in by_shape:
@@ -214,22 +217,45 @@ def normalise(value: Optional[str], *, field: str, valid: Iterable[str],
     if resolved is not None:
         return resolved
 
-    raise ValueError(_teach(value, shaped, field, valid))
+    raise _teach(value, shaped, field, valid)
 
 
-def _teach(given: str, shaped: str, field: str, valid: tuple) -> str:
+class BadValue(ValueError):
+    """A rejected enum value, carrying the retry as data rather than only as a sentence.
+
+    Still a ValueError, because that is the only exception type the tool layer converts into
+    something the caller can read — anything else becomes "Error executing tool X" with the
+    detail discarded. But it carries `valid` and `suggestion` as attributes, so the surface
+    can offer the retry (§5.2) instead of asking somebody to parse "Did you mean...?" out of
+    prose (tracker D31).
+    """
+
+    def __init__(self, message: str, *, field: str, given: str, valid: tuple,
+                 suggestion=None):
+        super().__init__(message)
+        self.field = field
+        self.given = given
+        self.valid = list(valid)
+        self.suggestion = suggestion
+
+
+def _teach(given: str, shaped: str, field: str, valid: tuple) -> BadValue:
     """The valid set always; the closest match only when something really is close; and the
     distinction spelled out for the near-misses that mean something else."""
     explanation = _EXPLAIN.get((field, shaped))
     message = f"{field} must be one of {list(valid)}, got {given!r}."
     if explanation:
-        return f"{message} {explanation}"
+        # A near-miss that means something else. No suggestion: the whole point is that the
+        # obvious-looking value is the wrong one.
+        return BadValue(f"{message} {explanation}", field=field, given=given, valid=valid)
+
+    suggestion = None
     close = difflib.get_close_matches(shaped, [canonical_shape(v) for v in valid],
                                       n=1, cutoff=_SUGGESTION_CUTOFF)
     if close and not _is_denial_of(shaped, close[0]):
         suggestion = {canonical_shape(v): v for v in valid}[close[0]]
-        return f"{message} Did you mean {suggestion!r}?"
-    return message
+        message = f"{message} Did you mean {suggestion!r}?"
+    return BadValue(message, field=field, given=given, valid=valid, suggestion=suggestion)
 
 
 def _is_denial_of(shaped: str, candidate: str) -> bool:

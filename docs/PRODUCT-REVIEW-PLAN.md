@@ -773,7 +773,37 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       below it) and a negation guard suppresses any suggestion the input is the denial of.
       A blank value now consistently means "not saying" rather than clearing a set one — a
       spreadsheet row with an empty cell was erasing a status.
-- [ ] **5.2 (B) `next_actions`** on every result — `{label, tool, prefilled_args}`.
+- [x] **5.2 (B) `next_actions`** on every result — `{label, tool, prefilled_args}`.
+      **Done:** `actions.py`. The review named the three things anyone does after a judgment
+      and all three are offered, prefilled: store the brief as a record, mark what it
+      supersedes, and reconcile when the results land. Nothing *schedules* anything, because
+      the product has no scheduler — so "schedule the reconciliation" is the reconciliation
+      call itself, prefilled and labelled for when the numbers arrive, which is the honest
+      version of the same offer.
+      **Two rules, and most of the tests are about them.** An offer has to WORK: a suggestion
+      whose argument name has drifted is one the user accepts and Claude then cannot carry
+      out — an error they did not cause and cannot fix. Every offered tool is checked to
+      exist, every prefilled argument to be one that tool takes, and one offer is executed
+      end to end. And an offer has to be worth making: a list that is always there stops
+      being read, and then the one that mattered is not read either. An empty list is a real
+      answer — `find_similar_campaigns` returns one, because what somebody does after reading
+      results depends entirely on why they searched. Three is the ceiling, which is the
+      number the review itself used.
+      Prefilled arguments are only ever values this library already holds. The user says yes
+      to the *label*, so anything filled in is something they agreed to without being shown
+      it; a placeholder or a guess would be written on their behalf.
+      **Closes two tracker rows.** D16: warning `next_step` prose becomes structured actions
+      (`next_step` survives only where no single tool sits behind the advice — "say this
+      once, not per image"). D31: `enums.BadValue` carries `field`, `valid` and `suggestion`
+      as data, and `_catch_value_errors` passes them through the tool boundary, so a retry is
+      something a caller acts on rather than parses out of "Did you mean...?".
+      **Opened one.** The obvious offer after a deck whose comments were never read — send
+      the file — cannot be made: no tool attaches a deck to an existing campaign. The test
+      that every prefilled argument must exist caught the attempt. Tracked as D39 rather than
+      shipped as an offer that fails.
+      **Found by the protocol round-trip:** the server `instructions` are an f-string, so the
+      literal `{label, tool, prefilled_args}` in the new paragraph was read as an expression
+      and the server would not start at all.
 - [ ] **5.3 (C) `gaps()`** + a standing line on every evaluation naming the single most
       valuable missing input for that judgment.
 - [ ] **5.4 (D) `diff_campaigns(a, b)`** — adopted / ignored / newly-introduced /

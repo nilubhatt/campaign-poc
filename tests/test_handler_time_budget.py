@@ -84,8 +84,11 @@ def test_running_out_of_budget_says_what_happened_and_how_to_finish(conn, monkey
     # 2.1 deliberately left this open: naming a recovery tool that did not exist yet would
     # have sent a marketer after something Claude could not find. 2.2 built it, so the
     # sentence can now be closed - this is that promise being kept.
-    assert "finish_indexing" in warning["next_step"], "must name the tool that finishes it"
-    assert "no re-upload" in warning["next_step"].lower()
+    # §5.2 turned this from prose Claude has to read into an offer the user can accept.
+    offer = warning["next_actions"][0]
+    assert offer["tool"] == "finish_indexing", "must name the tool that finishes it"
+    assert offer["prefilled_args"]["campaign_id"] == result["campaign_id"]
+    assert "re-upload" in offer["label"].lower()
     assert "time budget" in warning["detail"], "the mechanism stays, for support"
 
 

@@ -104,10 +104,11 @@ def test_the_budget_warning_keeps_its_instruction(tmp_path, conn, monkeypatch):
     result = core.ingest_campaign(conn, title="Cut short", deck_text=deck, confirm=True)
 
     warning = next(w for w in result["warnings"] if w["code"] == "indexing_incomplete")
-    # The call belongs in next_step now: it is an instruction to Claude, not a sentence to
-    # read out to somebody who cannot call a tool.
-    assert "finish_indexing" in warning["next_step"]
-    assert result["campaign_id"] in warning["next_step"], "usable as written"
+    # §5.2: the call is an offer with structured arguments now, not a sentence. It was never
+    # something to read out to somebody who cannot call a tool.
+    offer = warning["next_actions"][0]
+    assert offer["tool"] == "finish_indexing"
+    assert offer["prefilled_args"]["campaign_id"] == result["campaign_id"]
 
 
 def test_an_extraction_warning_is_structured_too(tmp_path):
@@ -316,8 +317,8 @@ def test_instructions_to_claude_are_not_read_out_to_the_user(tmp_path, conn, mon
     warning = next(w for w in result["warnings"] if w["code"] == "indexing_incomplete")
 
     assert "tell the user" not in warning["remedy"].lower()
-    assert warning["next_step"], "what Claude should do goes in its own field"
-    assert "finish_indexing" in warning["next_step"]
+    assert warning["next_actions"], "what Claude should do goes in its own field"
+    assert warning["next_actions"][0]["tool"] == "finish_indexing"
 
 
 def test_the_response_names_the_warning_to_lead_with(tmp_path, conn, monkeypatch):

@@ -205,7 +205,7 @@ def remedy_for(code: str) -> str:
 
 def notice(code: str, *, detail: str, affects: Optional[str] = None,
            remedy: Optional[str] = None, next_step: Optional[str] = None,
-           count: int = 1, **extra) -> dict:
+           next_actions: Optional[list] = None, count: int = 1, **extra) -> dict:
     """One warning.
 
     `affects`, `remedy` and `next_step` can be supplied per call — for the entries that have
@@ -224,6 +224,11 @@ def notice(code: str, *, detail: str, affects: Optional[str] = None,
     step = next_step if next_step is not None else reg_next
     if step:
         entry["next_step"] = step
+    # §5.2: the same instruction as something the user can accept, rather than prose Claude
+    # has to turn into a call. `next_step` stays for the cases with no single tool behind
+    # them ("say this once, not per image").
+    if next_actions:
+        entry["next_actions"] = next_actions
     if count != 1:
         entry["count"] = count
     entry.update(extra)

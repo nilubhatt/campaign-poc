@@ -17,6 +17,7 @@ from mcp.server.mcpserver import MCPServer
 
 import config
 import core
+import enums
 import store
 
 # The version goes in the server's own description because that is where a host shows it,
@@ -27,6 +28,12 @@ import store
 INSTRUCTIONS = f"""Campaign Intelligence {config.VERSION_FULL} — a marketing team's own
 campaign library: past campaigns, what they achieved, and judgments about new proposals
 weighed against that record.
+
+NEXT ACTIONS. Many results carry `next_actions`: a short list of `{{label, tool,
+prefilled_args}}`. These are OFFERS, not instructions — say the label in your own words, and
+call the tool only if the user accepts. The arguments are already filled in from what this
+library holds, so accepting is one step, not a form. An empty list means there is no obvious
+next step, which is a real answer; do not invent one.
 
 WARNINGS. Several tools return `warnings`, and each entry has one field per reader:
   `affects`   what the user loses. Say this.
@@ -65,6 +72,15 @@ def _catch_value_errors(fn):
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
+        except enums.BadValue as exc:
+            # §5.2: a rejected value carries its retry as data, not only inside the
+            # sentence. `valid` is the set to choose from and `suggestion`, when present, is
+            # the one to retry with — so the caller acts on a field instead of parsing
+            # "Did you mean...?" out of prose.
+            rejected = {"error": str(exc), "field": exc.field, "valid": exc.valid}
+            if exc.suggestion:
+                rejected["suggestion"] = exc.suggestion
+            return rejected
         except ValueError as exc:
             return {"error": str(exc)}
     return wrapper
