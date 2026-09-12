@@ -168,6 +168,10 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         conn, title=title, record_type=record_type, status=status, tags=tags, region=region,
         market=market, markets=markets, collection=collection, supersedes=supersedes,
         detail=detail, deck_text=deck_text, asset_path=stored_path,
+        # Recorded on the row, not only in this response's warnings: a warning lives for one
+        # call, and "nobody ever read this deck's comments" is a fact somebody needs months
+        # later, when they are wondering why a search misses what they remember writing.
+        commentary_checked=commentary_checked,
     )
 
     # Images embedded IN the deck, extracted and processed automatically — a separate
@@ -1013,6 +1017,185 @@ def wait_until_ready(timeout: float = 60.0, interval: float = 3.0) -> dict:
         time.sleep(interval)
 
 
+# ── what is missing (§5.3, idea C) ──────────────────────────────────────────
+#
+# "The library knows it holds one campaign with real outcome data. It knows no LATAM store
+# launch has ever carried a budget. It knows the KPI workbook named in its own rubric has
+# never been supplied. It says none of this unless directly interrogated."
+#
+# Ranked, lowest number first, and the ranking is the design. An unordered list of everything
+# absent is the thing nobody reads — which is the state being replaced. The order is by how
+# much closing the gap would change what this library can answer:
+#
+#   1  it is empty, so nothing else is worth saying
+#   2  nothing has measured outcomes, so no judgment rests on evidence
+#   3  a whole market has none, so judgments about that market rest on nothing local
+#   4  records are stored but not searchable, so the evidence exists and cannot be found
+#   5  decks whose commentary was never read — real content, never ingested
+_GAP_RANK = {
+    "library_is_empty": 1,
+    "few_verified_outcomes": 2,
+    "market_without_outcomes": 3,
+    "partly_indexed": 4,
+    "commentary_never_read": 5,
+}
+
+
+def gaps(conn) -> dict:
+    """What this library is missing, ranked, with what would close each one.
+
+    The counterpart to `most_valuable_missing_input` on a judgment: this is about the
+    LIBRARY, that is about one verdict, and they routinely disagree — a library that is 90%
+    measured can still produce a judgment resting entirely on the unmeasured tenth.
+    """
+    campaigns = [c for c in store.list_campaigns(conn)
+                 if c.get("record_type") != "reference"]
+    found: list[dict] = []
+
+    if not campaigns:
+        # Every gap is present in an empty library, which makes the list useless. A new
+        # install has exactly one thing to do, and it is not "fix your LATAM coverage".
+        found.append({
+            "code": "library_is_empty",
+            "what": "There are no campaigns in the library yet.",
+            "why_it_matters": "Every judgment this product makes is a comparison against "
+                              "what you have already run, so with nothing stored there is "
+                              "nothing to compare against.",
+            "counts": {"campaigns": 0},
+            "next_actions": actions.trim([actions.action(
+                "Add a campaign you were happy with, and one you were not",
+                "upload_campaign",
+                why="Two contrasting records is the smallest library that can produce a "
+                    "useful judgment.",
+                consent="ask",
+                needs=["the campaign's deck or a description of it"])]),
+        })
+        return _ranked(found)
+
+    with_outcomes = [c for c in campaigns if c.get("has_metrics")]
+    if len(with_outcomes) < len(campaigns):
+        found.append({
+            "code": "few_verified_outcomes",
+            "what": f"{len(with_outcomes)} of {len(campaigns)} campaigns have measured "
+                    f"results on file.",
+            "why_it_matters": "A campaign with no outcome data can be cited as a precedent "
+                              "but cannot show whether it worked, so a judgment resting on "
+                              "it rests on somebody's impression.",
+            "counts": {"campaigns": len(campaigns), "with_outcomes": len(with_outcomes)},
+            "next_actions": actions.trim([actions.action(
+                "Record what one of these campaigns actually achieved",
+                "add_metrics",
+                why=f"{len(campaigns) - len(with_outcomes)} campaigns have no results.",
+                consent="ask", needs=["which campaign, and the numbers"],
+                campaign_id=next(c["id"] for c in campaigns if not c.get("has_metrics")))]),
+        })
+
+    # A gap located in a SLICE rather than in the total. A marketer asking about Colombia
+    # does not care that the library is 60% measured overall if the LATAM part is 0%.
+    by_market: dict[str, list] = {}
+    for campaign in campaigns:
+        market = campaign.get("market") or campaign.get("region")
+        if market:
+            by_market.setdefault(market, []).append(campaign)
+    barren = sorted(m for m, rows in by_market.items()
+                    if not any(c.get("has_metrics") for c in rows))
+    if barren and len(barren) < len(by_market):
+        found.append({
+            "code": "market_without_outcomes",
+            "what": f"No campaign in {', '.join(barren)} has measured results.",
+            "why_it_matters": "Judgments about these markets can only be compared against "
+                              "campaigns elsewhere, which is a weaker comparison than it "
+                              "looks.",
+            "counts": {"markets": barren},
+            "next_actions": actions.trim([actions.action(
+                f"Record results for a campaign in {barren[0]}",
+                "add_metrics",
+                why=f"{barren[0]} has campaigns on file but nothing measured.",
+                consent="ask", needs=["which campaign, and the numbers"],
+                campaign_id=by_market[barren[0]][0]["id"])]),
+        })
+
+    outstanding = store.count_unembedded(conn)
+    if outstanding["chunks"] + outstanding["assets"]:
+        by_campaign = store.outstanding_by_campaign(conn)
+        found.append({
+            "code": "partly_indexed",
+            "what": f"{len(by_campaign)} record(s) are stored but not fully searchable.",
+            "why_it_matters": "The content is here and searches cannot find it, so it is "
+                              "absent from evidence without being absent from the library.",
+            "counts": {"records": len(by_campaign),
+                       "items": outstanding["chunks"] + outstanding["assets"]},
+            "next_actions": actions.to_finish_indexing(
+                by_campaign[0]["campaign_id"] if by_campaign else None),
+        })
+
+    unread = [c for c in campaigns
+              if not c.get("commentary_checked") and (c.get("deck_text")
+                                                      or c.get("asset_path"))]
+    if unread:
+        found.append({
+            "code": "commentary_never_read",
+            "what": f"{len(unread)} record(s) were stored without their file, so any "
+                    f"comments and speaker notes in them were never read.",
+            "why_it_matters": "A deck returned with tracked client comments is the feedback "
+                              "this library most wants to remember, and pasted text does "
+                              "not carry it.",
+            "counts": {"records": len(unread)},
+            "next_actions": actions.trim([actions.action(
+                "Send the deck files themselves for these records",
+                "upload_campaign",
+                why="Comments and speaker notes can only be read from the file.",
+                consent="ask", needs=["the original deck files"])]),
+        })
+
+    return _ranked(found)
+
+
+def _ranked(found: list[dict]) -> dict:
+    for gap in found:
+        gap["rank"] = _GAP_RANK[gap["code"]]
+    found.sort(key=lambda g: g["rank"])
+    return {"gaps": found, "most_valuable": found[0]["code"] if found else None}
+
+
+def most_valuable_missing_input(evidence: list[dict]) -> Optional[dict]:
+    """Of everything missing, the one thing that would most change THIS judgment.
+
+    The review's own phrasing: "this verdict rests on zero verified outcomes; the Q2 results
+    workbook would change that." One thing, not a list — several things are always missing,
+    and naming them all is the behaviour being replaced. None when nothing is missing, which
+    is what makes the line worth reading when it appears.
+    """
+    if not evidence:
+        return {
+            "code": "no_precedent",
+            "what": "Nothing in the library is similar enough to compare this against.",
+            "why_it_matters": "Without a precedent this is an opinion rather than a "
+                              "judgment from your own record.",
+            "next_actions": actions.trim([actions.action(
+                "Add a past campaign of this kind, so there is something to judge against",
+                "upload_campaign",
+                why="No stored campaign resembles this proposal.",
+                consent="ask", needs=["a comparable campaign"])]),
+        }
+    measured = [e for e in evidence if e.get("metrics")]
+    if not measured:
+        return {
+            "code": "no_measured_precedent",
+            "what": f"None of the {len(evidence)} campaigns this rests on has measured "
+                    f"results on file.",
+            "why_it_matters": "The comparison is to what was planned, not to what happened, "
+                              "so the verdict cannot say whether any of it worked.",
+            "next_actions": actions.trim([actions.action(
+                f"Record what \u201c{evidence[0]['title']}\u201d actually achieved",
+                "add_metrics",
+                why="It is the closest precedent and has no results on file.",
+                consent="ask", needs=["the numbers"],
+                campaign_id=evidence[0]["campaign_id"])]),
+        }
+    return None
+
+
 def published_tool_parameters() -> dict[str, list[str]]:
     """What each tool actually takes, right now, read off the functions themselves (§3.2).
 
@@ -1463,10 +1646,14 @@ def _incompleteness_warnings(conn) -> list[dict]:
     if not outstanding:
         return []
     records = len(store.outstanding_by_campaign(conn))
+    by_campaign = store.outstanding_by_campaign(conn)
     return [notices.notice(
         "results_may_be_incomplete",
         affects=f"{records} record(s) are only partly searchable ({outstanding} items "
                 f"still to index), so these results may be incomplete.",
+        # D45: a single tool sits behind this advice, so it is an action rather than prose.
+        next_actions=actions.to_finish_indexing(
+            by_campaign[0]["campaign_id"] if by_campaign else None),
         detail=f"{outstanding} unembedded items across {records} campaigns")]
 
 
@@ -1509,6 +1696,10 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
             "most."
         ),
         "campaigns_with_outcomes": [e["campaign_id"] for e in concluded],
+        # §5.3: the single thing that would most change THIS verdict, or None when nothing
+        # is. About the evidence cited, not about the library — a library that is 90%
+        # measured can still produce a judgment resting entirely on the unmeasured tenth.
+        "most_valuable_missing_input": most_valuable_missing_input(evidence),
         # The one surface where a half-indexed library matters most was the one that said
         # nothing about it: find_similar_campaigns warns, and this — a verdict about to be
         # saved against this evidence — did not. "How many precedents did this rest on" is

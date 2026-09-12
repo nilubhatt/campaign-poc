@@ -846,8 +846,38 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       **Mutation testing found four tests that could not fail:** `trim` returning everything,
       `MAX_ACTIONS` at 30, `after_upload` always offering, and the broken `campaign_id`
       branch. All four now have tests that bite.
-- [ ] **5.3 (C) `gaps()`** + a standing line on every evaluation naming the single most
+- [x] **5.3 (C) `gaps()`** + a standing line on every evaluation naming the single most
       valuable missing input for that judgment.
+      **Done, as two halves that answer different questions.** `gaps()` is about the LIBRARY:
+      what is missing across everything, ranked, so somebody can go and fix the biggest hole.
+      `most_valuable_missing_input` on `prepare_evaluation` is about ONE judgment: of
+      everything missing, the single thing that would most change *this* verdict. They
+      routinely disagree, which is the point — a library that is mostly measured can still
+      produce a verdict resting entirely on the part that is not.
+      **Ranked, and the ranking is the design.** An unordered list of everything absent is
+      exactly the thing nobody reads, which is the state the review was describing. The order
+      is by how much closing the gap changes what the library can answer: empty library,
+      then nothing measured anywhere, then a whole market with nothing measured, then records
+      stored but not searchable, then decks whose commentary was never read.
+      **"Single" is load-bearing on the judgment line.** Several things are always missing;
+      naming them all is the behaviour being replaced. It is `None` when nothing is missing,
+      which is what makes it worth reading when it appears.
+      Every gap carries `what` (the fact), `why_it_matters` (what it costs) and
+      `next_actions` that would close it — a gap with no action is a complaint.
+      **An empty library reports one thing.** Every gap is present in an empty library, so
+      listing them is useless; a new install has one thing to do and it is not "fix your
+      LATAM coverage".
+      **Only records that had a deck can have unread commentary.** A campaign entered as a
+      title and a description never had comments to read, and reporting it would be the noise
+      that stops the real ones landing.
+      **Closes two tracker rows.** D17: warnings live for one response, so "this deck's
+      comments were never read" was unrecoverable the moment the upload returned —
+      `campaigns.commentary_checked` persists it. D45: `results_may_be_incomplete` carried
+      `finish_indexing` as prose while a single tool sat behind it, and `prepare_evaluation`
+      returned no actions at all.
+      **Kept deliberately distinct from 6.6.** The evidence-strength line says what a
+      judgment RESTS ON — how many precedents, how many concluded, top similarity. This says
+      what would most improve it. One describes, the other asks.
 - [ ] **5.4 (D) `diff_campaigns(a, b)`** — adopted / ignored / newly-introduced /
       carried-stale, computed against the earlier version's evaluation findings. Flagged by
       the reviewer as the highest-value feature not already on the list.

@@ -646,6 +646,11 @@ def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
     never blur them: quoting a commentary row as though the deck itself claimed it is a
     false statement about that campaign.
 
+    `most_valuable_missing_input` names the single thing that would most change this
+    judgment, or is null when nothing would. Say it as part of the verdict rather than as an
+    aside — "this rests on three campaigns, none of which has measured results" is context
+    the user needs in order to know how much to trust what follows.
+
     Read it, then call save_evaluation with a verdict (approve / revise / reject), a
     one-line summary and one short finding per problem, CITING specific campaign_ids. When a
     finding quotes a `commentary` row, set that precedent's `layer: "commentary"` and carry
@@ -734,6 +739,32 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
             findings=findings, resolved=resolved, closest_precedent=closest_precedent,
             approve_if=approve_if, campaign_id=campaign_id, cited_ids=cited_ids,
             predictions=predictions)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def gaps() -> dict:
+    """What this library is missing, ranked, with what would close each one.
+
+    Call it when the user asks how good their library is, what to add next, or why an answer
+    looked thin — and offer it unprompted after a judgment that had to say something was
+    missing. The library knows it holds one campaign with measured results, or that no LATAM
+    campaign has any; it has never said so unless asked.
+
+    `most_valuable` names the one to fix first. Each gap carries `what` (the fact), 
+    `why_it_matters` (what it costs), `counts`, and `next_actions` that would close it. An
+    empty list means nothing is missing, which is a real and rare answer — do not embroider
+    it.
+
+    This is about the LIBRARY. The equivalent for a single judgment is
+    `most_valuable_missing_input` on prepare_evaluation, and the two routinely differ: a
+    library that is mostly measured can still produce a verdict resting entirely on the part
+    that is not."""
+    conn = store.connect()
+    try:
+        return core.gaps(conn)
     finally:
         conn.close()
 

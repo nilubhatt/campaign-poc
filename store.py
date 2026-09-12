@@ -47,6 +47,10 @@ CREATE TABLE IF NOT EXISTS campaigns (
                                     -- chains and fan-in (two records both superseding one).
     detail        TEXT,            -- freeform: brief, audience, budget, channel, timeline, anything
     deck_text     TEXT,            -- extracted PDF/PPTX text
+    commentary_checked INTEGER NOT NULL DEFAULT 0,  -- was a file actually read for comments
+                                    -- and speaker notes? (§5.3/D17) A warning lives for one
+                                    -- response; this is what lets gaps() still report months
+                                    -- later that a deck's commentary was never looked at
     asset_path    TEXT,            -- stored original file (relative to ASSET_DIR)
     embedded      INTEGER NOT NULL DEFAULT 0,  -- 1 once its vector is in the vector store
     created_at    REAL NOT NULL,
@@ -166,6 +170,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     # reproduced it independently; it was invisible to the whole suite because every test
     # starts from a fresh _SCHEMA. Rebuild copies the legacy essays across untouched —
     # they are the record of what the library was told, and the evidence for defect 07.
+    if existing and "commentary_checked" not in existing:
+        conn.execute("ALTER TABLE campaigns ADD COLUMN commentary_checked INTEGER NOT NULL "
+                     "DEFAULT 0")
     chunk_columns = _columns(conn, "campaign_chunks")
     if chunk_columns and "kind" not in chunk_columns:
         # Existing chunks are all deck body — the only kind that existed before §2.5.
@@ -399,7 +406,8 @@ def _parse_tag_query(tags) -> list[tuple[str, Optional[str]]]:
 
 def insert_campaign(conn, *, title, record_type="campaign", status=None, detail=None,
                     deck_text=None, asset_path=None, tags=None, region=None, market=None,
-                    markets=None, collection=None, supersedes=None) -> str:
+                    markets=None, collection=None, supersedes=None,
+                    commentary_checked=False) -> str:
     record_type = _normalise_record_type(record_type)
     status = _normalise_status(status)
     tags = normalize_tags(tags, has_actual_metrics=False)  # brand-new: no metrics can exist yet
@@ -411,10 +419,11 @@ def insert_campaign(conn, *, title, record_type="campaign", status=None, detail=
     conn.execute(
         """INSERT INTO campaigns (id, title, record_type, status, tags, region, market,
                                   markets, collection, supersedes, detail, deck_text,
-                                  asset_path, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                  asset_path, commentary_checked, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (cid, title, record_type, status, json.dumps(tags), region, market,
-         json.dumps(markets), collection, supersedes, detail, deck_text, asset_path, now, now),
+         json.dumps(markets), collection, supersedes, detail, deck_text, asset_path,
+         1 if commentary_checked else 0, now, now),
     )
     conn.commit()
     return cid
