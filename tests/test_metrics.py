@@ -29,7 +29,7 @@ def test_get_campaign_reports_has_metrics_and_has_evaluations(conn):
     assert c0["has_evaluations"] is False
 
     store.add_metrics(conn, cid, detail="results")
-    store.insert_evaluation(conn, subject_title="X", analysis="judged", campaign_id=cid)
+    store.insert_evaluation(conn, subject_title="X", verdict="approve", summary="judged", findings=[], campaign_id=cid)
 
     c1 = store.get_campaign(conn, cid)
     assert c1["has_metrics"] is True
@@ -138,7 +138,7 @@ def test_bulk_import_metrics_title_match_excludes_superseded_campaigns(conn):
 
 def test_reconcile_evaluation_pulls_actual_metrics_automatically(conn):
     cid = store.insert_campaign(conn, title="X")
-    eid = store.insert_evaluation(conn, subject_title="X", analysis="predicted strong ROI",
+    eid = store.insert_evaluation(conn, subject_title="X", verdict="approve", summary="predicted strong ROI", findings=[],
                                   campaign_id=cid, predictions={"roi_range": [1.2, 1.6]})
     store.add_metrics(conn, cid, detail="actual ROI came in at 1.8", metric_type="actual")
 
@@ -149,7 +149,7 @@ def test_reconcile_evaluation_pulls_actual_metrics_automatically(conn):
 
 def test_reconcile_evaluation_explicit_actual_overrides_stored_metrics(conn):
     cid = store.insert_campaign(conn, title="X")
-    eid = store.insert_evaluation(conn, subject_title="X", analysis="predicted", campaign_id=cid)
+    eid = store.insert_evaluation(conn, subject_title="X", verdict="approve", summary="predicted", findings=[], campaign_id=cid)
     store.add_metrics(conn, cid, detail="stored actual", metric_type="actual")
 
     result = core.reconcile_evaluation(conn, evaluation_id=eid, actual="manually provided actual")
@@ -158,7 +158,7 @@ def test_reconcile_evaluation_explicit_actual_overrides_stored_metrics(conn):
 
 def test_reconcile_evaluation_errors_when_no_actual_available(conn):
     cid = store.insert_campaign(conn, title="X")
-    eid = store.insert_evaluation(conn, subject_title="X", analysis="predicted", campaign_id=cid)
+    eid = store.insert_evaluation(conn, subject_title="X", verdict="approve", summary="predicted", findings=[], campaign_id=cid)
 
     result = core.reconcile_evaluation(conn, evaluation_id=eid)
     assert "error" in result
@@ -169,7 +169,7 @@ def test_reconcile_evaluation_includes_structured_only_actuals(conn):
     freeform `detail` text — exactly what a workbook import produces) was silently dropped,
     leaving `actual` an empty string with no error, instead of surfacing the numbers."""
     cid = store.insert_campaign(conn, title="X")
-    eid = store.insert_evaluation(conn, subject_title="X", analysis="predicted", campaign_id=cid)
+    eid = store.insert_evaluation(conn, subject_title="X", verdict="approve", summary="predicted", findings=[], campaign_id=cid)
     store.add_metrics(conn, cid, structured={"ctr": 0.05, "roi": 1.8}, metric_type="actual")
 
     result = core.reconcile_evaluation(conn, evaluation_id=eid)
@@ -179,7 +179,7 @@ def test_reconcile_evaluation_includes_structured_only_actuals(conn):
 
 def test_reconcile_evaluation_ignores_predicted_metrics_when_auto_pulling(conn):
     cid = store.insert_campaign(conn, title="X")
-    eid = store.insert_evaluation(conn, subject_title="X", analysis="predicted", campaign_id=cid)
+    eid = store.insert_evaluation(conn, subject_title="X", verdict="approve", summary="predicted", findings=[], campaign_id=cid)
     store.add_metrics(conn, cid, detail="forecast only", metric_type="predicted")
 
     result = core.reconcile_evaluation(conn, evaluation_id=eid)

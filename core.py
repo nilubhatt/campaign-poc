@@ -289,6 +289,294 @@ class _WrongDimension(RuntimeError):
     """The embedder answered, but with vectors this library cannot store."""
 
 
+# The review's vocabulary, fixed at three values so counts are sortable and comparable
+# across evaluations - "critical/major/minor/nit" drifts per run and cannot be summed.
+_SEVERITIES = ("blocking", "should_fix", "note")
+_VERDICTS = ("approve", "revise", "reject")
+# Caps are the mechanism, not decoration: handed an unbounded string a model writes prose
+# into it, and the shape stops constraining anything. The long version has its own field.
+# What KIND of problem this is, which severity cannot express: severity says how much it
+# matters, not whether it is arguable. A guardrail breach cites the rulebook and is not
+# debatable; a departure from precedent cites a campaign and invites a rationale — the UAE
+# claw machine was a departure that turned out better than the precedent. (§6.2 gives these
+# their different vocabulary; the field is defined here so that item does not have to
+# migrate every stored judgment.)
+_KINDS = ("guardrail_breach", "precedent_departure", "missing_information",
+          "internal_contradiction")
+# Whether a finding came from code or from judgment (§7.8). Computed findings should be
+# identical for every user and a difference there is a bug; judged ones carry the evidence
+# behind them. Defaults to "judged": anything the model asserted is a judgment unless the
+# server itself worked it out, and defaulting the other way would let an opinion inherit the
+# authority of a mechanical check.
+_BASES = ("computed", "judged")
+_MAX_SUMMARY = 240
+_MAX_FINDING = 120
+_MAX_FIX = 120
+# Capping the headline and leaving its neighbours unbounded moves the essay rather than
+# preventing it — 900 words fits comfortably as six findings with a 150-word `detail`, and
+# the marketer is no better off. Every field a model can write into is bounded; `detail` is
+# the long form, so it gets a paragraph rather than a line.
+_MAX_DETAIL = 600
+_MAX_QUOTE = 300          # longer than this is not a quote
+_MAX_CATEGORY = 40        # an enum in waiting
+_MAX_APPROVE_IF = 240     # it is a second summary
+_MAX_RESOLVED = 120
+# ...and quantity cannot substitute for length: thirty capped findings is an essay built
+# out of bricks.
+_MAX_FINDINGS = 12
+
+
+def _bounded(value, field: str, limit: int, *, where: str = "") -> Optional[str]:
+    """One measuring rule for every capped field. `finding` used to be measured after
+    stripping and `summary` before it, so trailing whitespace was fatal in one and free in
+    the other."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{where}{field} must be text, got {type(value).__name__}")
+    text = value.strip()
+    if len(text) > limit:
+        raise ValueError(f"{where}{field} is {len(text)} characters; the limit is {limit}."
+                         + (" Put the explanation in 'detail'." if limit <= 120 else ""))
+    return text or None
+
+
+def _category(value, where: str) -> Optional[str]:
+    """Lower-cased so it can be counted: "Timeline", "timeline " and "timeline" are one
+    category, and a field meant to be grouped by cannot be case-sensitive."""
+    text = _bounded(value, "'category'", _MAX_CATEGORY, where=where)
+    return text.lower() if text else None
+
+
+def _clean_precedent(value, where: str) -> Optional[dict]:
+    """A finding cites either a campaign that did it differently or a rule it breached.
+    Before this there was only `id`, meaning a campaign — so a guardrail breach, which is
+    anchored to the rulebook rather than to any campaign, had nowhere to cite the thing it
+    breached (§12 writes the rules; the slot is defined here so it does not migrate)."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{where}precedent must be an object with a quote and either a "
+                         f"campaign_id or a rule_id, got {type(value).__name__}")
+    campaign_id = value.get("campaign_id") or value.get("id")
+    rule_id = value.get("rule_id")
+    if not campaign_id and not rule_id:
+        raise ValueError(f"{where}precedent must name what it cites — a campaign_id for a "
+                         f"departure from precedent, or a rule_id for a guardrail breach")
+    quote = _bounded(value.get("quote"), "precedent.quote", _MAX_QUOTE, where=where)
+    cleaned = {"quote": quote}
+    if campaign_id:
+        cleaned["campaign_id"] = campaign_id
+    if rule_id:
+        cleaned["rule_id"] = rule_id
+    return cleaned
+
+
+def _clean_resolved(value) -> list:
+    """`[{was, now}]` was accepted as literally anything — a bare string, a number, a dict
+    of unrelated keys — so the one field that records whether the library's own advice was
+    taken could hold something nothing could read back."""
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"resolved must be a list of {{was, now}} items, got "
+                         f"{type(value).__name__}")
+    cleaned = []
+    for i, item in enumerate(value):
+        where = f"resolved {i}: "
+        if not isinstance(item, dict):
+            raise ValueError(f"{where}must be an object with 'was' and 'now', got "
+                             f"{type(item).__name__}")
+        was = _bounded(item.get("was"), "'was'", _MAX_RESOLVED, where=where)
+        now = _bounded(item.get("now"), "'now'", _MAX_RESOLVED, where=where)
+        if not was or not now:
+            raise ValueError(f"{where}needs both 'was' (what the earlier evaluation asked "
+                             f"for) and 'now' (what changed)")
+        entry = {"was": was, "now": now}
+        # §5.4 and §6.3 both need "this specific earlier finding is now addressed", and
+        # free text cannot be joined back to one.
+        if item.get("finding_id"):
+            entry["finding_id"] = item["finding_id"]
+        cleaned.append(entry)
+    return cleaned
+
+
+def get_evaluation(conn, *, evaluation_id: str, severity: Optional[str] = None,
+                   kind: Optional[str] = None) -> dict:
+    """Read a stored judgment back, optionally narrowed to one severity or kind.
+
+    "The detail is fetched on demand" was true of the storage and false of the surface:
+    there was no read path at all, so "show me the blocking items" worked only while the
+    findings were still in the context window that produced them. The next session, another
+    person, and any later comparison had no way to reach them."""
+    ev = store.get_evaluation(conn, evaluation_id)
+    if not ev:
+        return {"error": f"evaluation {evaluation_id} not found"}
+    findings = ev.get("findings") or []
+    if severity:
+        findings = [f for f in findings if f.get("severity") == severity]
+    if kind:
+        findings = [f for f in findings if f.get("kind") == kind]
+    return {
+        "evaluation_id": ev["id"],
+        "subject_title": ev["subject_title"],
+        "verdict": ev["verdict"],
+        "summary": ev["summary"],
+        "approve_if": ev.get("approve_if"),
+        "closest_precedent": ev.get("closest_precedent"),
+        "findings": findings,
+        "resolved": ev.get("resolved") or [],
+        # A judgment written before §2.4 has no verdict and no findings, only the essay.
+        # Returning it as an empty structured evaluation would be a confident answer built
+        # on a record silently dropped.
+        **({"original_analysis": ev["analysis"],
+            "schema": "legacy",
+            "note": "This judgment predates the structured schema, so it has no verdict or "
+                    "findings — only the original free text, returned as it was written."}
+           if ev.get("analysis") and not ev.get("verdict") else {}),
+    }
+
+
+def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
+                    findings: Optional[list] = None, resolved: Optional[list] = None,
+                    closest_precedent: Optional[dict] = None,
+                    approve_if: Optional[str] = None, evidence: Optional[dict] = None,
+                    provenance: Optional[dict] = None,
+                    campaign_id: Optional[str] = None, cited_ids: Optional[list] = None,
+                    predictions: Optional[dict] = None, trusted: bool = False) -> dict:
+    """Record a judgment as structured findings rather than an essay (defect 07).
+
+    The review's diagnosis was a data-model one, not a prompting one: handed a single
+    free-text field a model writes prose into it, so severity, precedent and fix all
+    dissolve into one block that nothing downstream can sort, filter, count or collapse.
+    Two real evaluations came back at 700 and 900 words — correct, well-sourced, and far
+    more than a marketer reads before deciding what to do.
+
+    Validation is server-side on purpose (consistency idea 3): rejecting a write that
+    exceeds the caps costs a retry, while accepting it is permanent drift, and the caps are
+    what stop the short fields growing back into paragraphs.
+
+    `trusted` is for the server's own findings (§7.1), which are the only ones allowed to
+    claim they were computed. It is never set from the MCP surface."""
+    findings = [] if findings is None else findings
+    if isinstance(findings, dict) or not isinstance(findings, (list, tuple)):
+        raise ValueError(f"findings must be a list of findings, got "
+                         f"{type(findings).__name__}")
+    if len(findings) > _MAX_FINDINGS:
+        raise ValueError(f"{len(findings)} findings; the limit is {_MAX_FINDINGS}. Merge "
+                         f"the related ones — a list this long is an essay in fragments.")
+    if verdict not in _VERDICTS:
+        raise ValueError(f"verdict must be one of {list(_VERDICTS)}, got {verdict!r}")
+    summary = _bounded(summary, "summary", _MAX_SUMMARY)
+    if not summary:
+        raise ValueError("summary is required — one line a person can act on")
+    approve_if = _bounded(approve_if, "approve_if", _MAX_APPROVE_IF)
+    resolved = _clean_resolved(resolved)
+
+    cleaned = []
+    for i, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            raise ValueError(f"finding {i} must be an object, got {type(finding).__name__}")
+        severity = finding.get("severity")
+        if severity not in _SEVERITIES:
+            raise ValueError(f"finding {i}: severity must be one of {list(_SEVERITIES)}, "
+                             f"got {severity!r}")
+        where = f"finding {i}: "
+        text = _bounded(finding.get("finding"), "'finding'", _MAX_FINDING, where=where)
+        if not text:
+            raise ValueError(f"{where}'finding' is required — one line naming the problem")
+        kind = finding.get("kind")
+        if kind is not None and kind not in _KINDS:
+            raise ValueError(f"{where}kind must be one of {list(_KINDS)}, got {kind!r}")
+        # A rule either applies or it does not. "You broke a rule, but never mind" is the
+        # shape of a finding written to avoid an argument.
+        if kind == "guardrail_breach" and severity == "note":
+            raise ValueError(f"{where}a guardrail_breach cannot be a note — if the rule "
+                             f"applies the finding is blocking, and if it does not apply "
+                             f"this is not a guardrail breach")
+        basis = finding.get("basis") or "judged"
+        if basis not in _BASES:
+            raise ValueError(f"{where}basis must be one of {list(_BASES)}, got {basis!r}")
+        # §7.8 rests on "a computed finding is identical for every user, so a difference
+        # there is a bug" — which only holds if the SERVER computed it. A model that read a
+        # missing date did not compute it, and letting it say so would let an opinion
+        # inherit the authority of a mechanical check.
+        if basis == "computed" and not trusted:
+            raise ValueError(f"{where}only the server sets basis 'computed'; a finding you "
+                             f"reached yourself is 'judged', however certain it is")
+        cleaned.append({
+            "severity": severity,
+            "kind": kind,
+            "basis": basis,
+            "category": _category(finding.get("category"), where),
+            "finding": text,
+            "detail": _bounded(finding.get("detail"), "'detail'", _MAX_DETAIL, where=where),
+            "precedent": _clean_precedent(finding.get("precedent"), where),
+            "fix": _bounded(finding.get("fix"), "'fix'", _MAX_FIX, where=where),
+        })
+
+    counts = {level: sum(1 for f in cleaned if f["severity"] == level)
+              for level in _SEVERITIES}
+
+    # Internal consistency the prose version could not enforce, because nothing could count
+    # the findings: a "revise" with nothing to revise is a hedge, and an "approve" carrying
+    # a blocking finding contradicts itself.
+    # Three notes satisfied the original rule, which is the same hedge one level down.
+    if verdict in ("revise", "reject") and not (counts["blocking"] or counts["should_fix"]):
+        raise ValueError(f"a verdict of {verdict!r} needs at least one finding above a "
+                         f"note saying what has to change — notes alone are an approve "
+                         f"with reservations")
+    # The old wording ("either the verdict is 'revise' or the finding is not blocking")
+    # offered both exits as equals, and one of them is a single token while the other means
+    # rewriting the summary. A validation error is a retry only while the honest path is
+    # the one it points at.
+    if verdict == "approve" and counts["blocking"]:
+        raise ValueError(f"cannot approve with {counts['blocking']} blocking finding(s): if "
+                         f"the brief genuinely cannot proceed as written the verdict is "
+                         f"'revise'. Do not lower the severity to make the write succeed.")
+
+    # Most severe first, always: the order is part of the contract, so two evaluations of
+    # the same brief can be compared without re-reading them. The sort is stable, so two
+    # findings of equal severity keep the order they were written in — a model that ordered
+    # them deliberately is not second-guessed.
+    cleaned.sort(key=lambda f: _SEVERITIES.index(f["severity"]))
+
+    # Identify the findings so a later version can say which one it closed, and so two
+    # evaluations of the same brief can be compared by reference rather than by string
+    # match. Assigned after the sort, so an id also reads as a position.
+    eid = store.next_evaluation_id()
+    for n, finding in enumerate(cleaned, start=1):
+        finding["id"] = f"{eid}#{n}"
+
+    store.insert_evaluation(
+        conn, evaluation_id=eid, subject_title=subject_title, verdict=verdict, summary=summary,
+        findings=cleaned, resolved=resolved, closest_precedent=closest_precedent,
+        approve_if=approve_if, evidence=evidence, provenance=provenance,
+        campaign_id=campaign_id, cited_ids=cited_ids, predictions=predictions)
+
+    # The fixed default shape the review asked for: verdict, closest precedent, counts by
+    # severity and the one-line ask. The findings themselves are a follow-up question,
+    # answered from the same record without re-reasoning.
+    # Hand back what has to change, not an instruction to go and ask for it. A `note`
+    # telling Claude to offer the findings competes with the request the user actually made
+    # and loses — models mirror the shape of a tool result far more reliably than they
+    # follow instructions inside one — and it costs the marketer a round trip to learn what
+    # the tool already knows. The caps make this bounded by construction: at most twelve
+    # findings of a capped line and a capped fix, with `detail` still fetched on demand.
+    return {
+        "evaluation_id": eid,
+        "verdict": verdict,
+        "summary": summary,
+        "counts": counts,
+        "closest_precedent": closest_precedent,
+        "findings": [{k: f[k] for k in ("id", "severity", "kind", "finding", "fix")}
+                     for f in cleaned if f["severity"] in ("blocking", "should_fix")],
+        "approve_if": approve_if,
+        "note": "Give the user the verdict, the one-line summary and what has to change. "
+                "The reasoning behind any finding is in get_evaluation, not here.",
+    }
+
+
 def health_check_cli() -> dict:
     """health_check for a terminal or an installer, opening the database READ-ONLY.
 
@@ -802,7 +1090,7 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
     Package the evidence Claude needs to judge a new proposal: the most similar prior
     campaigns WITH their outcomes. full_detail defaults to True here (unlike find_similar) —
     an actual judgment over a short evidence list shouldn't be working from trimmed briefs.
-    Claude reads this, produces its analysis citing specific
+    Claude reads this, works out its findings citing specific
     priors, then calls save_evaluation. This tool does NOT itself judge. Optionally narrow
     to structured criteria first (§6.2), e.g. region="APAC" to only weigh APAC precedent.
     Pass a {"value": ..., "source": "verified"} tag to weigh only precedent whose matching
@@ -818,9 +1106,15 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
         "evidence_count": len(evidence),
         "evidence": evidence,
         "note": (
-            "Reason over this evidence and produce your judgment: predicted CTR/ROI ranges, "
-            "risks, and proceed/revise/reject — CITING specific campaign_ids above. "
-            "Weight concluded campaigns (those with metrics) most. Then call save_evaluation."
+            # The vocabulary here has to be the vocabulary save_evaluation accepts. This
+            # said "proceed/revise/reject" while the enum takes "approve" — so the prompt
+            # that shapes the judgment taught a word the next tool rejects.
+            "Reason over this evidence, then call save_evaluation with a verdict "
+            "(approve / revise / reject), a one-line summary, and one short finding per "
+            "problem — each with its severity, its kind, and a quote from the campaign or "
+            "rule it is anchored to, CITING specific campaign_ids above. Predicted CTR/ROI "
+            "ranges go in `predictions`. Weight concluded campaigns (those with metrics) "
+            "most."
         ),
         "campaigns_with_outcomes": [e["campaign_id"] for e in concluded],
     }
@@ -860,14 +1154,29 @@ def reconcile_evaluation(conn, *, evaluation_id: str, actual: Optional[str] = No
             return {"error": "actual metrics on file for this campaign have no readable "
                               "detail or structured data"}
 
+    # A judgment written before §2.4 has only the essay: no verdict, no findings. Returning
+    # it as an empty structured evaluation meant reconciling against an original the code
+    # had silently dropped - a confident comparison with nothing on one side of it.
+    legacy = bool(ev.get("analysis")) and not ev.get("verdict")
+
     return {
         "evaluation_id": ev["id"],
         "subject_title": ev["subject_title"],
-        "original_analysis": ev["analysis"],
-        "predictions": json.loads(ev["predictions"]) if ev["predictions"] else None,
-        "cited_ids": json.loads(ev["cited_ids"]) if ev["cited_ids"] else [],
+        "original_verdict": ev["verdict"],
+        "original_summary": ev["summary"],
+        "original_findings": ev["findings"],
+        **({"original_analysis": ev["analysis"], "schema": "legacy"} if legacy else {}),
+        # Already decoded by store._parse_evaluation - decoding again would be parsing a
+        # dict as JSON.
+        "predictions": ev["predictions"],
+        "cited_ids": ev["cited_ids"],
         "actual": actual,
-        "note": "Compare predictions to actual, then call save_reconciliation with the lesson.",
+        "note": ("This judgment predates the structured schema, so there is no verdict or "
+                 "findings to compare against — only `original_analysis`, the free text as "
+                 "it was written. Read it before comparing."
+                 if legacy else
+                 "Compare the original findings and predictions to actual, then call "
+                 "save_reconciliation with the lesson."),
     }
 
 

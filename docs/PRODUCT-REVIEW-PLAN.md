@@ -314,10 +314,58 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       Ollama and no database, where a full health check would fail on text search; the two
       answer different questions.
 
-- [ ] **2.4 Structured findings array replaces free-text `analysis`** (defect 07). verdict,
+- [x] **2.4 Structured findings array replaces free-text `analysis`** (defect 07). verdict,
       summary (≤240), closest_precedent, findings[] (severity enum ×3, category, finding
       ≤120, detail, precedent{id,quote}, fix ≤120), resolved[]. Caps and enums enforced
       server-side. Clean cutover.
+      **Done:** a judgment is now `verdict` + `summary` + `findings[]`, with every field a
+      model can write into bounded — `summary` 240, `finding` 120, `fix` 120, `detail` 600,
+      `precedent.quote` 300, `approve_if` 240, `resolved.was/now` 120, `category` 40
+      (lower-cased so it can be grouped), and at most 12 findings, because thirty capped
+      lines is an essay built out of bricks. Three consistency rules the prose version could
+      not enforce, since nothing could count the findings: `revise`/`reject` needs a finding
+      above a note (three notes was the same hedge one level down), `approve` cannot carry a
+      blocking one, and a `guardrail_breach` cannot be a note. Findings sort most-severe-
+      first and the sort is stable, so deliberate ordering within a severity survives; each
+      carries an id (`{evaluation_id}#n`) so a later version can say which finding it closed.
+      `get_evaluation(evaluation_id, severity=, kind=)` is a new tool — "the detail is
+      fetched on demand" had been true of the storage and false of the surface, so "show me
+      the blocking items" worked only inside the session that produced them. The save
+      response hands back the blocking and should_fix lines themselves rather than a note
+      telling Claude to go and offer them, which competed with the user's actual request and
+      cost a round trip. `list_evaluations` carries verdict and counts, so "which of these
+      still need work" is answerable from the list.
+      **Fields defined here, behaviour owned elsewhere:** `kind` (6.2), `approve_if` (6.5),
+      `evidence` (6.6), `provenance` (7.6), `basis` (7.8). This schema had no callers, so
+      the columns were free today and a migration of every stored judgment later. `basis`,
+      `evidence` and `provenance` are *not* writable from the MCP surface: 7.8's premise —
+      a computed finding is identical for every user, so a difference is a bug — holds only
+      if the **server** computed it, and a model that read a missing date did not compute
+      it. `precedent` takes `campaign_id` **or** `rule_id`, because a guardrail breach cites
+      the rulebook (§12) and had nowhere to cite it.
+      **The blocker both reviewers reproduced independently:** the cutover was fine on a
+      fresh database and impossible on a real one. `ALTER TABLE ADD COLUMN` cannot relax the
+      legacy `analysis TEXT NOT NULL`, so after migrating, every save died on an
+      `IntegrityError` — which is not a `ValueError`, so it reached the marketer as "Error
+      executing tool save_evaluation" with the reason discarded. Invisible to all 419 tests
+      because every one of them starts from a fresh schema. `_migrate_schema` now rebuilds
+      the table (taking the target DDL from a scratch database built by `_SCHEMA` itself, so
+      the rebuilt table is by construction the one a fresh install gets), carrying the
+      existing essays across: they are the evidence for defect 07. A pre-cutover judgment
+      reads back as `original_analysis` + `schema: "legacy"` through both `get_evaluation`
+      and `reconcile_evaluation`, which had been reconciling against an original it had
+      silently dropped.
+      **Also from review:** `"proceed/revise/reject"` in `prepare_evaluation`'s note taught
+      a word the verdict enum rejects; caps were measured after stripping in one field and
+      before it in another; a non-string `finding` escaped as an `AttributeError`; a dict
+      passed as `findings` was iterated as keys and blamed the wrong thing; the approve-with-
+      blocking message offered "or lower the severity" as an equal exit, which is one token
+      against rewriting the summary.
+      **Not done here, named so it is not assumed:** the quote is bounded but not *checked
+      against what was retrieved* (6.1, which needs 7.2's server-owned retrieval first —
+      `prepare_evaluation` is stateless, so the server cannot today tell a real quote from a
+      plausible one); `closest_precedent`, `evidence` and `provenance` are still whatever the
+      caller passes (7.2/7.6); `findings` has no per-evaluation golden set yet (7.7).
 - [ ] **2.5 Commentary layer: comments, annotations, speaker notes** (defect 08). PDF
       `/Annots` (Text/FreeText/Highlight/StrikeOut/Underline/Square/Caret/Ink) with
       `/Contents`, `/T`, `/M`, page index; PPTX `notesSlide` + `ppt/comments/` +
@@ -376,13 +424,22 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 *Depends on 2.4.*
 
 - [ ] **6.1 (G) `precedent.quote` required** on every finding, drawn from the retrieved chunk.
+      *Re-sequenced after review: 2.4 bounds the quote and requires a `campaign_id`/`rule_id`,
+      but "drawn from the retrieved chunk" cannot be enforced while `prepare_evaluation` is
+      stateless — the server does not retain what it returned. Needs 7.2 first, or a receipt
+      id from `prepare_evaluation` that `save_evaluation` requires. 7.3 is otherwise
+      subsumed by 2.4; what remains of it is this.*
 - [ ] **6.2 (H) Guardrail breach vs departure from precedent** — two classes, different
-      vocabulary, only one is debatable.
+      vocabulary, only one is debatable. *2.4 defined `kind` and the rule that a guardrail
+      breach cannot be a note; what remains is making `kind` required, requiring a `rule_id`
+      citation on a breach, and giving the two classes genuinely different wording.*
 - [ ] **6.3 (I) Close the prediction loop** — when a superseding record arrives, surface the
       prior evaluation's predictions and ask which held.
 - [ ] **6.4 (J) Disconfirming search required** before a verdict is saved; record what came
       back, including "nothing".
 - [ ] **6.5 (K) `approve_if`** — the testable exit condition that converts revise → approve.
+      *2.4 defined and bounded the field; what remains is requiring it on a revise, forbidding
+      it on an approve, and requiring a `fix` on every blocking/should_fix finding.*
 - [ ] **6.6 (L) Evidence-strength line** on every judgment — how many precedents, concluded,
       verified; top similarity; whether one match dominates.
 
@@ -397,8 +454,9 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 - [ ] **7.2 Server owns the retrieval query.** Derive from the subject record/file, not
       model-authored `proposal_text`; derive filters from the subject's attributes; pin
       `top_k`; stable deterministic tie-breaking; record embedding-model version per vector.
-- [ ] **7.3 Enforce the output shape server-side** — reject writes missing a precedent quote
-      or exceeding caps, rather than accepting and hoping.
+- [x] **7.3 Enforce the output shape server-side** — reject writes missing a precedent quote
+      or exceeding caps, rather than accepting and hoping. *Done by 2.4, except the "missing
+      a precedent quote" half, which is 6.1 and depends on 7.2.*
 - [ ] **7.4 Tool descriptions as the shared prompt** — the evaluation procedure into
       `prepare_evaluation`'s description; set the MCP server-level `instructions` field.
 - [ ] **7.5 Ship the procedure with the evidence** — `prepare_evaluation`'s `note` carries

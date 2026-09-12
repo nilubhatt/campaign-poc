@@ -69,6 +69,43 @@ class TagObject(TypedDict):
 
 TagInput = Union[str, TagObject]
 
+# The evaluation vocabulary, in the schema rather than only in prose — a typo becomes a
+# validation error the model can retry, instead of a value that quietly means nothing.
+Verdict = Literal["approve", "revise", "reject"]
+Severity = Literal["blocking", "should_fix", "note"]
+# Severity says how much a finding matters; KIND says whether it is arguable at all. A
+# guardrail breach cites the rulebook and is not open to debate; a departure from precedent
+# cites a campaign and invites a rationale — one real departure turned out better than the
+# precedent it departed from.
+FindingKind = Literal["guardrail_breach", "precedent_departure", "missing_information",
+                      "internal_contradiction"]
+# Whether the server worked this out or the model judged it (§7.8). Only "judged" is
+# writable here: the premise that a computed finding is identical for every user, so a
+# difference is a bug, holds only if the SERVER computed it. §7.1 stamps the other one.
+Basis = Literal["judged"]
+
+
+class Precedent(TypedDict):
+    """What a finding is anchored to: a campaign that did it differently, or a rule it
+    breached. `quote` is text from the retrieved chunk, not written fresh — a finding that
+    cannot quote its source is a judgment call, not a citation."""
+    quote: NotRequired[str]           # <= 300 chars; longer than that is not a quote
+    campaign_id: NotRequired[str]     # for a departure from precedent
+    rule_id: NotRequired[str]         # for a guardrail breach — a rule, not a campaign
+
+
+class Finding(TypedDict):
+    """One problem. The short fields are capped server-side so they cannot grow back into
+    the paragraph this shape exists to replace."""
+    severity: Severity
+    finding: str                      # <= 120 chars, names the problem
+    kind: NotRequired[FindingKind]    # is it a rule broken, or a precedent departed from?
+    basis: NotRequired[Basis]         # computed by the server, or judged (default: judged)
+    category: NotRequired[str]        # timeline | influencer | compliance | budget | ...
+    detail: NotRequired[str]          # the paragraph, read on demand
+    precedent: NotRequired[Precedent]
+    fix: NotRequired[str]             # <= 120 chars, what to change
+
 
 @mcp.tool()
 @_catch_value_errors
@@ -488,9 +525,10 @@ def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
     weight in your judgment than one with real numbers. Read the evidence's tags for each
     match's source either way before treating a performance tag as fact.
 
-    Read it, then produce your judgment (predicted CTR/ROI ranges, risks,
-    proceed/revise/reject) CITING specific campaign_ids, and call save_evaluation. This tool
-    gathers evidence; the judgment is yours."""
+    Read it, then call save_evaluation with a verdict (approve / revise / reject), a
+    one-line summary and one short finding per problem, CITING specific campaign_ids.
+    Predicted CTR/ROI ranges go in `predictions`. This tool gathers evidence; the judgment
+    is yours."""
     conn = store.connect()
     try:
         return core.prepare_evaluation(conn, subject_title=subject_title,
@@ -505,17 +543,86 @@ def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
 
 @mcp.tool()
 @_catch_value_errors
-def save_evaluation(subject_title: str, analysis: str, cited_ids: Optional[list] = None,
-                    predictions: Optional[dict] = None, campaign_id: Optional[str] = None) -> dict:
-    """Persist your judgment of a campaign so it becomes memory. Include the specific
-    campaign_ids you cited and, if given, structured predictions — so a later
-    reconcile_evaluation can score prediction vs. actual. Returns the evaluation_id."""
+def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
+                    findings: Optional[list[Finding]] = None,
+                    resolved: Optional[list[dict]] = None,
+                    closest_precedent: Optional[dict] = None,
+                    approve_if: Optional[str] = None,
+                    cited_ids: Optional[list] = None,
+                    predictions: Optional[dict] = None,
+                    campaign_id: Optional[str] = None) -> dict:
+    """Persist your judgment as structured findings, not prose.
+
+    Write ONE finding per problem. Each is a short line naming the problem (<=120 chars),
+    with the explanation in `detail` where a reader can open it if they want it — not a
+    paragraph in `finding`. `summary` is <=240 chars: the one line a marketer acts on.
+
+    `severity` says what the finding does to the verdict, so counts mean the same thing in
+    every evaluation:
+      • `blocking`   — this alone means the brief cannot proceed as written.
+      • `should_fix` — proceeding is defensible, but it will cost something.
+      • `note`       — worth saying once; nobody has to act.
+    A `revise` or `reject` needs at least one finding above a note, and you cannot `approve`
+    while recording a blocking one. Both are rejected rather than saved — and the honest fix
+    for the second is the verdict, never a quieter severity.
+
+    `kind` says whether the finding is arguable at all, which severity cannot express:
+      • `guardrail_breach`      — a rule was broken. Cite it: `precedent: {rule_id, quote}`.
+        Not debatable, so never a `note`.
+      • `precedent_departure`   — done differently from a campaign that worked. Cite it:
+        `precedent: {campaign_id, quote}`. A departure can be an improvement; say so.
+      • `missing_information`   — the brief does not say.
+      • `internal_contradiction`— the brief contradicts itself.
+
+    Anchor findings to evidence: `quote` is text from the retrieved chunk, not written
+    fresh. A finding that cannot quote its source is a judgment call and reads as one.
+
+    A worked finding:
+      {"severity": "blocking", "kind": "missing_information", "category": "timeline",
+       "finding": "No posting dates on any deliverable",
+       "detail": "All 14 assets in the flighting table are undated, so nothing can be
+                  sequenced or held to the embargo.",
+       "precedent": {"campaign_id": "camp_jdsea",
+                     "quote": "content angle, posting date and requirements per asset"},
+       "fix": "Add a posting date per asset to the flighting table"}
+
+    `approve_if` is what would flip a `revise` to `approve`, stated so someone could check
+    it: "dates on every deliverable and the two conflicted profiles removed". It doubles as
+    the note the partner receives.
+
+    `resolved` is for a later version of a brief: `[{was, now}]` records what an earlier
+    evaluation asked for and what changed — that is how the library learns whether its own
+    advice was taken.
+
+    At most 12 findings. The response gives back the verdict, the summary, the counts, and
+    the blocking and should_fix lines themselves — give the user those. The reasoning behind
+    any finding is in `get_evaluation`, which also filters by severity or kind."""
     conn = store.connect()
     try:
-        eid = store.insert_evaluation(conn, subject_title=subject_title, analysis=analysis,
-                                      campaign_id=campaign_id, cited_ids=cited_ids,
-                                      predictions=predictions)
-        return {"evaluation_id": eid, "status": "saved"}
+        return core.save_evaluation(
+            conn, subject_title=subject_title, verdict=verdict, summary=summary,
+            findings=findings, resolved=resolved, closest_precedent=closest_precedent,
+            approve_if=approve_if, campaign_id=campaign_id, cited_ids=cited_ids,
+            predictions=predictions)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def get_evaluation(evaluation_id: str, severity: Optional[Severity] = None,
+                   kind: Optional[FindingKind] = None) -> dict:
+    """Read a stored judgment back in full, with the reasoning `save_evaluation` left out.
+
+    This is where "show me the blocking items" is answered — including in a session that did
+    not produce the evaluation. Narrow with `severity` ("blocking") or `kind`
+    ("guardrail_breach") rather than fetching everything and filtering in the reply.
+
+    Find the id with list_evaluations if the user names the judgment rather than its id."""
+    conn = store.connect()
+    try:
+        return core.get_evaluation(conn, evaluation_id=evaluation_id, severity=severity,
+                                   kind=kind)
     finally:
         conn.close()
 
@@ -523,9 +630,11 @@ def save_evaluation(subject_title: str, analysis: str, cited_ids: Optional[list]
 @mcp.tool()
 @_catch_value_errors
 def list_evaluations() -> dict:
-    """List past evaluations (id, campaign_id, subject_title, created_at) — use this to find
-    an evaluation_id when the user refers to a judgment by name rather than id (e.g.
-    "reconcile the APAC campaign evaluation") before calling reconcile_evaluation."""
+    """List past evaluations — id, campaign_id, subject_title, verdict, counts by severity,
+    created_at. The verdict and counts are there so "which of these still need work" can be
+    answered from the list itself. Use it to find an evaluation_id when the user refers to a
+    judgment by name rather than id (e.g. "reconcile the APAC campaign evaluation"), then
+    call get_evaluation for the findings or reconcile_evaluation to close the loop."""
     conn = store.connect()
     try:
         rows = store.list_evaluations(conn)
@@ -539,9 +648,10 @@ def list_evaluations() -> dict:
 def reconcile_evaluation(evaluation_id: str, actual: Optional[str] = None) -> dict:
     """Start closing the loop on a past judgment. If actual metrics are already on file for
     this campaign (via add_metrics/bulk_import_metrics), they're pulled automatically —
-    otherwise pass actual= with the real post-campaign metrics yourself. Returns your
-    original analysis + predictions alongside the actuals. Compare them, then call
-    save_reconciliation with the lesson."""
+    otherwise pass actual= with the real post-campaign metrics yourself. Returns the
+    original verdict, summary and findings (or, for a judgment written before the structured
+    schema, `original_analysis` — the free text as it was written) alongside the actuals.
+    Compare them, then call save_reconciliation with the lesson."""
     conn = store.connect()
     try:
         return core.reconcile_evaluation(conn, evaluation_id=evaluation_id, actual=actual)

@@ -97,7 +97,7 @@ def test_add_metrics_stores_freeform_and_structured(conn):
 
 def test_evaluation_and_reconciliation_roundtrip(conn):
     cid = store.insert_campaign(conn, title="X")
-    eid = store.insert_evaluation(conn, subject_title="X proposal", analysis="looks strong",
+    eid = store.insert_evaluation(conn, subject_title="X proposal", verdict="approve", summary="looks strong", findings=[],
                                   campaign_id=cid, cited_ids=[cid],
                                   predictions={"roi_range": [1.1, 1.5]})
     ev = store.get_evaluation(conn, eid)

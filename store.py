@@ -85,7 +85,16 @@ CREATE TABLE IF NOT EXISTS evaluations (
     campaign_id   TEXT REFERENCES campaigns(id) ON DELETE SET NULL,  -- may be a not-yet-stored proposal
     subject_title TEXT NOT NULL,   -- what was evaluated
     cited_ids     TEXT,            -- JSON list of campaign ids Claude reasoned from
-    analysis      TEXT NOT NULL,   -- Claude's judgment (freeform)
+    verdict       TEXT,            -- approve | revise | reject
+    summary       TEXT,            -- one line a person can act on (<= 240 chars)
+    findings      TEXT,            -- JSON array: severity/category/finding/detail/precedent/fix
+    resolved      TEXT,            -- JSON array of {was, now} - what a later version fixed
+    closest_precedent TEXT,        -- JSON {id, similarity}
+    approve_if    TEXT,            -- the testable change that would flip revise -> approve (§6.5)
+    evidence      TEXT,            -- JSON: how much precedent this rests on (§6.6)
+    provenance    TEXT,            -- JSON: rulebook/model/server versions behind it (§7.6)
+    analysis      TEXT,            -- pre-§2.4 free-text judgment; never written any more,
+                                   -- kept so upgraded databases stay readable
     predictions   TEXT,            -- optional JSON {predicted_ctr_range, predicted_roi_range, recommendation, ...}
     created_at    REAL NOT NULL
 );
@@ -125,7 +134,56 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE campaigns ADD COLUMN collection TEXT")
     if "markets" not in existing:
         conn.execute("ALTER TABLE campaigns ADD COLUMN markets TEXT NOT NULL DEFAULT '[]'")
+    evaluation_columns = {r["name"]: r for r in
+                          conn.execute("PRAGMA table_info(evaluations)").fetchall()}
+    for column in ("verdict", "summary", "findings", "resolved", "closest_precedent",
+                   "approve_if", "evidence", "provenance"):
+        if column not in evaluation_columns:
+            conn.execute(f"ALTER TABLE evaluations ADD COLUMN {column} TEXT")
+    # The one migration ADD COLUMN cannot do. Before §2.4 a judgment was one required
+    # free-text `analysis`; it is now optional and structured, and SQLite has no way to
+    # relax a NOT NULL in place — so on every database that already existed, the added
+    # columns arrived and then every new save died on `NOT NULL constraint failed:
+    # evaluations.analysis`. IntegrityError is not ValueError, so the marketer saw
+    # "Error executing tool save_evaluation" with the reason discarded. Both reviewers
+    # reproduced it independently; it was invisible to the whole suite because every test
+    # starts from a fresh _SCHEMA. Rebuild copies the legacy essays across untouched —
+    # they are the record of what the library was told, and the evidence for defect 07.
+    legacy_analysis = evaluation_columns.get("analysis")
+    if legacy_analysis is not None and legacy_analysis["notnull"]:
+        _rebuild_evaluations(conn)
     conn.commit()
+
+
+def _rebuild_evaluations(conn: sqlite3.Connection) -> None:
+    """Copy → drop → rename, carrying every existing row. Foreign keys are deferred for the
+    swap so `reconciliations.evaluation_id` does not cascade the rows away with the table."""
+    columns = [r["name"] for r in conn.execute("PRAGMA table_info(evaluations)").fetchall()]
+    # Take the target DDL from a scratch database built by _SCHEMA itself rather than
+    # parsing _SCHEMA as text (splitting on ";" broke on a semicolon inside a column
+    # comment). This way the rebuilt table is by construction the same table a fresh
+    # install gets, which is the invariant that actually matters.
+    scratch = sqlite3.connect(":memory:")
+    scratch.executescript(_SCHEMA)
+    new_schema = scratch.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='evaluations'").fetchone()[0]
+    scratch.close()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("DROP TABLE IF EXISTS evaluations_rebuilt")
+        conn.execute(new_schema.replace("evaluations", "evaluations_rebuilt", 1))
+        kept = [c for c in columns if c in
+                {r["name"] for r in
+                 conn.execute("PRAGMA table_info(evaluations_rebuilt)").fetchall()}]
+        joined = ", ".join(kept)
+        conn.execute(f"INSERT INTO evaluations_rebuilt ({joined}) "
+                     f"SELECT {joined} FROM evaluations")
+        conn.execute("DROP TABLE evaluations")
+        conn.execute("ALTER TABLE evaluations_rebuilt RENAME TO evaluations")
+        conn.execute("CREATE INDEX IF NOT EXISTS evals_campaign_idx ON evaluations(campaign_id)")
+        conn.commit()
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
 
 
 def init_db() -> None:
@@ -893,24 +951,48 @@ def bulk_import_metrics(conn, rows: list[dict]) -> dict:
 
 # ── evaluations ──────────────────────────────────────────────────────────────
 
-def insert_evaluation(conn, *, subject_title, analysis, campaign_id=None,
+def next_evaluation_id() -> str:
+    """Allocated before the insert so the findings can carry ids derived from it."""
+    return _id("eval")
+
+
+def insert_evaluation(conn, *, subject_title, verdict, summary, findings,
+                      evaluation_id=None,
+                      resolved=None, closest_precedent=None, approve_if=None,
+                      evidence=None, provenance=None, campaign_id=None,
                       cited_ids=None, predictions=None) -> str:
-    eid = _id("eval")
+    eid = evaluation_id or _id("eval")
     conn.execute(
-        """INSERT INTO evaluations (id, campaign_id, subject_title, cited_ids, analysis,
-                                    predictions, created_at) VALUES (?,?,?,?,?,?,?)""",
-        (eid, campaign_id, subject_title, json.dumps(cited_ids or []), analysis,
+        """INSERT INTO evaluations (id, campaign_id, subject_title, cited_ids, verdict,
+                                    summary, findings, resolved, closest_precedent,
+                                    approve_if, evidence, provenance, predictions,
+                                    created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (eid, campaign_id, subject_title, json.dumps(cited_ids or []), verdict, summary,
+         json.dumps(findings), json.dumps(resolved or []),
+         json.dumps(closest_precedent) if closest_precedent else None, approve_if,
+         json.dumps(evidence) if evidence else None,
+         json.dumps(provenance) if provenance else None,
          json.dumps(predictions) if predictions is not None else None, _now()),
     )
     conn.commit()
     return eid
 
 
+def _parse_evaluation(row) -> dict:
+    d = dict(row)
+    for key, default in (("findings", []), ("resolved", []), ("cited_ids", [])):
+        d[key] = json.loads(d[key]) if d.get(key) else default
+    for key in ("closest_precedent", "predictions", "evidence", "provenance"):
+        d[key] = json.loads(d[key]) if d.get(key) else None
+    return d
+
+
 def get_evaluation(conn, evaluation_id: str) -> Optional[dict]:
     row = conn.execute("SELECT * FROM evaluations WHERE id = ?", (evaluation_id,)).fetchone()
     if not row:
         return None
-    d = dict(row)
+    d = _parse_evaluation(row)
     d["reconciliations"] = [dict(r) for r in conn.execute(
         "SELECT * FROM reconciliations WHERE evaluation_id = ? ORDER BY created_at", (evaluation_id,)
     ).fetchall()]
@@ -918,9 +1000,23 @@ def get_evaluation(conn, evaluation_id: str) -> Optional[dict]:
 
 
 def list_evaluations(conn) -> list[dict]:
-    return [dict(r) for r in conn.execute(
-        "SELECT id, campaign_id, subject_title, created_at FROM evaluations ORDER BY created_at DESC"
-    ).fetchall()]
+    """Titles and dates alone cannot answer "which of these still need work" — which is the
+    one question a list of judgments exists to answer. Counts come from the stored findings
+    rather than a second column, so they cannot drift from them."""
+    rows = []
+    for r in conn.execute("SELECT id, campaign_id, subject_title, verdict, findings, "
+                          "created_at FROM evaluations ORDER BY created_at DESC").fetchall():
+        d = dict(r)
+        raw = d.pop("findings")          # popped unconditionally: a conditional pop left
+        findings = json.loads(raw) if raw else []   # `findings: null` on every legacy row
+        d["counts"] = {level: sum(1 for f in findings if f.get("severity") == level)
+                       for level in ("blocking", "should_fix", "note")}
+        # A row with no verdict is a judgment written before the structured schema, not a
+        # broken one — say which, or a reader has to guess from a null.
+        if d["verdict"] is None:
+            d["schema"] = "legacy"
+        rows.append(d)
+    return rows
 
 
 # ── reconciliations ──────────────────────────────────────────────────────────
