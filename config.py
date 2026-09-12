@@ -114,6 +114,16 @@ MAX_EXTRACTED_IMAGES_PER_DECK = int(os.getenv("CAMPAIGN_POC_MAX_EXTRACTED_IMAGES
 MAX_ASSET_BYTES = int(os.getenv("CAMPAIGN_POC_MAX_ASSET_MB", "100")) * 1024 * 1024
 MAX_INLINE_BYTES = int(os.getenv("CAMPAIGN_POC_MAX_INLINE_MB", "10")) * 1024 * 1024
 
+# ── time budgets (defect 04: nothing may outlive the transport) ──────────────
+# MCP transports drop a tool call that takes too long — the reviewer saw "Device did not
+# respond within 60s", with the row already written and no way to tell what had finished.
+# A handler must therefore finish, or stop and explain, on its own terms rather than being
+# cut off. This is the ceiling a handler budgets against.
+TOOL_TIME_BUDGET_SECONDS = float(os.getenv("CAMPAIGN_POC_TOOL_BUDGET", "45"))
+# One embed call, bounded well under that ceiling: a handler embeds once per chunk, so a
+# per-call timeout equal to the ceiling (the old value) let a single deck block for minutes.
+EMBED_TIMEOUT_SECONDS = float(os.getenv("CAMPAIGN_POC_EMBED_TIMEOUT", "15"))
+
 # ── embeddings (semantic search) ─────────────────────────────────────────────
 # Anthropic has no embeddings API; a separate embedder powers similarity search.
 # Default is Ollama — LOCAL and FREE (run `ollama pull nomic-embed-text` once).
@@ -121,6 +131,10 @@ MAX_INLINE_BYTES = int(os.getenv("CAMPAIGN_POC_MAX_INLINE_MB", "10")) * 1024 * 1
 EMBED_PROVIDER = os.getenv("CAMPAIGN_POC_EMBED_PROVIDER", "ollama").lower()
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_EMBED_MODEL = os.getenv("CAMPAIGN_POC_OLLAMA_MODEL", "nomic-embed-text")
+# How long Ollama should keep the embedding model resident. Default "-1" = indefinitely:
+# the model is ~270MB and reloading it inside a tool call is precisely the first-use cost
+# that blows a transport ceiling.
+OLLAMA_KEEP_ALIVE = os.getenv("CAMPAIGN_POC_OLLAMA_KEEP_ALIVE", "-1")
 EMBED_DIM = int(os.getenv("CAMPAIGN_POC_EMBED_DIM", "768"))  # nomic-embed-text = 768
 VOYAGE_API_KEY = os.getenv("VOYAGE_API_KEY", "")
 VOYAGE_MODEL = os.getenv("CAMPAIGN_POC_VOYAGE_MODEL", "voyage-3.5")

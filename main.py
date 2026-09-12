@@ -41,6 +41,7 @@ def main() -> int:
     elif cmd == "stdio":
         import clip_embed
         import config
+        import embedding
         import store
         from mcp_server import mcp
         config.ensure_dirs()
@@ -51,6 +52,7 @@ def main() -> int:
         # product review hit. stdio_server.py (source checkouts) always did this; the frozen
         # binary's own entry point did not.
         clip_embed.warm_up()
+        embedding.warm_up()
         mcp.run(transport="stdio")
     elif cmd == "check-weights":
         # Exists so the build can verify the PACKAGED product rather than the source tree:

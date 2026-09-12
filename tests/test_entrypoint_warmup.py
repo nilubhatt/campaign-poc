@@ -26,6 +26,7 @@ def stub_runtime(monkeypatch):
     monkeypatch.setattr("config.ensure_dirs", lambda: calls.append("ensure_dirs"))
     monkeypatch.setattr("store.init_db", lambda: calls.append("init_db"))
     monkeypatch.setattr("clip_embed.warm_up", lambda: calls.append("warm_up"))
+    monkeypatch.setattr("embedding.warm_up", lambda: calls.append("embed_warm_up"))
 
     fake_mcp = types.SimpleNamespace(run=lambda transport=None: calls.append(f"run:{transport}"))
     monkeypatch.setattr("mcp_server.mcp", fake_mcp)
@@ -44,6 +45,11 @@ def test_stdio_subcommand_warms_the_model_before_serving(monkeypatch, stub_runti
     assert stub_runtime.index("warm_up") < stub_runtime.index("run:stdio"), (
         "warm-up has to finish before the transport starts accepting tool calls"
     )
+    # Both models, not just the vision one: the text embedder unloads after Ollama's idle
+    # window, so without this the first chunk of every upload pays the reload inside a
+    # handler - the same defect, one model over.
+    assert "embed_warm_up" in stub_runtime
+    assert stub_runtime.index("embed_warm_up") < stub_runtime.index("run:stdio")
 
 
 def test_stdio_subcommand_still_initialises_dirs_and_db(monkeypatch, stub_runtime):

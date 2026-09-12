@@ -174,10 +174,45 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 
 ## Phase 2 — P1 defects
 
-- [ ] **2.1 No first-use init or network I/O inside a tool handler** (defect 04). `warm_up()`
-      exists but the reviewer still hit a 60s transport timeout inside `upload_image_asset` —
-      audit **every** handler for lazy initialisation, bound any residual network call well
-      under the transport ceiling, fail fast with a typed error.
+- [x] **2.1 No first-use init or network I/O inside a tool handler** (defect 04). The
+      review asked for a sweep — "a pattern, not a single site" — and the sweep found two
+      sites worse than the one the reviewer hit.
+      **`embedding.embed()` had `timeout=60`, equal to the entire transport ceiling**, and
+      `ingest_campaign` calls it once per chunk: a twelve-chunk deck against a stalled
+      Ollama could block for twelve minutes inside one call while the client gave up at
+      sixty seconds — the reported symptom exactly (timeout + half-written row + no way to
+      tell which half). Now `EMBED_TIMEOUT_SECONDS` (15s), and each call is granted only the
+      budget actually remaining, because checking a deadline at the top of a loop bounds
+      when work *starts*, not when it *ends*: the first defaults came to 45 + 15 = 60, i.e.
+      a budget that could still be cut off, which is no budget.
+      **The text embedder was never warmed at all.** CLIP was warmed at startup; Ollama was
+      not, and it unloads `nomic-embed-text` after its idle window — so the first chunk of
+      every upload paid the model load inside a handler. That is this item's own definition
+      of the defect, sitting in the code meant to be sweeping for it. Added
+      `embedding.warm_up()` at all three entry points plus `keep_alive` so it stays resident.
+      One wall-clock budget covers the whole handler, not one per loop — the image loop runs
+      first and was silently spending what the text loop then measured against.
+      **The image loop is now two passes**, which review argued for and is plainly right:
+      pass 1 stores, fingerprints and reuse-checks every image (milliseconds, and reuse
+      detection is the question this product exists to answer — never worth cutting); pass 2
+      does the expensive CLIP embedding and is what yields. Every image therefore leaves a
+      row that can be finished later, matching how text chunks already behaved, instead of
+      being silently lost with nothing to recover.
+      **A regression review caught before it shipped:** `images_checked` still reported
+      `True` after a partial loop, and the tool docstring tells Claude that means reuse *was*
+      checked — so it would have told a marketer "no reuse found" about slides nobody looked
+      at. The response now carries `images_total`/`images_embedded` counts, and the warnings
+      state the position plainly rather than naming `reembed`, a tool that does not exist
+      until 2.2 (asserting that promise in a test was TDD against the wrong item).
+      **Deferred to 2.2 with its scope sharpened:** `reembed` must handle three states, not
+      one — unembedded chunk rows, unembedded asset rows, and (only if the two-pass change
+      had not been made) images never extracted at all. It must also honour the same budget
+      and be resumable. `campaigns.embedded` being a boolean is now actively misleading and
+      should become counts.
+      **Not yet measured:** the 45/15 defaults are reasoned, not observed. A per-ingest
+      timing line (chunks, images, seconds) belongs in 3.2's version/diagnostics work so the
+      next customer run produces the number rather than another estimate.
+
 - [ ] **2.2 `reembed(scope)` + partial-state visibility** (defect 05). Backfill any row
       missing a vector (text or image); surface counts in `list_campaigns`/`get_campaign` so
       "stored" and "searchable" are never conflated. Two assets are currently unrepairable.

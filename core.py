@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import time
 from pathlib import Path
 from typing import Optional, Union
 
@@ -84,6 +85,11 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
     stored_path = None
     units: list[str] = []  # natural per-page/slide units, when extraction ran
     asset_path_for_images: Optional[Path] = None  # only set when a real file reached us
+    # ONE clock for the whole handler, not one per loop: this call embeds up to 20 images
+    # and then every text chunk, and two independent budgets would let it take twice the
+    # transport ceiling while believing itself inside it. The image loop runs first, so it
+    # spends from the same allowance the text loop later measures against.
+    deadline = time.monotonic() + config.TOOL_TIME_BUDGET_SECONDS
 
     if asset_ref:
         path, w = _resolve_asset(asset_ref)
@@ -119,6 +125,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
     # single image's storage failure shouldn't retroactively make an otherwise-successful
     # check report itself as "never happened").
     images_checked = False
+    images_embedded = 0
     current_campaign = None
     if asset_path_for_images is not None:
         image_mime = extract.guess_mime(asset_path_for_images.name)
@@ -134,6 +141,13 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
 
         if found_images:
             current_campaign = store.get_campaign(conn, cid)
+
+        # PASS 1 — store, fingerprint, reuse-check. Deliberately NOT budgeted: writing a
+        # file and hashing it is milliseconds, and reuse detection is the question this
+        # product exists to answer ("this hero image is identical to one used in Mexico").
+        # Abandoning that to save a fraction of a second would cut the wrong thing. It also
+        # guarantees every image leaves a row, so an interrupted run can be finished later
+        # rather than being silently lost the way an unextracted image would be.
         for img_bytes, ext, location in found_images:
             stored_name = None
             try:
@@ -146,7 +160,8 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                 warnings.append(f"deck image on slide/page {location} could not be stored: {exc}")
                 continue
             entry = {"asset_id": aid, "location": location, "fingerprinted": False,
-                    "visually_embedded": False, "reuse_flags": []}
+                     "visually_embedded": False, "reuse_flags": [],
+                     "_path": image_full_path}
             try:
                 h = images.phash(image_full_path)
                 store.set_asset_fingerprint(conn, aid, h)
@@ -159,14 +174,31 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                         conn, h, exclude_campaign_id=cid, current=current_campaign)
                 except Exception as exc:
                     warnings.append(f"deck image {aid} fingerprinted but reuse check failed: {exc}")
-            try:
-                vec = clip_embed.embed_image(image_full_path)
-                vectorstore.add(conn, aid, vec, space="asset")
-                store.mark_asset_embedded(conn, aid)
-                entry["visually_embedded"] = True
-            except Exception as exc:
-                warnings.append(f"deck image {aid} not visually embedded: {exc}")
             image_assets.append(entry)
+
+        # PASS 2 — the expensive half. This is what yields when time runs out; the images
+        # are already stored and reuse-checked, so stopping here costs only visual
+        # similarity, and every skipped one has a row waiting to be finished.
+        for entry in image_assets:
+            if time.monotonic() >= deadline:
+                warnings.append(
+                    f"visually embedded {images_embedded} of {len(image_assets)} deck images "
+                    f"before the {config.TOOL_TIME_BUDGET_SECONDS:g}s time budget ran out. All "
+                    f"of them were still stored and checked for reuse; the rest can be "
+                    f"finished later without re-uploading the deck."
+                )
+                break
+            try:
+                vec = clip_embed.embed_image(entry["_path"])
+                vectorstore.add(conn, entry["asset_id"], vec, space="asset")
+                store.mark_asset_embedded(conn, entry["asset_id"])
+                entry["visually_embedded"] = True
+                images_embedded += 1
+            except Exception as exc:
+                warnings.append(f"deck image {entry['asset_id']} not visually embedded: {exc}")
+
+        for entry in image_assets:
+            entry.pop("_path", None)
 
     if not units and deck_text:
         # LLM-first path: Claude passed one flat string with no page/slide boundaries —
@@ -181,13 +213,30 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         return {"campaign_id": cid, "title": title, "record_type": record_type,
                 "embedded": False, "chunks_total": 0, "chunks_embedded": 0,
                 "image_assets": image_assets, "images_checked": images_checked,
+                "images_total": len(image_assets), "images_embedded": images_embedded,
                 "warnings": warnings}
 
     chunk_ids = store.insert_chunks(conn, cid, chunk_texts)
     embedded_count = 0
+    # One embed call per chunk, against an embedder that can be slow or wedged. Without a
+    # wall-clock budget a long deck simply outlives the transport: the client reports "did
+    # not respond", the row is already written, and nobody can tell how much got done
+    # (defect 04 — the reviewer hit this failure class inside upload_image_asset). Stopping early and
+    # saying so beats being cut off mid-loop.
     for chunk_id, text in zip(chunk_ids, chunk_texts):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            warnings.append(
+                f"embedded {embedded_count} of {len(chunk_texts)} sections before the "
+                f"{config.TOOL_TIME_BUDGET_SECONDS:g}s time budget ran out. Tell the user: the "
+                f"campaign is saved, {embedded_count} of {len(chunk_texts)} sections are "
+                f"searchable so far, and the rest can be finished later without re-uploading."
+            )
+            break
         try:
-            vec = embedding.embed(text)
+            # Only the time that is actually left, so no single call can push the handler
+            # past its own deadline.
+            vec = embedding.embed(text, timeout=remaining)
             vectorstore.add(conn, chunk_id, vec)
             store.set_chunk_embedded(conn, chunk_id)
             embedded_count += 1
@@ -199,7 +248,9 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         "campaign_id": cid, "title": title, "record_type": record_type,
         "embedded": embedded_count > 0,
         "chunks_total": len(chunk_texts), "chunks_embedded": embedded_count,
-        "image_assets": image_assets, "images_checked": images_checked, "warnings": warnings,
+        "image_assets": image_assets, "images_checked": images_checked,
+        "images_total": len(image_assets), "images_embedded": images_embedded,
+        "warnings": warnings,
     }
 
 

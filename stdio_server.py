@@ -21,6 +21,7 @@ Claude Desktop config (claude_desktop_config.json):
 from __future__ import annotations
 
 import clip_embed
+import embedding
 import config
 import store
 from mcp_server import mcp
@@ -29,4 +30,5 @@ if __name__ == "__main__":
     config.ensure_dirs()
     store.init_db()
     clip_embed.warm_up()  # load now, not on the first tool call (see http_app.main())
+    embedding.warm_up()
     mcp.run(transport="stdio")

@@ -22,6 +22,7 @@ from starlette.routing import Route
 
 import auth
 import clip_embed
+import embedding
 import config
 import extract
 import store
@@ -100,6 +101,7 @@ def main():
     # tunnel is the wrong place for a first-time model load (risks the client's
     # tool-call timeout; review flagged this).
     clip_embed.warm_up()
+    embedding.warm_up()
     uvicorn.run(app, host=config.HTTP_HOST, port=config.HTTP_PORT)
 
 

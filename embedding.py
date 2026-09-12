@@ -9,20 +9,30 @@ corpus later outgrows brute force (move to a vector index) or you change embedde
 from __future__ import annotations
 
 import math
+import sys
 from typing import Optional
 
 import config
 
 
-def embed(text: str) -> list[float]:
-    """Embed a single text with the configured provider. Empty text → zero-length guard."""
+def embed(text: str, timeout: Optional[float] = None) -> list[float]:
+    """Embed a single text with the configured provider. Empty text → zero-length guard.
+
+    `timeout` lets a caller grant only the time it actually has left. A handler embeds once
+    per chunk against a ceiling it must not exceed, so a fixed per-call timeout bounds when
+    a call STARTS but not when the handler ENDS — the last call can begin just inside the
+    budget and run for the full timeout on top. Passing the remaining budget makes that
+    impossible."""
     text = (text or "").strip()
     if not text:
         raise ValueError("cannot embed empty text")
+    if timeout is None:
+        timeout = config.EMBED_TIMEOUT_SECONDS
+    timeout = max(0.1, min(timeout, config.EMBED_TIMEOUT_SECONDS))
     if config.EMBED_PROVIDER == "ollama":
-        return _embed_ollama(text)
+        return _embed_ollama(text, timeout)
     if config.EMBED_PROVIDER == "voyage":
-        return _embed_voyage(text)
+        return _embed_voyage(text, timeout)
     if config.EMBED_PROVIDER == "hash":
         return _embed_hash(text)
     raise ValueError(f"unknown embed provider {config.EMBED_PROVIDER!r}")
@@ -44,7 +54,7 @@ def _embed_hash(text: str) -> list[float]:
     return [x / norm for x in vec] if norm else vec
 
 
-def _embed_voyage(text: str) -> list[float]:
+def _embed_voyage(text: str, timeout: float = 0) -> list[float]:
     import httpx
     if not config.VOYAGE_API_KEY:
         raise RuntimeError("VOYAGE_API_KEY is not set (or switch CAMPAIGN_POC_EMBED_PROVIDER=ollama)")
@@ -52,18 +62,22 @@ def _embed_voyage(text: str) -> list[float]:
         "https://api.voyageai.com/v1/embeddings",
         headers={"Authorization": f"Bearer {config.VOYAGE_API_KEY}"},
         json={"input": [text], "model": config.VOYAGE_MODEL},
-        timeout=60,
+        timeout=timeout or config.EMBED_TIMEOUT_SECONDS,
     )
     r.raise_for_status()
     return r.json()["data"][0]["embedding"]
 
 
-def _embed_ollama(text: str) -> list[float]:
+def _embed_ollama(text: str, timeout: float = 0) -> list[float]:
     import httpx
     r = httpx.post(
         f"{config.OLLAMA_URL}/api/embeddings",
-        json={"model": config.OLLAMA_EMBED_MODEL, "prompt": text},
-        timeout=60,
+        # keep_alive: warming at startup is pointless if Ollama unloads the model after
+        # its default idle window and the next upload pays the load again — inside a
+        # handler, which is the defect this item exists to remove.
+        json={"model": config.OLLAMA_EMBED_MODEL, "prompt": text,
+              "keep_alive": config.OLLAMA_KEEP_ALIVE},
+        timeout=timeout or config.EMBED_TIMEOUT_SECONDS,
     )
     r.raise_for_status()
     return r.json()["embedding"]
@@ -91,3 +105,21 @@ def rank(query_vec: list[float], candidates: list[tuple[str, list[float]]],
     ]
     scored.sort(key=lambda t: t[1], reverse=True)
     return scored[:top_k]
+
+
+def warm_up() -> None:
+    """Load the embedding model now, at startup, rather than inside the first tool call.
+
+    The vision model was already warmed here; the text embedder was not, which meant every
+    upload's first chunk paid Ollama's model load inside a handler working against a
+    transport ceiling — the exact shape of defect 04, sitting in the code that was meant to
+    be sweeping for it. Never raises: a text embedder that cannot warm is a degraded
+    server, not a dead one, and the failure surfaces per call where it can be reported."""
+    if config.EMBED_PROVIDER not in ("ollama", "voyage"):
+        return  # the offline hash provider has nothing to load
+    try:
+        embed("warm up", timeout=config.EMBED_TIMEOUT_SECONDS)
+    except Exception as exc:
+        print(f"[campaign-intelligence] text search may be slow on first use: the "
+              f"{config.EMBED_PROVIDER} embedder did not respond at startup ({exc}).",
+              file=sys.stderr, flush=True)

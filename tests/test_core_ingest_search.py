@@ -36,7 +36,7 @@ def test_partial_embedding_failure_is_reported_per_chunk_not_swallowed(conn, mon
     real_embed = embedding.embed
     calls = {"n": 0}
 
-    def flaky_embed(text):
+    def flaky_embed(text, timeout=None):
         calls["n"] += 1
         if calls["n"] == 2:
             raise RuntimeError("provider rejected input")
