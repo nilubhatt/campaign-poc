@@ -118,11 +118,30 @@ MAX_INLINE_BYTES = int(os.getenv("CAMPAIGN_POC_MAX_INLINE_MB", "10")) * 1024 * 1
 # MCP transports drop a tool call that takes too long — the reviewer saw "Device did not
 # respond within 60s", with the row already written and no way to tell what had finished.
 # A handler must therefore finish, or stop and explain, on its own terms rather than being
-# cut off. This is the ceiling a handler budgets against.
-TOOL_TIME_BUDGET_SECONDS = float(os.getenv("CAMPAIGN_POC_TOOL_BUDGET", "45"))
+# cut off. This is the allowance a handler works within, kept clear of the ceiling below.
+def _positive_seconds(var: str, default: str) -> float:
+    """Reject a value that would silently disable the protection it configures. "0" stores
+    every upload with nothing embedded; "nan" defeats every comparison at once (a deadline
+    is never reached AND every grant collapses to the floor) — both fail quietly, which is
+    the worst way for a safety limit to fail."""
+    raw = os.getenv(var, default)
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{var}={raw!r} is not a number") from None
+    if not value > 0 or value != value:   # value != value catches NaN
+        raise ValueError(f"{var}={raw!r} must be a positive number of seconds")
+    return value
+
+
+# Names carry the unit, like every sibling (CAMPAIGN_POC_MAX_ASSET_MB, _MAX_DOC_CHARS).
+TOOL_TIME_BUDGET_SECONDS = _positive_seconds("CAMPAIGN_POC_TOOL_BUDGET_SECONDS", "45")
 # One embed call, bounded well under that ceiling: a handler embeds once per chunk, so a
 # per-call timeout equal to the ceiling (the old value) let a single deck block for minutes.
-EMBED_TIMEOUT_SECONDS = float(os.getenv("CAMPAIGN_POC_EMBED_TIMEOUT", "15"))
+EMBED_TIMEOUT_SECONDS = _positive_seconds("CAMPAIGN_POC_EMBED_TIMEOUT_SECONDS", "15")
+# What the transport itself allows. The budget above must stay clear of it; this is the
+# number it is clear OF, recorded so the relationship is visible rather than implied.
+TRANSPORT_CEILING_SECONDS = _positive_seconds("CAMPAIGN_POC_TRANSPORT_CEILING_SECONDS", "60")
 
 # ── embeddings (semantic search) ─────────────────────────────────────────────
 # Anthropic has no embeddings API; a separate embedder powers similarity search.
@@ -131,9 +150,10 @@ EMBED_TIMEOUT_SECONDS = float(os.getenv("CAMPAIGN_POC_EMBED_TIMEOUT", "15"))
 EMBED_PROVIDER = os.getenv("CAMPAIGN_POC_EMBED_PROVIDER", "ollama").lower()
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_EMBED_MODEL = os.getenv("CAMPAIGN_POC_OLLAMA_MODEL", "nomic-embed-text")
-# How long Ollama should keep the embedding model resident. Default "-1" = indefinitely:
-# the model is ~270MB and reloading it inside a tool call is precisely the first-use cost
-# that blows a transport ceiling.
+# How long Ollama should keep the embedding model resident. Default "-1" = indefinitely,
+# which trades ~270MB of the user's RAM for never paying a model reload inside a tool call —
+# precisely the first-use cost that blows a transport ceiling. Set a duration ("5m") on a
+# memory-constrained machine.
 OLLAMA_KEEP_ALIVE = os.getenv("CAMPAIGN_POC_OLLAMA_KEEP_ALIVE", "-1")
 EMBED_DIM = int(os.getenv("CAMPAIGN_POC_EMBED_DIM", "768"))  # nomic-embed-text = 768
 VOYAGE_API_KEY = os.getenv("VOYAGE_API_KEY", "")

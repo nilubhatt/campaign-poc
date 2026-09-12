@@ -29,13 +29,40 @@ def embed(text: str, timeout: Optional[float] = None) -> list[float]:
     if timeout is None:
         timeout = config.EMBED_TIMEOUT_SECONDS
     timeout = max(0.1, min(timeout, config.EMBED_TIMEOUT_SECONDS))
-    if config.EMBED_PROVIDER == "ollama":
-        return _embed_ollama(text, timeout)
-    if config.EMBED_PROVIDER == "voyage":
-        return _embed_voyage(text, timeout)
+    # Transport failures are translated into ValueError because that is the ONLY exception
+    # type the tool layer converts into a message the caller can read; anything else is
+    # replaced with a generic "Error executing tool X" and the detail is discarded. A
+    # marketer whose Ollama is not running deserves to be told that, not "an error".
+    try:
+        if config.EMBED_PROVIDER == "ollama":
+            return _embed_ollama(text, timeout)
+        if config.EMBED_PROVIDER == "voyage":
+            return _embed_voyage(text, timeout)
+    except Exception as exc:
+        raise ValueError(_explain(exc)) from exc
     if config.EMBED_PROVIDER == "hash":
         return _embed_hash(text)
     raise ValueError(f"unknown embed provider {config.EMBED_PROVIDER!r}")
+
+
+def _explain(exc: Exception) -> str:
+    """Turn a transport failure into something an operator can act on."""
+    import httpx
+
+    where = config.OLLAMA_URL if config.EMBED_PROVIDER == "ollama" else "the Voyage API"
+    what = config.EMBED_PROVIDER
+    if isinstance(exc, httpx.TimeoutException):
+        return (f"the {what} embedder at {where} timed out after "
+                f"{config.EMBED_TIMEOUT_SECONDS:g}s. Text search needs it; check it is "
+                f"running and not overloaded.")
+    if isinstance(exc, httpx.ConnectError):
+        return (f"could not reach the {what} embedder at {where}. Text search needs it; "
+                f"check it is running.")
+    if isinstance(exc, httpx.HTTPStatusError):
+        return (f"the {what} embedder at {where} rejected the request "
+                f"({exc.response.status_code}). If this is a long document the model's "
+                f"context limit is the usual cause.")
+    return f"the {what} embedder at {where} failed: {exc}"
 
 
 def _embed_hash(text: str) -> list[float]:

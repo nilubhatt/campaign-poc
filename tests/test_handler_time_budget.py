@@ -53,8 +53,10 @@ def test_a_slow_embedder_does_not_run_past_the_budget(conn, monkeypatch):
     result = core.ingest_campaign(conn, title="Slow", deck_text=long_deck, confirm=True)
     elapsed = time.monotonic() - started
 
-    assert elapsed < 2.0, "must abandon the loop, not grind through every chunk"
-    assert calls["n"] < 12, "should have stopped early"
+    # 12 chunks x 0.15s = 1.8s if it ground through them all, so a 2.0s bound could not
+    # fail. Bound it just above the budget instead.
+    assert elapsed < 0.9, "must abandon the loop, not grind through every chunk"
+    assert calls["n"] <= 3, "should have stopped within a call or two of the budget"
     assert result["chunks_embedded"] < result["chunks_total"]
 
 
@@ -133,7 +135,7 @@ def test_the_image_loop_shares_one_budget_with_the_text_loop(conn, tmp_path, mon
                                   asset_ref={"path": str(deck)}, confirm=True)
     elapsed = time.monotonic() - started
 
-    assert elapsed < 2.0, "the image loop must respect the budget too"
+    assert elapsed < 1.2, "the image loop must respect the budget too"
     assert any("budget" in w.lower() for w in result["warnings"])
     assert result["campaign_id"], "the campaign is still saved"
 

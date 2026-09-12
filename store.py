@@ -400,11 +400,29 @@ def list_campaigns(conn, *, record_type: Optional[str] = None,
         ).fetchall()}
     superseded_ids = get_superseded_campaign_ids(conn)
 
+    # Counts, not just the rollup flag: "stored" and "searchable" are different states, and
+    # a time-budgeted ingest can legitimately leave a campaign between them. A caller that
+    # only sees `embedded` cannot tell a fully indexed deck from one with two of twelve
+    # sections searchable (defect 05).
+    chunk_counts: dict[str, tuple[int, int]] = {}
+    asset_counts: dict[str, tuple[int, int]] = {}
+    if ids:
+        placeholders = ",".join("?" * len(ids))
+        for table, sink in (("campaign_chunks", chunk_counts), ("assets", asset_counts)):
+            for row in conn.execute(
+                f"""SELECT campaign_id, COUNT(*) AS total,
+                           SUM(CASE WHEN embedded THEN 1 ELSE 0 END) AS done
+                    FROM {table} WHERE campaign_id IN ({placeholders})
+                    GROUP BY campaign_id""", ids).fetchall():
+                sink[row["campaign_id"]] = (row["total"], row["done"] or 0)
+
     out = []
     for r in rows:
         d = dict(r)
         d["tags"] = _parse_stored_tags(d["tags"])
         d["markets"] = _parse_stored_markets(d["markets"])
+        d["chunks_total"], d["chunks_embedded"] = chunk_counts.get(d["id"], (0, 0))
+        d["assets_total"], d["assets_embedded"] = asset_counts.get(d["id"], (0, 0))
         d["has_metrics"] = d["id"] in with_metrics
         d["is_superseded"] = d["id"] in superseded_ids
         d["has_evaluations"] = d["id"] in with_evaluations
@@ -699,7 +717,9 @@ _VALID_METRIC_TYPES = {"actual", "predicted"}
 
 
 def add_metrics(conn, campaign_id: str, *, detail=None, structured=None,
-                metric_type: str = "actual") -> str:
+                metric_type: str = "actual", commit: bool = True) -> str:
+    """commit=False lets a bulk import batch many rows into one transaction — a commit per
+    row is an fsync per row, which the caller's row count controls."""
     metric_type = str(metric_type).strip().lower()
     if metric_type not in _VALID_METRIC_TYPES:
         raise ValueError(f"invalid metric_type {metric_type!r}, "
@@ -711,7 +731,8 @@ def add_metrics(conn, campaign_id: str, *, detail=None, structured=None,
         (mid, campaign_id, metric_type, detail,
          json.dumps(structured) if structured is not None else None, _now()),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return mid
 
 
@@ -726,7 +747,16 @@ def bulk_import_metrics(conn, rows: list[dict]) -> dict:
     reported in `errors` and never crashes or blocks the rest of the batch.
     """
     imported, errors = 0, []
+    # Bounded like every other handler (defect 04's sweep): the caller decides how many rows
+    # this is, and every row previously committed on its own — one fsync each, which is
+    # cheap on an SSD and much less so on the customer's Windows laptop behind AV scanning.
+    # One transaction for the batch, and stop at the same budget everything else respects.
+    deadline = time.monotonic() + config.TOOL_TIME_BUDGET_SECONDS
+    not_processed = 0
     for i, row in enumerate(rows):
+        if time.monotonic() >= deadline:
+            not_processed = len(rows) - i
+            break
         try:
             if not isinstance(row, dict):
                 errors.append({"row": i, "reason": f"row must be an object, got {type(row).__name__}"})
@@ -761,12 +791,20 @@ def bulk_import_metrics(conn, rows: list[dict]) -> dict:
                 continue
 
             add_metrics(conn, cid, detail=row.get("detail"), structured=row.get("structured"),
-                       metric_type=metric_type)
+                       metric_type=metric_type, commit=False)
             imported += 1
         except Exception as exc:
             errors.append({"row": i, "reason": str(exc)})
 
-    return {"imported": imported, "errors": errors}
+    conn.commit()
+    result = {"imported": imported, "errors": errors, "not_processed": not_processed}
+    if not_processed:
+        result["note"] = (
+            f"imported {imported} rows before the {config.TOOL_TIME_BUDGET_SECONDS:g}s time "
+            f"budget ran out; {not_processed} rows were not processed. Send them again to "
+            f"continue — nothing already imported is duplicated by doing so."
+        )
+    return result
 
 
 # ── evaluations ──────────────────────────────────────────────────────────────

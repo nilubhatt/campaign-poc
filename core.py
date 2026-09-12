@@ -243,10 +243,14 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         except Exception as exc:
             warnings.append(f"chunk {chunk_id} not embedded (search will miss it): {exc}")
 
-    store.mark_embedded(conn, cid, embedded_count > 0)
+    # "embedded" means SEARCHABLE, not "we managed at least one". Since 2.1 made a partial
+    # result a designed outcome, `> 0` would report a deck with 2 of 12 sections indexed as
+    # fully embedded — in the same response whose warning says 2 of 12. That is exactly the
+    # stored-versus-searchable conflation defect 05 opened with.
+    store.mark_embedded(conn, cid, embedded_count == len(chunk_texts))
     return {
         "campaign_id": cid, "title": title, "record_type": record_type,
-        "embedded": embedded_count > 0,
+        "embedded": embedded_count == len(chunk_texts),
         "chunks_total": len(chunk_texts), "chunks_embedded": embedded_count,
         "image_assets": image_assets, "images_checked": images_checked,
         "images_total": len(image_assets), "images_embedded": images_embedded,

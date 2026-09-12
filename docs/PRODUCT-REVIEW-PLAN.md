@@ -209,6 +209,19 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       had not been made) images never extracted at all. It must also honour the same budget
       and be resumable. `campaigns.embedded` being a boolean is now actively misleading and
       should become counts.
+      **A second review round found four more**, all fixed here: `embedded: True` on a
+      campaign with 2 of 12 sections indexed (the boolean lied *by design* once partial
+      became a designed outcome — now it means fully searchable, with
+      `chunks_embedded`/`assets_embedded` counts in `list_campaigns` telling the partial
+      story); an embedder timeout reaching the caller as a generic "Error executing tool X"
+      because only `ValueError` is translated (now a sentence naming the component, the
+      address and the likely cause); `bulk_import_metrics` as the last unbounded handler,
+      committing once per caller-supplied row (now one transaction, same budget, reporting
+      `not_processed`); and this item's own budget test passing against an implementation
+      whose grant never shrank.
+      Also: env names now carry their unit like every sibling, and a budget of `0`, `nan` or
+      a non-number is rejected at startup rather than silently disabling the protection it
+      configures.
       **Not yet measured:** the 45/15 defaults are reasoned, not observed. A per-ingest
       timing line (chunks, images, seconds) belongs in 3.2's version/diagnostics work so the
       next customer run produces the number rather than another estimate.

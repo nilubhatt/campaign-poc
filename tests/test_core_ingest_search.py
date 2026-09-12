@@ -50,7 +50,13 @@ def test_partial_embedding_failure_is_reported_per_chunk_not_swallowed(conn, mon
 
     assert r["chunks_total"] > 1
     assert r["chunks_embedded"] == r["chunks_total"] - 1
-    assert r["embedded"] is True  # at least one chunk embedded -> still searchable
+    # `embedded` means FULLY searchable. This assertion used to read "at least one chunk
+    # embedded -> still searchable", which made sense while partial embedding was an
+    # accident; item 2.1 made it a designed outcome (a time budget stops mid-deck on
+    # purpose), so a flag that says True at 1-of-12 is the stored-versus-searchable
+    # conflation defect 05 complained about. The partial story is told by the counts.
+    assert r["embedded"] is False
+    assert 0 < r["chunks_embedded"] < r["chunks_total"]
     assert any("not embedded" in w for w in r["warnings"])
 
     c = store.get_campaign(conn, r["campaign_id"])
