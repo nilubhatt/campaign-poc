@@ -381,7 +381,8 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       one the moment anything touches a slide, so the common case is blank, and a library of
       empty commentary rows dilutes every retrieval it appears in.
       `campaign_chunks` gains `kind` (`body`|`commentary`) and `source` (JSON `{kind, author,
-      date, anchor}`). One chunk per comment, never merged: two notes packed together would
+      date, anchor, page|slide, reply_to}` — the position as a number as well as a display
+      string, so something downstream can sort or group by where in a deck a remark sits). One chunk per comment, never merged: two notes packed together would
       share one author and one anchor, and the anchor is half of what makes a comment worth
       keeping. Every hit carries `matched_kind`, plus `matched_author`/`matched_anchor`/
       `matched_date` when commentary matched, so a reviewer's objection cannot be cited as
@@ -395,6 +396,43 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       client-comment query returns 0.8836 attributed to *Dana Ruiz*; the same query with
       `include_commentary=False` drops to 0.4361 on a body chunk, which is what proves the
       layers are genuinely separate rather than nominally tagged.
+      **From design review, in this item:** a finding can now cite a comment and has to say
+      so — `precedent` carries `layer` (`body` | `commentary`, defaulting to body) plus the
+      author and anchor. The layer rule had been stated on the browsing tool and absent on
+      the judging one, and a commentary chunk IS a retrieved chunk, so a client's "I do not
+      think the timeline is realistic" was a fully compliant citation whose stored form read
+      as something that campaign's deck claimed. `commentary_checked` answers "did anyone
+      look" separately from "were there any" — the exact ambiguity `images_checked` exists
+      to fix, re-created in the same function. A threaded comment is now one item per
+      utterance with a `reply_to`, because a returned deck's thread is typically a client
+      remark and the agency's reply, and joining the runs recorded the agency's answer as
+      the client's words. The classic `ppt/comments/` format uses `<p:text>`, not
+      drawingml `<a:t>`, so the older format had been parsing to empty and dropping every
+      comment while the docstring claimed both. A PPTX comment's anchor is now `"deck"`
+      rather than a slide number scraped from the part filename, which is the comment part's
+      ordinal and not the slide's — an anchor that is sometimes silently wrong, presented in
+      the same field and with the same confidence as a PDF page index, is worse than one
+      that admits it does not know. `include_commentary` also takes a list of kinds, so
+      "what did the client say" is askable rather than only "what did anyone write".
+      **Decided against:** exposing `include_commentary` on `prepare_evaluation`. A judgment
+      should weigh every recorded objection, and a switch that drops the layer carrying the
+      client's is an easy path to a cleaner-looking approval — 2.4's lesson was that an
+      error message offering an easy exit gets taken, and the same is true of a parameter.
+      **From adversarial review, in this item:** excluding commentary could delete a
+      campaign from the results entirely. The layer filter ran after the vector search's
+      over-fetch window and after the per-campaign rollup, so a deck whose 25 speaker notes
+      filled the window lost its body chunk before the filter ever saw it — the same
+      starvation the structured-filter path already carries a comment about, one layer down.
+      Narrowing by layer is a filter, and now happens where the other filters happen: it
+      narrows what can MATCH, it does not delete a record. The first version of the test
+      asserted `hit == [] or ...`, which blessed the bug; the reviewer's reproduction
+      replaced it. Also: a deck whose body extracted to nothing reported its notes as found
+      and then threw them away, because the "nothing to embed" early return fired before the
+      commentary was stored; `D:2026` became `2026--` and `D:99999999` became `9999-99-99`,
+      a well-formed-looking date no calendar contains, because the string was built before
+      being validated — an unparseable date is now kept verbatim, since it is still evidence
+      of when somebody said something and an invented one is worse than none; and a bare CR
+      in a PDF annotation rendered as one run-on line in the excerpt a person reads.
       **Not gated on `not deck_text`** — the trap the image extractor fell into, which
       silently skipped extraction on the documented demo flow. Claude passing deck_text says
       nothing about whether the notes were read, and the realistic call passes both.
@@ -462,7 +500,11 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       but "drawn from the retrieved chunk" cannot be enforced while `prepare_evaluation` is
       stateless — the server does not retain what it returned. Needs 7.2 first, or a receipt
       id from `prepare_evaluation` that `save_evaluation` requires. 7.3 is otherwise
-      subsumed by 2.4; what remains of it is this.*
+      subsumed by 2.4; what remains of it is this. A verified quote must also match the
+      chunk's LAYER (§2.5): a commentary quote is valid evidence, but only when the
+      precedent is marked `layer: "commentary"` — verifying the text alone would confirm a
+      reviewer's objection as something the deck itself said, and bless the misattribution
+      with a green tick.*
 - [ ] **6.2 (H) Guardrail breach vs departure from precedent** — two classes, different
       vocabulary, only one is debatable. *2.4 defined `kind` and the rule that a guardrail
       breach cannot be a note; what remains is making `kind` required, requiring a `rule_id`
@@ -481,7 +523,9 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 
 *Reviewer's own order: 1 and 2 first, then 3 and 4, then 6 and 7 before any prompt tuning.*
 
-- [ ] **7.1 Compute what can be computed.** Date coverage, ER presence per profile, budget
+- [ ] **7.1 Compute what can be computed.** Must run on the BODY layer only (§2.5):
+      a reviewer's comment saying "make sure we never mention adidas" would otherwise
+      register as the brief mentioning adidas. Date coverage, ER presence per profile, budget
       detected, channel checklist, internal date consistency, guardrail keyword hits —
       returned as **computed facts** with evidence. Two thirds of real findings were
       mechanical; this removes most cross-user variance.
@@ -554,10 +598,25 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       numbered question.
 - [ ] **11.4 Context** — `captured_at`, channel, session id, role **as stated at the time**.
 - [ ] **11.5 Append-only reactions** — keep both sides of a disagreement, surface it in
-      retrieval, authority order configured in the rulebook, never inferred.
+      retrieval, authority order configured in the rulebook, never inferred. *Now also
+      covers commentary: 2.5 stores a `kind` (speaker_note / comment / annotation) and makes
+      it filterable, but deliberately does NOT weigh a client's comment above an author's
+      own note — the kind records the format the words arrived in, not their authority (a
+      PDF export turns speaker notes into annotations), and authority order is configured
+      here, never inferred there.*
 - [ ] **11.6 Backfill existing records as `author: unknown`** with import date, explicitly.
+      *Applies to `campaign_chunks.source.author`: a speaker note carries no author field at
+      all and a PDF annotation often has no `/T`, so a null there means "the file did not
+      say", which is a different statement from "nobody said it". Documented in the
+      docstrings by 2.5; the explicit convention is this item's.*
 - [ ] **11.7 Treat it as personal data** — install disclosure, per-person view, deletion or
-      anonymisation preserving the judgment, stated retention position.
+      anonymisation preserving the judgment, stated retention position. ***Live obligation
+      as of 2.5:*** *`campaign_chunks.source.author` is the first field in the library
+      holding a person's name harvested from a file rather than typed by the operator — PDF
+      `/T` and PowerPoint comment authors — and it is returned as `matched_author` on search
+      hits and through `get_campaign`. Today it is deletable only by cascade when the
+      campaign is deleted. Per-person view and erasure are owed here, and the names are in
+      scope for the install disclosure.*
 
 ## Phase 12 — Rulebook as versioned configuration
 
@@ -571,7 +630,10 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       and the ten standing corrections with provenance, shipped as an **example/customer**
       file, not the product default.
 - [ ] **12.4 Schema gaps named in the review** — no field today for `asset_link`,
-      `approval_notes`, or market-scoped feedback patterns.
+      `approval_notes`, or market-scoped feedback patterns. *Decide explicitly whether the
+      tracked client comments 2.5 now ingests ARE the `approval_notes` gap — in most agency
+      flows a returned deck's comments are exactly that — or whether a separate structured
+      field is still owed.*
 
 ---
 

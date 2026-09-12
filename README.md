@@ -106,6 +106,13 @@ Offline smoke test (no Ollama): `CAMPAIGN_POC_EMBED_PROVIDER=hash python -m http
    Claude reads the deck and calls `upload_campaign`. Then *"analyze this new proposal against
    our history"* → Claude calls `prepare_evaluation`, judges, and `save_evaluation`.
 
+> **Attaching a file in chat is not the same as sending the file.** Claude reads the deck and
+> passes the text, so the server never sees the bytes — and comments, speaker notes and
+> embedded images can only be read from the file itself. To capture those, POST it to
+> `/upload`, or use Claude Desktop where a local path can be passed as `asset_ref`. The
+> upload result says which happened: `commentary_checked: false` means nothing was read, not
+> that the deck had no comments.
+
 > Auth: `auth.py` is a no-op seam today (`CAMPAIGN_POC_AUTH_MODE=none`). claude.ai connectors
 > generally want OAuth — implement it in `auth.authenticate()` and set the mode to `oauth`.
 

@@ -92,6 +92,14 @@ class Precedent(TypedDict):
     quote: NotRequired[str]           # <= 300 chars; longer than that is not a quote
     campaign_id: NotRequired[str]     # for a departure from precedent
     rule_id: NotRequired[str]         # for a guardrail breach — a rule, not a campaign
+    # Which layer the quote came from. Default "body" = the deck itself. Set "commentary"
+    # whenever the excerpt you are quoting arrived with matched_kind "commentary", and name
+    # who said it — otherwise the finding records somebody's objection as a claim the deck
+    # made.
+    layer: NotRequired[Literal["body", "commentary"]]
+    author: NotRequired[str]          # commentary only: who said it
+    anchor: NotRequired[str]          # commentary only: "slide 4", "page 2", "deck"
+    date: NotRequired[str]            # commentary only: when they said it
 
 
 class Finding(TypedDict):
@@ -150,8 +158,12 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
 
     Pass asset_ref (the file itself) whenever you have it, even alongside deck_text: comments,
     annotations and speaker notes can only be read from the file, and a partner deck returned
-    with tracked client comments is the feedback this library most wants to remember. The
-    result's `commentary_found` says how many were indexed.
+    with tracked client comments is the feedback this library most wants to remember.
+    `commentary_found` says how many were FOUND (searchable once chunks_embedded reaches
+    chunks_total), and `commentary_checked` says whether anything was read at all. When it is
+    false — a deck_text-only upload, an unsupported file, or a comments part that would not
+    parse — do NOT tell the user the deck has no comments; nobody opened a file. Say that
+    comments need the file itself and offer to re-upload with it.
 
     Passing deck_text alone does NOT check images — you also need asset_ref (a reference to
     the actual file: POST /upload first to get one, or a local path in stdio mode). Prefer
@@ -426,8 +438,8 @@ def list_campaigns(record_type: Optional[RecordType] = None, status: Optional[St
     `embedded` means FULLY searchable. When it is false, chunks_embedded/chunks_total (and
     assets_embedded/assets_total) say how much of the record search can actually find —
     "stored" and "searchable" are different states, and an upload that ran out of time sits
-    between them. Anything short of complete can be finished with reembed, without the user
-    re-uploading anything; say so rather than leaving them to wonder why a deck they
+    between them. Anything short of complete can be finished with finish_indexing, without
+    the user re-uploading anything; say so rather than leaving them to wonder why a deck they
     uploaded isn't coming back in results."""
     conn = store.connect()
     try:
@@ -449,10 +461,11 @@ def list_campaigns(record_type: Optional[RecordType] = None, status: Optional[St
 @_catch_value_errors
 def get_campaign(campaign_id: str) -> dict:
     """Full detail + all metrics for one campaign by id, plus its `commentary`: the speaker
-    notes, annotations and tracked reviewer comments its deck carried, each with author,
-    date and the page or slide it sits on. That layer is what people said ABOUT the work and
-    is kept separate from the deck body deliberately — do not read it back as the brief's
-    own content."""
+    notes, annotations and tracked reviewer comments its deck carried, with the author, date
+    and position wherever the file recorded them — a speaker note carries no author at all,
+    and an annotation often has none, so a missing author means the file did not say, not
+    that nobody said it. That layer is what people said ABOUT the work and is kept separate
+    from the deck body deliberately — do not read it back as the brief's own content."""
     conn = store.connect()
     try:
         c = store.get_campaign(conn, campaign_id)
@@ -471,7 +484,7 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
                            market: Optional[str] = None, markets: Optional[Union[str, list[str]]] = None,
                            collection: Optional[str] = None,
                            full_detail: bool = False,
-                           include_commentary: bool = True) -> dict:
+                           include_commentary: Union[bool, list[str]] = True) -> dict:
     """Semantic search: find prior campaigns most similar to a description (text) or to an
     existing campaign (campaign_id). Matches at the slide/section level and rolls up to the
     best-matching campaign, so long decks match on the relevant part.
@@ -497,11 +510,16 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
 
     Decks are indexed in two layers. The BODY is what the deck says; COMMENTARY is what
     people said about it — speaker notes, PDF annotations and tracked reviewer comments,
-    each carrying its author, date and page or slide. Both are searched by default, and
-    `matched_kind` on every hit says which one matched: a `commentary` hit is somebody's
-    opinion of the work, not a claim the brief made, and citing it as the latter attributes
-    a reviewer's objection to the deck. Pass include_commentary=False when the question is
-    strictly "what does the brief say".
+    carrying author, date and position wherever the file recorded them (speaker notes carry
+    no author; a null one means the file did not say, not that nobody said it). Both are
+    searched by default, and `matched_kind` on every hit says which one matched: a
+    `commentary` hit is somebody's opinion of the work, not a claim the brief made, and
+    citing it as the latter attributes a reviewer's objection to the deck.
+    include_commentary=False answers "what does the brief say"; a list of kinds narrows to
+    who was speaking — ["comment"] is what reviewers left on the deck, as opposed to
+    ["speaker_note"], which the deck's own author wrote to themselves. Note that a PDF
+    export turns speaker notes into annotations, so the kind records the format the words
+    arrived in, not how much authority they carry.
 
     Returns ranked evidence — title, status/tags/region/market/collection, similarity,
     detail, the matched excerpt with its matched_kind (and matched_author/matched_anchor/
@@ -545,10 +563,18 @@ def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
     weight in your judgment than one with real numbers. Read the evidence's tags for each
     match's source either way before treating a performance tag as fact.
 
+    Evidence rows come from two layers and say which in `matched_kind`: `body` is what a
+    deck says, `commentary` is what somebody said about it (speaker notes, annotations,
+    tracked client comments, with `matched_author` and `matched_anchor`). Weigh both — a
+    client's recorded objection is often the most useful precedent in the library — but
+    never blur them: quoting a commentary row as though the deck itself claimed it is a
+    false statement about that campaign.
+
     Read it, then call save_evaluation with a verdict (approve / revise / reject), a
-    one-line summary and one short finding per problem, CITING specific campaign_ids.
-    Predicted CTR/ROI ranges go in `predictions`. This tool gathers evidence; the judgment
-    is yours."""
+    one-line summary and one short finding per problem, CITING specific campaign_ids. When a
+    finding quotes a `commentary` row, set that precedent's `layer: "commentary"` and carry
+    its author and anchor across. Predicted CTR/ROI ranges go in `predictions`. This tool
+    gathers evidence; the judgment is yours."""
     conn = store.connect()
     try:
         return core.prepare_evaluation(conn, subject_title=subject_title,
@@ -596,6 +622,14 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
 
     Anchor findings to evidence: `quote` is text from the retrieved chunk, not written
     fresh. A finding that cannot quote its source is a judgment call and reads as one.
+
+    Check which LAYER your quote came from. Evidence rows carry `matched_kind`: `body` is
+    what the deck says, `commentary` is what somebody said ABOUT it — a speaker note, a PDF
+    annotation, or a tracked comment a client left on a returned deck. Quoting commentary is
+    legitimate and often the best evidence there is, but you must mark it: set
+    `precedent.layer: "commentary"` with the `author` and `anchor` from that row. Left
+    unmarked it is stored as something the campaign's own deck claimed, which is a different
+    and false statement.
 
     A worked finding:
       {"severity": "blocking", "kind": "missing_information", "category": "timeline",

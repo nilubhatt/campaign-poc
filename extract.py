@@ -199,20 +199,34 @@ def extract_commentary(path: Path, mime: str | None = None) -> tuple[list[dict],
 
 def _pdf_date(raw) -> str | None:
     """PDF /M is `D:YYYYMMDDHHmmSS±HH'mm'`. Returned ISO-ish so it sorts and reads the same
-    way as every other date in the library; unparseable values are kept verbatim rather than
-    dropped, since a date nobody can parse is still evidence of when someone said it."""
+    way as every other date in the library.
+
+    Anything that is not a real date is kept VERBATIM rather than reformatted: the first
+    version built the string before validating it, so `D:2026` became "2026--" and
+    `D:99999999` became "9999-99-99" — a date no calendar contains, in a field a reader
+    would take at face value. An unparseable value is still evidence of when somebody said
+    something; an invented one is worse than none.
+    """
+    import datetime
+
     if not raw:
         return None
-    text = str(raw)
+    text = str(raw).strip()
     digits = text[2:] if text.startswith("D:") else text
-    try:
-        stamp = f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}"
-        if len(digits) >= 14:
-            stamp += f"T{digits[8:10]}:{digits[10:12]}:{digits[12:14]}"
-        int(digits[:8])
-        return stamp
-    except (ValueError, IndexError):
+    if len(digits) < 8 or not digits[:8].isdigit():
         return text
+    try:
+        date = datetime.date(int(digits[0:4]), int(digits[4:6]), int(digits[6:8]))
+    except ValueError:
+        return text
+    stamp = date.isoformat()
+    if len(digits) >= 14 and digits[8:14].isdigit():
+        try:
+            time = datetime.time(int(digits[8:10]), int(digits[10:12]), int(digits[12:14]))
+        except ValueError:
+            return stamp
+        stamp += f"T{time.isoformat()}"
+    return stamp
 
 
 def _read_pdf_commentary(path: Path, warnings: list[str]) -> list[dict]:
@@ -233,7 +247,10 @@ def _read_pdf_commentary(path: Path, warnings: list[str]) -> list[dict]:
                 annot = ref.get_object()
                 if annot.get("/Subtype") not in _COMMENT_SUBTYPES:
                     continue
-                text = str(annot.get("/Contents") or "").strip()
+                # PDF uses a bare CR for a line break, which renders as one run-on line in
+                # any excerpt a person reads.
+                text = str(annot.get("/Contents") or "").replace("\r\n", "\n")
+                text = text.replace("\r", "\n").strip()
                 if not text:
                     continue
                 items.append({
@@ -312,20 +329,56 @@ def _read_pptx_comments(path: Path, warnings: list[str]) -> list[dict]:
                 warnings.append(f"{name}: comments could not be parsed ({exc}); skipped")
                 continue
             for node in root:
-                text = " ".join(t.text for t in node.iter()
-                                if t.tag.endswith("}t") and t.text).strip()
-                if not text:
-                    continue
-                author_id = node.get("authorId")
-                items.append({
-                    "kind": "comment",
-                    "text": text,
-                    "author": authors.get(author_id),
-                    "date": (node.get("created") or node.get("dt") or "").strip() or None,
-                    "slide": _slide_number_from_part(name),
-                    "anchor": _comment_anchor(name),
-                })
+                items.extend(_comment_and_replies(node, authors, name))
     return items
+
+
+def _comment_and_replies(node, authors: dict[str, str], part: str,
+                         parent_id: str | None = None) -> list[dict]:
+    """One item per utterance, never one per thread.
+
+    A tracked thread on a returned deck is typically a client's remark and the agency's
+    answer, and PowerPoint nests the replies inside the parent comment. Joining every run of
+    text under the parent recorded the agency's response as the client's words — which is
+    defect 08's own misattribution, one level down, inside the exact feature that exists to
+    fix it.
+    """
+    items: list[dict] = []
+    ident = node.get("id")
+    text = _own_text(node)
+    if text:
+        items.append({
+            "kind": "comment",
+            "text": text,
+            "author": authors.get(node.get("authorId")),
+            "date": (node.get("created") or node.get("dt") or "").strip() or None,
+            "slide": None,
+            "anchor": _comment_anchor(part),
+            **({"reply_to": parent_id} if parent_id else {}),
+        })
+    for child in node.iter():
+        if child is node or not child.tag.endswith("}reply"):
+            continue
+        items.extend(_comment_and_replies(child, authors, part, parent_id=ident))
+    return items
+
+
+def _own_text(node) -> str:
+    """This utterance's words only — the runs under it, minus anything belonging to a nested
+    reply. Both element names are handled: modernComments carries drawingml `<a:t>` runs,
+    while the classic `ppt/comments/` format uses a single `<p:text>`, which matched nothing
+    and silently dropped every comment in the older format."""
+    reply_descendants = {id(d) for child in node.iter()
+                         if child is not node and child.tag.endswith("}reply")
+                         for d in child.iter()}
+    parts = []
+    for element in node.iter():
+        if id(element) in reply_descendants:
+            continue
+        if element.tag.endswith("}t") or element.tag.endswith("}text"):
+            if element.text:
+                parts.append(element.text)
+    return " ".join(parts).strip()
 
 
 def _pptx_authors(z, names: set[str], warnings: list[str]) -> dict[str, str]:
@@ -348,13 +401,13 @@ def _pptx_authors(z, names: set[str], warnings: list[str]) -> dict[str, str]:
     return authors
 
 
-def _slide_number_from_part(name: str) -> int | None:
-    import re
-
-    match = re.search(r"(\d+)", name.rsplit("/", 1)[-1])
-    return int(match.group(1)) if match else None
-
-
 def _comment_anchor(name: str) -> str:
-    number = _slide_number_from_part(name)
-    return f"slide {number}" if number else "deck"
+    """"deck", not a guessed slide.
+
+    A PDF page index is exact. The number in `commentN.xml` is the comment PART's ordinal,
+    not the slide's — and it was being written into the same `anchor` field, read with the
+    same confidence as the exact one. An anchor that is sometimes silently wrong is worse
+    than one that admits it does not know: resolving a comment part to its slide needs the
+    package relationships, which is work item 2.5 does not need to do to be correct.
+    """
+    return "deck"

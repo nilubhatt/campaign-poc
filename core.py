@@ -86,6 +86,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
     stored_path = None
     units: list[str] = []  # natural per-page/slide units, when extraction ran
     commentary: list[dict] = []  # comments, annotations and speaker notes (§2.5)
+    commentary_checked = False   # did we read a file, or is 0 just "we never looked"?
     asset_path_for_images: Optional[Path] = None  # only set when a real file reached us
     # ONE clock for the whole handler, not one per loop: this call embeds up to 20 images
     # and then every text chunk, and two independent budgets would let it take twice the
@@ -110,6 +111,12 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
             try:
                 commentary, cw = extract.extract_commentary(path)
                 warnings += cw
+                # Same distinction images_checked exists to make: an empty list says nothing
+                # about whether anyone looked, and a calling LLM reading 0 as "this deck has
+                # no comments" is making a claim about a file nobody opened. Only true when a
+                # type we know how to read was actually read.
+                commentary_checked = extract.guess_mime(path.name) in (
+                    config.PPTX_MIME, "application/pdf")
             except Exception as exc:              # noqa: BLE001
                 commentary = []
                 warnings.append(f"comments and notes could not be read ({exc}); the deck "
@@ -221,13 +228,17 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
     summary = "\n\n".join(p for p in (title, detail) if p).strip()
     chunk_texts = chunking.pack(([summary] if summary else []) + units)
 
-    if not chunk_texts:
+    # Commentary counts as something to embed. The early return below used to fire first,
+    # so a deck whose body extracted to nothing reported the notes as found and then threw
+    # them away — the count described something that no longer existed.
+    if not chunk_texts and not commentary:
         warnings.append("nothing to embed (no title/detail/deck_text)")
         return {"campaign_id": cid, "title": title, "record_type": record_type,
                 "embedded": False, "chunks_total": 0, "chunks_embedded": 0,
                 "image_assets": image_assets, "images_checked": images_checked,
                 "images_total": len(image_assets), "images_embedded": images_embedded,
-                "warnings": warnings}
+                "commentary_found": len(commentary),
+                "commentary_checked": commentary_checked, "warnings": warnings}
 
     chunk_ids = store.insert_chunks(conn, cid, chunk_texts)
 
@@ -237,7 +248,12 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
     # anchor is half of what makes a comment worth keeping. A note longer than a chunk is
     # split, with every piece keeping the same attribution.
     for item in commentary:
-        source = {k: item.get(k) for k in ("kind", "author", "date", "anchor")}
+        # The position as a NUMBER as well as a display string: the plan and the review both
+        # specify {page, author, date, text, kind}, and only the string survived, so nothing
+        # downstream could sort or group by where in the deck a remark sits.
+        source = {k: item.get(k) for k in
+                  ("kind", "author", "date", "anchor", "page", "slide", "reply_to")}
+        source = {k: v for k, v in source.items() if v is not None}
         pieces = chunking.pack([item["text"]])
         ids = store.insert_chunks(conn, cid, pieces, kind="commentary",
                                   sources=[source] * len(pieces))
@@ -283,6 +299,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         "image_assets": image_assets, "images_checked": images_checked,
         "images_total": len(image_assets), "images_embedded": images_embedded,
         "commentary_found": len(commentary),
+        "commentary_checked": commentary_checked,
         "warnings": warnings,
     }
 
@@ -351,6 +368,9 @@ _MAX_RESOLVED = 120
 # ...and quantity cannot substitute for length: thirty capped findings is an essay built
 # out of bricks.
 _MAX_FINDINGS = 12
+# Which layer of a deck a quote was taken from (§2.5): what the brief says, or what somebody
+# said about it.
+_LAYERS = ("body", "commentary")
 
 
 def _bounded(value, field: str, limit: int, *, where: str = "") -> Optional[str]:
@@ -391,11 +411,30 @@ def _clean_precedent(value, where: str) -> Optional[dict]:
         raise ValueError(f"{where}precedent must name what it cites — a campaign_id for a "
                          f"departure from precedent, or a rule_id for a guardrail breach")
     quote = _bounded(value.get("quote"), "precedent.quote", _MAX_QUOTE, where=where)
-    cleaned = {"quote": quote}
+    # Which LAYER the quote came from (§2.5). A commentary chunk is a retrieved chunk, so
+    # "I do not think the timeline is realistic" was a perfectly compliant citation against
+    # the campaign — and once stored it read forever as something that campaign's own deck
+    # said. Defaulting to "body" is the safe reading: a citation that silently BECAME
+    # commentary would be the misattribution this field exists to prevent. §6.1 will verify
+    # quotes against retrieved chunks, and without the layer it would have verified the
+    # misattribution too.
+    layer = value.get("layer") or "body"
+    if layer not in _LAYERS:
+        raise ValueError(f"{where}precedent layer must be one of {list(_LAYERS)} — 'body' "
+                         f"is what the deck says, 'commentary' is what somebody said about "
+                         f"it; got {layer!r}")
+    cleaned = {"quote": quote, "layer": layer}
     if campaign_id:
         cleaned["campaign_id"] = campaign_id
     if rule_id:
         cleaned["rule_id"] = rule_id
+    if layer == "commentary":
+        # Who said it and where, so the finding can be read back as "their reviewer said X"
+        # rather than "the deck says X".
+        for field, limit in (("author", 120), ("anchor", 40), ("date", 40)):
+            kept = _bounded(value.get(field), f"precedent.{field}", limit, where=where)
+            if kept:
+                cleaned[field] = kept
     return cleaned
 
 
@@ -982,6 +1021,54 @@ def find_similar_with_context(conn, **kwargs) -> dict:
     return {"matches": matches, "warnings": warnings}
 
 
+# The three ways somebody's words end up attached to a deck. `speaker_note` is what the
+# author wrote to themselves; `comment` is what a reviewer left on it; `annotation` is a PDF
+# mark-up, which is either of those depending on how the file was made — a PDF export turns
+# speaker notes into annotations, so the kind records the FORMAT, not the authority. Weighing
+# by authority is §11.5's job, configured in the rulebook rather than inferred here.
+_COMMENTARY_KINDS = ("speaker_note", "comment", "annotation")
+
+
+def _wanted_commentary_kinds(include_commentary) -> Optional[set]:
+    """None = everything (no layer filter). A set = body chunks plus commentary of those
+    kinds; the empty set is body only.
+
+    A boolean could only ask "did anyone write anything anywhere". "What did the CLIENT say"
+    is a different question, and the finer kind was stored where nothing could filter on it,
+    so the field was carried without being usable.
+    """
+    if include_commentary is True:
+        return None
+    if include_commentary is False:
+        return set()
+    if isinstance(include_commentary, str):
+        wanted = {include_commentary}
+    elif isinstance(include_commentary, (list, tuple, set)):
+        wanted = set(include_commentary)
+    else:
+        raise ValueError(f"include_commentary must be true, false, or a list of "
+                         f"{list(_COMMENTARY_KINDS)}; got {include_commentary!r}")
+    unknown = wanted - set(_COMMENTARY_KINDS)
+    if unknown:
+        raise ValueError(f"include_commentary must be true, false, or a list of "
+                         f"{list(_COMMENTARY_KINDS)}; got {sorted(unknown)}")
+    return wanted
+
+
+def _chunk_is_wanted(conn, chunk_id: str, wanted_kinds: set) -> bool:
+    """A body chunk always survives the commentary filter; a commentary chunk survives only
+    if its kind was asked for."""
+    import json as _json
+
+    chunk = store.get_chunk(conn, chunk_id)
+    if not chunk or chunk.get("kind") != "commentary":
+        return True
+    if not wanted_kinds:
+        return False
+    source = _json.loads(chunk["source"]) if chunk.get("source") else {}
+    return source.get("kind") in wanted_kinds
+
+
 def _matched_source(matched: Optional[dict]) -> dict:
     """Attribution for a commentary match: who said it, when, and which page or slide. A
     body chunk has none of these, so it contributes nothing rather than a row of nulls."""
@@ -1002,7 +1089,8 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
                  tags: Optional[Union[str, dict, list]] = None, match_all_tags: bool = False,
                  region: Optional[str] = None, market: Optional[str] = None,
                  markets: Optional[Union[str, list]] = None, collection: Optional[str] = None,
-                 full_detail: bool = False, include_commentary: bool = True) -> list[dict]:
+                 full_detail: bool = False,
+                 include_commentary: Union[bool, list, str] = True) -> list[dict]:
     """
     Rank prior campaigns by semantic similarity to `text` (or to an existing campaign's
     own content). Searches at chunk level (§6.1 — one vector per slide/section) and rolls
@@ -1039,10 +1127,17 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
         raise ValueError("provide text (or a campaign_id that has content) to search by")
 
     qvec = embedding.embed(text)
+    wanted_kinds = _wanted_commentary_kinds(include_commentary)
     filters_given = any([record_type, status, tags, region, market, markets, collection])
     superseded_ids = store.get_superseded_campaign_ids(conn)
 
-    if filters_given:
+    # Narrowing by layer is a FILTER, and has to happen where the other filters happen.
+    # Applied after the ANN over-fetch window instead, it re-created the starvation bug the
+    # branch below already carries a comment about, one layer down: a deck whose 25 speaker
+    # notes filled the window lost its body chunk before the filter ever saw it, and the
+    # campaign vanished from a search it plainly matched. Excluding a layer must narrow what
+    # can MATCH, never delete a record.
+    if filters_given or wanted_kinds is not None:
         # filter_campaign_ids already excludes superseded + self; the full candidate set is
         # already in memory, so rank all of it (no per-chunk over-fetch cap) rather than
         # truncating before the rollup below — a chunk-heavy campaign truncating the field
@@ -1057,6 +1152,9 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
             return []
         chunk_map = store.get_chunk_ids_for_campaigns(conn, candidate_ids)
         candidate_chunk_ids = [chid for chids in chunk_map.values() for chid in chids]
+        if wanted_kinds is not None:
+            candidate_chunk_ids = [chid for chid in candidate_chunk_ids
+                                   if _chunk_is_wanted(conn, chid, wanted_kinds)]
         vecs = vectorstore.get_many(conn, candidate_chunk_ids)
         hits = embedding.rank(qvec, list(vecs.items()), top_k=len(vecs))
     else:
@@ -1074,17 +1172,11 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
     # asking "what does the brief say", not "what did someone think of it", can leave it
     # out; the default keeps it, because a client's tracked comment is exactly the feedback
     # this library exists to remember.
-    excluded_kinds = set() if include_commentary else {"commentary"}
-
     best: dict[str, tuple[float, str]] = {}
     for chunk_id, sim in hits:
         cid = chunk_to_campaign.get(chunk_id)
         if cid is None or cid in superseded_ids or (cid in best and sim <= best[cid][0]):
             continue
-        if excluded_kinds:
-            chunk = store.get_chunk(conn, chunk_id)
-            if chunk and chunk.get("kind") in excluded_kinds:
-                continue
         best[cid] = (sim, chunk_id)
     ranked = sorted(best.items(), key=lambda kv: kv[1][0], reverse=True)[:top_k]
 
