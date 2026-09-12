@@ -131,8 +131,12 @@ def test_a_library_with_no_measured_outcome_says_it_cannot_tell_you_what_worked(
 
 
 def test_a_measured_library_is_reported_as_working(conn):
+    """`working` needs the path walked as well as something measured — the rulebook is the
+    third step, and without it the guidance still has something to say."""
     _campaign(conn, "Bogota", outcomes=True, tags=[{"value": "liked"}])
     _campaign(conn, "Lima", outcomes=True, tags=[{"value": "not_liked"}])
+    core.ingest_campaign(conn, title="Brand guidelines", detail="the rules",
+                         record_type="reference", confirm=True)
 
     report = core.readiness(conn)
 
@@ -371,3 +375,31 @@ class _Borrowed:
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
+
+
+def test_the_guidance_does_not_vanish_before_the_path_is_walked(conn):
+    """Two campaigns, one measured, no tags, no rulebook reported `working` — so
+    `list_campaigns` stopped attaching the guidance while all three steps were still
+    outstanding and the library could neither weigh reactions nor cite a rule. "Working" has
+    to mean the path is done AND something is measured, or the guidance disappears exactly
+    when it is still needed."""
+    measured = _campaign(conn, "A", outcomes=True)
+    _campaign(conn, "B")
+
+    report = core.readiness(conn)
+
+    assert report["shortest_path"], "precondition: the path is unwalked"
+    assert report["stage"] != "working"
+    assert core.readiness_for_listing(conn) is not None
+
+
+def test_one_record_cannot_contrast_with_itself(conn):
+    """A single campaign tagged both `liked` and `not_liked` satisfied the axis on its own.
+    "The library holds both" was technically true and substantively false — the contrast the
+    product reasons from is between records, and one record cannot be the counter-example to
+    itself."""
+    _campaign(conn, "A", tags=[{"value": "liked"}, {"value": "not_liked"}])
+
+    report = core.readiness(conn)
+
+    assert "weigh_reactions" in {c["code"] for c in report["cannot"]}

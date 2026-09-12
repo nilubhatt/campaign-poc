@@ -1870,8 +1870,18 @@ def readiness(conn) -> dict:
     # Case-folded, because tags are freeform and stored as typed while the store folds them
     # when filtering. "Liked" left a marketer who had done exactly what the path asked being
     # told forever to add a campaign they liked.
-    reactions = {str(t.get("value") or "").strip().lower()
-                 for c in campaigns for t in (c.get("tags") or [])}
+    # Per RECORD, not pooled: a single campaign tagged both `liked` and `not_liked` used to
+    # satisfy the axis on its own, and "the library holds both" was then technically true and
+    # substantively false. The contrast this product reasons from is between records, and one
+    # record cannot be the counter-example to itself.
+    def reactions_of(campaign):
+        return {str(t.get("value") or "").strip().lower()
+                for t in (campaign.get("tags") or [])}
+
+    liked_records = [c for c in campaigns if "liked" in reactions_of(c)]
+    disliked_records = [c for c in campaigns
+                        if reactions_of(c) & {"not_liked", "not liked"}]
+    reactions = {r for c in campaigns for r in reactions_of(c)}
     liked = "liked" in reactions
     # `mixed_reaction` is deliberately NOT a dislike. The item's own rationale asks for "one
     # you did not like", and a mixed reaction is not that contrast — counting it would tell
@@ -1899,7 +1909,9 @@ def readiness(conn) -> dict:
             "needs": "at least two past campaigns",
         })
 
-    if liked and disliked:
+    contrasting = bool({c["id"] for c in liked_records}
+                       - {c["id"] for c in disliked_records}) and bool(disliked_records)
+    if contrasting:
         can.append({"code": "weigh_reactions",
                     "what": "Weigh what you liked against what you did not, because the "
                             "library holds both."})
@@ -1955,12 +1967,16 @@ def readiness(conn) -> dict:
                                        "material"),
     })
 
+    path = _shortest_path(liked, disliked, has_rulebook)
     if not campaigns:
         stage = "empty"
         can = []
     elif len(campaigns) < 2:
         stage = "first_records"
-    elif not with_outcomes:
+    elif not with_outcomes or path:
+        # `working` means the path is walked AND something is measured. Measured-alone
+        # reported `working` with all three steps outstanding, so the guidance stopped being
+        # attached exactly while it was still needed.
         stage = "thin"
     else:
         stage = "working"
@@ -1972,7 +1988,7 @@ def readiness(conn) -> dict:
         "has_rulebook": has_rulebook,
         "can": can,
         "cannot": cannot,
-        "shortest_path": _shortest_path(liked, disliked, has_rulebook),
+        "shortest_path": path,
         "note": ("Say the stage and what it cannot do yet before giving any judgment from a "
                  "library this size — a confident, evidence-free verdict is the thing a new "
                  "user will believe. `shortest_path` is ordered: it is a path, not a menu."),
