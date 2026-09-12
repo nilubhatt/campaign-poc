@@ -20,5 +20,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      # The zero-egress test (item 4.2) needs a real weights file to load; without one it
+      # skips, and a permanently skipped acceptance test is not an acceptance test.
+      - name: Fetch CLIP weights for the offline-install test
+        run: python scripts/fetch_weights.py .weights-cache
+
       - name: Run tests
+        env:
+          CAMPAIGN_POC_TEST_WEIGHTS: .weights-cache/open_clip_model.safetensors
         run: python -m pytest tests/ -v

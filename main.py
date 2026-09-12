@@ -33,8 +33,11 @@ def main() -> int:
     sub.add_parser("stdio", help="run over stdio for a local Claude Desktop connector")
 
     sub.add_parser("check-weights", help="report whether the CLIP weights resolved (exit 1 if not)")
-    sub.add_parser("health-check", help="check every component and the library's coverage "
-                                        "(exit 1 if anything is wrong)")
+    h = sub.add_parser("health-check", help="check every component and the library's coverage "
+                                            "(exit 1 if anything is wrong)")
+    # An installer parsing prose is an installer that breaks when the prose improves (§4.1).
+    h.add_argument("--json", action="store_true",
+                   help="emit the report as JSON for a script to read")
 
     c = sub.add_parser("configure-desktop", help="add this server to Claude Desktop's config (merges, backs up)")
     c.add_argument("--http", metavar="URL", default=None,
@@ -88,6 +91,10 @@ def main() -> int:
         # post-install self-test exists to catch (item 4.1).
         clip_embed.warm_up()
         report = core.health_check_cli()
+        if getattr(args, "json", False):
+            import json
+            print(json.dumps(report, indent=2))
+            return 0 if report["ok"] else 1
         for name, component in report["components"].items():
             print(f"{'ok ' if component['ok'] else 'FAIL'}  {name}: {component['detail']}")
             if not component["ok"]:

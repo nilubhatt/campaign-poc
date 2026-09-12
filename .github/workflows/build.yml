@@ -93,10 +93,16 @@ jobs:
           print(f"staged checkpoint: {known[actual]} ({actual[:12]}...)")
           PY
 
+      # Per-OS, which it was not: the macOS archive shipped the LINUX installer, so a Mac
+      # user got systemd units and ~/.local/share paths (item 4.1 — macOS had no installer
+      # of its own at all).
       - name: Package (Linux/macOS) — bundle + install scripts
         if: runner.os != 'Windows'
         run: |
-          cp installer/linux/install.sh installer/linux/uninstall.sh dist/campaign-intelligence/
+          platform=linux
+          [ "${{ runner.os }}" = "macOS" ] && platform=macos
+          cp "installer/$platform/install.sh" "installer/$platform/uninstall.sh" \
+             dist/campaign-intelligence/
           chmod +x dist/campaign-intelligence/install.sh dist/campaign-intelligence/uninstall.sh
           tar -C dist -czf "${{ matrix.asset }}" campaign-intelligence
 
@@ -116,6 +122,37 @@ jobs:
           mkdir -p _verify && tar -xzf "${{ matrix.asset }}" -C _verify
           _verify/campaign-intelligence/campaign-intelligence check-weights | tee out.txt
           grep -q "source: bundled" out.txt
+
+      # Item 4.2: zero egress, tested rather than asserted. The customer's network blocks
+      # huggingface.co, which is how all three P0s surfaced at once — so the install-time
+      # gate must complete with no network at all, against the PACKAGED binary, since that
+      # is what a customer has.
+      #
+      # A socket guard injected through sitecustomize would NOT work here: PyInstaller
+      # controls sys.path in a frozen app, so PYTHONPATH is ignored and the guard would
+      # silently never load — a test that passes because it did nothing. These are real
+      # blocks instead.
+      - name: Verify the packaged product needs no network (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # An empty network namespace: there is no route to block or unblock, and nothing
+          # about the app's own configuration can opt out of it.
+          unshare -rn _verify/campaign-intelligence/campaign-intelligence check-weights \
+            | tee offline.txt
+          grep -q "source: bundled" offline.txt
+
+      - name: Verify the packaged product needs no network (macOS)
+        if: runner.os == 'macOS'
+        env:
+          # No user namespaces on macOS runners, so block at the layer the Hub client
+          # actually uses: every HTTP(S) request is routed to a closed port on loopback.
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
+          HF_HUB_OFFLINE: '1'
+        run: |
+          _verify/campaign-intelligence/campaign-intelligence check-weights | tee offline.txt
+          grep -q "source: bundled" offline.txt
 
       - name: Verify the packaged product finds its weights (Windows)
         if: runner.os == 'Windows'

@@ -173,6 +173,25 @@ Run from source, or ship a self-contained bundle (no Python on the target):
   (the `sqlite-vec` native lib is bundled). `build.sh` / `build.ps1` build for the current OS;
   CI (`.github/workflows/build.yml`) builds Linux + Windows + macOS bundles on a `v*` tag.
 
+### Installing a bundle
+
+Each archive carries the installer for its own platform: `installer/linux/install.sh`,
+`installer/macos/install.sh`, and the Inno Setup `.exe` for Windows. All three verify the
+shipped CLIP weights against a checksum, ensure Ollama and the embedding model, wire Claude
+Desktop, and then **run a post-install self-test that blocks success if anything is wrong** —
+naming the component rather than leaving it to be discovered later by a tool call that times
+out. To re-run that check at any time:
+
+```
+campaign-intelligence health-check          # human-readable; exit 1 if anything is wrong
+campaign-intelligence health-check --json   # the same report, for a script
+```
+
+The install needs no network for the product itself: the weights ship in the archive, and CI
+proves it by running the packaged binary inside an empty network namespace on Linux, and with
+every HTTP request routed to a closed port on macOS. Ollama's own installer does need
+internet; `--no-ollama` skips it if the machine already has it.
+
 Both **Claude Web** (custom connector → `<tunnel-url>/mcp`) and **Claude Desktop** (stdio, or
 `mcp-remote` to the local HTTP server) are supported.
 

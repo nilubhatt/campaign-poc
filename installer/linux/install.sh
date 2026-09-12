@@ -50,7 +50,10 @@ if [ "$WITH_OLLAMA" = 1 ]; then
   if command -v ollama >/dev/null 2>&1; then echo "Ollama present."; else
     echo "Installing Ollama..."; curl -fsSL https://ollama.com/install.sh | sh; fi
   (ollama serve >/dev/null 2>&1 &) || true; sleep 3
-  ollama pull nomic-embed-text || echo "warning: model pull failed; run 'ollama pull nomic-embed-text' later"
+  # NOT a warning that the install then ignores: a failed pull leaves text search dead, and
+  # the self-test below is what turns that into a refused install rather than a surprise
+  # three days later (item 4.3).
+  ollama pull nomic-embed-text || echo "Could not pull nomic-embed-text; the self-test will say so." >&2
 fi
 
 echo "Wiring Claude Desktop..."; "$DEST/campaign-intelligence" configure-desktop || true
@@ -71,6 +74,21 @@ EOF
   echo "Background service started (systemctl --user status campaign-intelligence)."
 fi
 
+# The gate (item 4.1). Everything above can succeed while the product is unusable - which
+# is exactly what happened in the field, where visual search was dead on an installed copy
+# and the only way to find out was a 60-second timeout inside a tool call. A non-zero exit
+# here fails the install instead of reporting success over it.
+echo
+echo "Running post-install self-test..."
+if ! "$DEST/campaign-intelligence" health-check; then
+  echo >&2
+  echo "INSTALL FAILED: the self-test above names the component that is not working." >&2
+  echo "The files are in $DEST; fix what it names and re-run:" >&2
+  echo "  \"$DEST/campaign-intelligence\" health-check" >&2
+  exit 1
+fi
+
 echo
 echo "Installed. 'campaign-intelligence' is in ~/.local/bin (ensure it's on your PATH)."
-echo "Claude Desktop is wired; fully quit and reopen it. Uninstall: ./uninstall.sh"
+echo "Claude Desktop is wired; fully quit and reopen it - closing the window is not enough."
+echo "Uninstall: ./uninstall.sh"

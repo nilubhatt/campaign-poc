@@ -558,7 +558,7 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 
 ## Phase 4 — Installer acceptance criteria
 
-- [ ] **4.1 Post-install self-test runs `health_check`** and a non-green result blocks the
+- [x] **4.1 Post-install self-test runs `health_check`** and a non-green result blocks the
       success screen, naming the failing component — all three platforms. The binary's
       `check-weights` subcommand (added in 1.2) is the seam; Linux already verifies the
       weights sidecar at install, so what remains is Windows/macOS parity and widening it
@@ -567,10 +567,45 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       delivered by 1.2 (CI-side + Linux installer) and completed here (all platforms,
       blocking the success screen) — 1.3 covers the zero-egress *proof*, not the install
       gate.
-- [ ] **4.2 Zero-egress install verified** on a host with egress disabled (actually tested,
+      **Done:** `health-check` gained `--json`, because an installer parsing prose is an
+      installer that breaks when the prose improves. All three platforms now run it as the
+      last step and refuse to report success over a failure.
+      *Linux* previously verified the weights checksum and nothing else; it now ends with
+      the self-test and exits non-zero, which a test proves by executing the real script
+      against a stub binary that fails the check.
+      *macOS had no installer at all* — the release shipped a tar.gz and left the user to
+      work out where to put it. It has one now, with the same checksum verification, the
+      same gate, and the Gatekeeper quarantine flag stripped (left in place, the first
+      launch is a "developer cannot be verified" dialog that nobody connects to the deck
+      they just tried to upload). Found while writing it: CI was copying the **Linux**
+      installer into the macOS archive, so a Mac user got systemd units and
+      `~/.local/share` paths.
+      *Windows* verified nothing. The gate cannot live in `[Run]` — Inno ignores a run
+      entry's exit code — nor in `ssPostInstall` as it stood, because that step precedes
+      `[Run]`, so a self-test there would check a machine before the installer had finished
+      installing Ollama. So Ollama, Claude Desktop wiring and the self-test all moved into
+      `[Code]`, in that order, and a failure raises — which is what Inno actually treats as
+      "setup did not complete". A message box would be dismissed and the success page shown
+      anyway, which is the behaviour being fixed.
+- [x] **4.2 Zero-egress install verified** on a host with egress disabled (actually tested,
       not "degrades gracefully").
-- [ ] **4.3 Ollama verified at install** to the same standard as the vision model — daemon
+      **Done, and the first attempt at it was worthless.** Injecting a socket guard through
+      `sitecustomize`/`PYTHONPATH` does nothing to a frozen binary — PyInstaller controls
+      `sys.path`, so the guard never loads and the test passes by doing nothing. CI now uses
+      real blocks against the packaged product: an empty network namespace (`unshare -rn`)
+      on Linux, and every HTTP request routed to a closed port on macOS. The library-level
+      proof runs in the suite too, blocking `socket.connect` and then LOADING the vision
+      model — not merely resolving its path, which is the weaker check that passes in
+      milliseconds without touching the network either way.
+- [x] **4.3 Ollama verified at install** to the same standard as the vision model — daemon
       reachable and `nomic-embed-text` present.
+      **Done:** `health_check` already separates "not reachable" from "the model is not
+      installed" — a running Ollama with nothing pulled answers on the socket and 404s every
+      embed, which is how text search was dead while everything looked fine. What was
+      missing was anything acting on it: a failed `ollama pull` was logged as a warning and
+      the install carried on. The pull may still fail; what has changed is that the
+      self-test runs afterwards and turns it into a refused install. Pinned by a test that
+      asserts the ordering, since a gate placed before the thing it gates is decoration.
 
 ## Phase 5 — Making it intuitive (ideas A–F)
 
