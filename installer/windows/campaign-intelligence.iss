@@ -218,8 +218,8 @@ begin
       'Campaign Intelligence was copied to this computer, but its self-test failed, so it ' +
       'is not ready to use.' + #13#10#13#10 + GSelfTestFailure + #13#10 +
       'Claude Desktop has NOT been connected, so nothing will try to use it yet.' +
-      #13#10#13#10 + 'The files are in ' + ExpandConstant('{app}') + '. Fix what is named ' +
-      'above and run this installer again.';
+      '' + #13#10#13#10 + 'The files are in ' + ExpandConstant('{app}') +
+      '. Fix what is named above and run this installer again.';
   end;
 end;
 

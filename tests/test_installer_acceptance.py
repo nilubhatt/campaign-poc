@@ -577,3 +577,24 @@ def test_the_windows_self_test_command_is_quoted_so_it_actually_runs():
     assert line.rstrip().endswith("2>&1\"',") or "2>&1\"'" in line, (
         f"the outer quote closes before the redirect, so nothing is captured: {line}"
     )
+
+
+def test_no_line_of_the_inno_script_starts_with_a_hash():
+    """Inno's preprocessor reads a line beginning with `#` as a directive, so a wrapped
+    string continuation starting with `#13#10` fails to compile with "Unknown preprocessor
+    directive" — on line 221, which nothing in this suite could see. Caught the first time
+    the script was actually compiled in CI. This keeps the shape that breaks it out of the
+    file between compiles."""
+    directives = ("define", "undef", "if", "ifdef", "ifndef", "elif", "else", "endif",
+                  "include", "emit", "error", "pragma", "expr", "insert", "sub", "endsub",
+                  "for", "dim", "file", "sethostname")
+
+    for number, line in enumerate(WINDOWS.read_text(encoding="ascii").splitlines(), 1):
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            continue
+        word = stripped[1:].split(None, 1)[0].split("(")[0].lower() if len(stripped) > 1 else ""
+        assert word in directives, (
+            f"line {number} begins with # but is not a directive, so Inno's preprocessor "
+            f"rejects it: {stripped[:60]}"
+        )
