@@ -751,6 +751,51 @@ def get_commentary(conn, campaign_id: str) -> list[dict]:
     return items
 
 
+def text_on_file(conn, campaign_id: str) -> Optional[dict]:
+    """Everything this record actually says, split by layer — or None if there is no record.
+
+    §6.1 verifies a finding's quote against this. Two things matter about the shape. It is a
+    LIST per layer and never one joined blob, because a quote must land inside a single
+    stored unit: joining them would let an elided quote span two chunks that were never
+    adjacent, and stitch a sentence the record does not contain out of two it does.
+
+    And it includes `title`/`detail` from the row as well as the chunks. Those are normally
+    packed into chunk 0 by `ingest_campaign`, but `update_campaign` rewrites the row without
+    re-chunking, so a quote from an edited brief would otherwise verify against the text as
+    it was before the edit and fail against the text as it reads now.
+    """
+    # Named columns are not safe to assume here. A database that predates a release is
+    # missing whatever that release added, which is the whole reason `_migrate_schema`
+    # exists — and this runs on every save, so a column this function names and an upgraded
+    # database does not have would fail every judgment on the machine it matters most on.
+    columns = _columns(conn, "campaigns")
+    if not columns:
+        return None
+    row = conn.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
+    if not row:
+        return None
+    layers: dict[str, list[str]] = {"body": [], "commentary": []}
+    for field in ("title", "detail"):
+        if field in columns and row[field]:
+            layers["body"].append(row[field])
+    chunk_columns = _columns(conn, "campaign_chunks")
+    chunk_rows = conn.execute(
+        "SELECT text, kind FROM campaign_chunks WHERE campaign_id = ? ORDER BY chunk_index",
+        (campaign_id,)).fetchall() if "kind" in chunk_columns else []
+    for chunk in chunk_rows:
+        # An unrecognised kind is body: a chunk whose layer we cannot name is not evidence
+        # that somebody commented, and defaulting the other way would let unknown text be
+        # cited as a reviewer's remark.
+        layers["commentary" if chunk["kind"] == "commentary" else "body"].append(chunk["text"])
+    # A title is quotable text but it is not a brief. The caller needs the difference to tell
+    # "your quote is wrong" from "there is nothing here to quote" — a stub imported from a
+    # KPI workbook has a title and no more, and sending a model off to reword a quote against
+    # one is a loop with no exit.
+    layers["brief"] = bool(layers["commentary"]) or any(
+        text != row["title"] for text in layers["body"])
+    return layers
+
+
 def set_chunk_embedded(conn, chunk_id: str) -> None:
     conn.execute("UPDATE campaign_chunks SET embedded = 1 WHERE id = ?", (chunk_id,))
     conn.commit()

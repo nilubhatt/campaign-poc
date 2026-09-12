@@ -467,7 +467,32 @@ def _add_modern_comment(path, *, author, when, text):
 
 # ══ design review of 2.5 ═════════════════════════════════════════════════════
 
-def test_a_finding_can_cite_a_comment_and_has_to_say_that_it_did(conn):
+@pytest.fixture
+def cited_records(conn):
+    """§6.1 verifies a quote against the record it names, so these two have to exist and
+    have to actually say what the findings below quote. They previously did not, which is
+    the defect §6.1 closes."""
+    import time
+    now = time.time()
+    conn.execute(
+        "INSERT INTO campaigns (id, title, record_type, detail, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?)",
+        ("camp_peru", "Peru launch", "campaign",
+         "Six-week flight across Lima and Arequipa.", now, now))
+    conn.execute(
+        "INSERT INTO campaigns (id, title, record_type, detail, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?)",
+        ("camp_x", "Jakarta launch", "campaign",
+         "The flighting table gives a posting date per asset.", now, now))
+    conn.commit()
+    store.insert_chunks(conn, "camp_peru",
+                        ["I do not think the timeline is realistic for a market this size."],
+                        kind="commentary",
+                        sources=[{"kind": "comment", "author": "Dana Ruiz",
+                                  "anchor": "slide 4"}])
+
+
+def test_a_finding_can_cite_a_comment_and_has_to_say_that_it_did(conn, cited_records):
     """The layer rule was stated on the browsing tool and absent on the judging one. A
     commentary chunk IS a retrieved chunk, so "I do not think the timeline is realistic" was
     a docstring-compliant quote for a finding against that campaign — and once saved it read
@@ -492,7 +517,7 @@ def test_a_finding_can_cite_a_comment_and_has_to_say_that_it_did(conn):
     assert cited["anchor"] == "slide 4"
 
 
-def test_a_precedent_defaults_to_the_deck_body(conn):
+def test_a_precedent_defaults_to_the_deck_body(conn, cited_records):
     """Unmarked means the brief itself, which is the safe reading: a citation that silently
     became commentary would be the defect this field exists to prevent."""
     result = core.save_evaluation(

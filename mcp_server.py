@@ -156,9 +156,13 @@ Basis = Literal["judged"]
 
 class Precedent(TypedDict):
     """What a finding is anchored to: a campaign that did it differently, or a rule it
-    breached. `quote` is text from the retrieved chunk, not written fresh — a finding that
-    cannot quote its source is a judgment call, not a citation."""
-    quote: NotRequired[str]           # <= 300 chars; longer than that is not a quote
+    breached. `quote` is text from the record, not written fresh — a finding that cannot
+    quote its source is a judgment call, not a citation.
+
+    **The quote is checked against the record you name, and the write is refused if it is
+    not there.** Case, line wrapping and curly quotes do not matter; words do. Leave a gap
+    out with … and both halves are still checked, in order. Paraphrase is not quotation."""
+    quote: str                        # REQUIRED, <= 300 chars, verified against the record
     campaign_id: NotRequired[str]     # for a departure from precedent
     rule_id: NotRequired[str]         # for a guardrail breach — a rule, not a campaign
     # Which layer the quote came from. Default "body" = the deck itself. Set "commentary"
@@ -709,8 +713,21 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
       • `missing_information`   — the brief does not say.
       • `internal_contradiction`— the brief contradicts itself.
 
-    Anchor findings to evidence: `quote` is text from the retrieved chunk, not written
-    fresh. A finding that cannot quote its source is a judgment call and reads as one.
+    Anchor findings to evidence, and the server checks it: a `precedent` must carry a
+    `quote`, and that quote must actually be in the record it names, at the layer it claims.
+    A quote that is not there is refused rather than saved — copy the words from the evidence
+    you were given, use … for anything you leave out, and never paraphrase into quotation
+    marks. If you cannot quote it, drop the citation and say it as an observation; an
+    invented quote reads as evidence, which is worse than none.
+
+    `guardrail_breach` and `precedent_departure` MUST cite a precedent: they are claims about
+    another record. `missing_information` and `internal_contradiction` are claims about the
+    brief in front of you, which is not in the library, so they need no citation — do not go
+    looking for a campaign to quote at in order to satisfy the shape.
+
+    `rule_id` means your guidelines — a record stored as reference material. It is not
+    interchangeable with `campaign_id`: doing it differently from a past campaign is a
+    `precedent_departure`, however strongly you feel about it.
 
     Check which LAYER your quote came from. Evidence rows carry `matched_kind`: `body` is
     what the deck says, `commentary` is what somebody said ABOUT it — a speaker note, a PDF

@@ -1149,16 +1149,40 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 
 *Depends on 2.4.*
 
-- [ ] **6.1 (G) `precedent.quote` required** on every finding, drawn from the retrieved chunk.
-      *Re-sequenced after review: 2.4 bounds the quote and requires a `campaign_id`/`rule_id`,
-      but "drawn from the retrieved chunk" cannot be enforced while `prepare_evaluation` is
-      stateless — the server does not retain what it returned. Needs 7.2 first, or a receipt
-      id from `prepare_evaluation` that `save_evaluation` requires. 7.3 is otherwise
-      subsumed by 2.4; what remains of it is this. A verified quote must also match the
-      chunk's LAYER (§2.5): a commentary quote is valid evidence, but only when the
-      precedent is marked `layer: "commentary"` — verifying the text alone would confirm a
-      reviewer's objection as something the deck itself said, and bless the misattribution
-      with a green tick.*
+- [x] **6.1 (G) `precedent.quote` required** on every finding, and verified.
+      **The re-sequencing note this item carried was wrong, and it is worth saying why.** It
+      read: "drawn from the retrieved chunk" cannot be enforced while `prepare_evaluation` is
+      stateless, so this needs 7.2 or a receipt id. True of the literal wording, and
+      irrelevant to the defect. The thing worth preventing is a quote attributed to a record
+      that the record does not contain — and that is checkable against the CITED RECORD's own
+      stored text, with no receipt, no retained window, and no dependency on who wrote the
+      retrieval query. Three items of machinery were sequenced ahead of a check that needed
+      none of them, because the note restated the requirement instead of the risk.
+      **What it does.** A `precedent` must carry a quote (it was bounded but never required,
+      so a finding could name a campaign and quote nothing). The cited id must resolve to a
+      real record — this codebase's own fixtures had been citing `camp_jdsea`, which resolved
+      to nothing, quoting a sentence nobody had written, and every test passed. The quote must
+      be IN that record, and at the layer it claims: the text of a reviewer's objection is in
+      the record, so verifying text alone would have returned a green tick on "the deck said
+      the timeline is unrealistic". Refused rather than flagged, for consistency idea 3's own
+      reason — a validation error is a retry, and an unverified quote stored beside verified
+      ones is drift nothing downstream can undo.
+      **Faithful, not byte-identical.** Case, wrapping and curly quotes are folded; an elision
+      (… or ...) matches in order and within ONE stored unit, so a quote cannot be stitched
+      out of two chunks that were never adjacent. Refusing a re-cased quote would not improve
+      provenance — it would teach the model that quoting is a game it loses, and the way a
+      model wins that game is by quoting less.
+      **`rule_id` is not a way round it.** It must resolve to a `reference` record, or the
+      check would be decorative: any finding could be saved unverified by writing `rule_id`
+      where `campaign_id` would have been checked.
+      **Deliberately not required on every finding.** `missing_information` and
+      `internal_contradiction` are claims about the subject, which is not in the library.
+      Demanding a precedent quote there would send the model looking for a campaign to quote
+      at, and a citation produced to satisfy a validator is the invented evidence this item
+      exists to stop. The two kinds that assert something about another record must cite one.
+      The rule is in `save_evaluation`'s description AND in `prepare_evaluation`'s note,
+      because a rule a model only meets as a rejection afterwards costs a retry every time.
+      Closes D6 and D7.
 - [ ] **6.2 (H) Guardrail breach vs departure from precedent** — two classes, different
       vocabulary, only one is debatable. *2.4 defined `kind` and the rule that a guardrail
       breach cannot be a note; what remains is making `kind` required, requiring a `rule_id`
@@ -1187,8 +1211,8 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       model-authored `proposal_text`; derive filters from the subject's attributes; pin
       `top_k`; stable deterministic tie-breaking; record embedding-model version per vector.
 - [x] **7.3 Enforce the output shape server-side** — reject writes missing a precedent quote
-      or exceeding caps, rather than accepting and hoping. *Done by 2.4, except the "missing
-      a precedent quote" half, which is 6.1 and depends on 7.2.*
+      or exceeding caps, rather than accepting and hoping. *Caps done by 2.4; the missing-quote
+      half done by 6.1, which also verifies the quote rather than only requiring one.*
 - [ ] **7.4 Tool descriptions as the shared prompt** — the evaluation procedure into
       `prepare_evaluation`'s description; set the MCP server-level `instructions` field.
 - [ ] **7.5 Ship the procedure with the evidence** — `prepare_evaluation`'s `note` carries

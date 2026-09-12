@@ -20,10 +20,40 @@ silent acceptance is permanent drift."
 
 Clean cutover — no legacy free-text path, decided with the product owner.
 """
+import time
+
 import pytest
 
 import core
 import store
+
+
+@pytest.fixture(autouse=True)
+def cited_records(conn):
+    """The records this file's fixtures quote, made real.
+
+    Until §6.1 these tests cited `camp_jdsea` — an id that resolved to nothing, quoting a
+    sentence nobody had written — and every one of them passed. That is the defect §6.1
+    closes, demonstrated inside its own test suite: the server stored an invented citation
+    with exactly the authority of a faithful one, so nothing, here or in production, could
+    tell them apart.
+
+    Inserted with fixed ids so the fixtures below stay literal and every test in this file
+    keeps its signature — the ids are the point, not how they were generated.
+    """
+    now = time.time()
+    conn.execute(
+        "INSERT INTO campaigns (id, title, record_type, detail, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?)",
+        ("camp_jdsea", "Jakarta SEA launch", "campaign",
+         "Every asset in the flighting table carries a content angle, posting date and "
+         "requirements per asset.", now, now))
+    conn.execute(
+        "INSERT INTO campaigns (id, title, record_type, detail, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?)",
+        ("no_ai_imagery", "Paid social guidelines", "reference",
+         "No AI-generated imagery in any paid placement.", now, now))
+    conn.commit()
 
 
 def _finding(**over):
@@ -293,6 +323,7 @@ def test_an_existing_database_can_still_save_an_evaluation(tmp_path):
     legacy = sqlite3.connect(path)
     legacy.executescript("""
         CREATE TABLE campaigns (id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                                detail TEXT,
                                 collection TEXT, markets TEXT NOT NULL DEFAULT '[]');
         CREATE TABLE evaluations (
             id TEXT PRIMARY KEY, campaign_id TEXT, subject_title TEXT NOT NULL,
@@ -304,6 +335,14 @@ def test_an_existing_database_can_still_save_an_evaluation(tmp_path):
     """)
     legacy.execute("INSERT INTO evaluations VALUES ('ev_old', NULL, 'Colombia v1', '[]', ?, "
                    "NULL, ?)", ("A 900-word essay on the Colombia brief. " * 40, time.time()))
+    # The record the fixture's finding cites. §6.1 verifies the quote against it, and this
+    # is the one test in the file whose database is not the fixture's — which is the point:
+    # the verification has to work on an UPGRADED schema, on the machine that already has
+    # data, not only on one built fresh from _SCHEMA.
+    legacy.execute("INSERT INTO campaigns (id, title, detail) VALUES (?,?,?)",
+                   ("camp_jdsea", "Jakarta SEA launch",
+                    "Every asset in the flighting table carries a content angle, posting "
+                    "date and requirements per asset."))
     legacy.commit()
     legacy.close()
 
@@ -326,6 +365,7 @@ def test_an_upgrade_keeps_the_judgments_already_on_the_machine(tmp_path):
     legacy = sqlite3.connect(path)
     legacy.executescript("""
         CREATE TABLE campaigns (id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                                detail TEXT,
                                 collection TEXT, markets TEXT NOT NULL DEFAULT '[]');
         CREATE TABLE evaluations (
             id TEXT PRIMARY KEY, campaign_id TEXT, subject_title TEXT NOT NULL,
@@ -501,7 +541,9 @@ def test_every_free_text_field_is_bounded(conn):
 
     with pytest.raises(ValueError):
         core.save_evaluation(conn, **_evaluation(findings=[
-            _finding(precedent={"campaign_id": "camp_x", "quote": "q" * 600})]))
+            # A REAL id: with a phantom one this would refuse for the missing record and the
+            # cap it is testing would never be reached.
+            _finding(precedent={"campaign_id": "camp_jdsea", "quote": "q" * 600})]))
     with pytest.raises(ValueError):
         core.save_evaluation(conn, **_evaluation(approve_if="a" * 600))
     with pytest.raises(ValueError):
