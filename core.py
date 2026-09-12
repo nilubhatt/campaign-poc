@@ -572,17 +572,35 @@ _MAX_ELIDED = 200
 # wrote. A quotation has one gap in it, occasionally two. Four is not a quotation with
 # elisions; it is a composition, and what it composes is deniable.
 _MAX_ELISIONS = 2
+# How many starting positions to try before giving up on a unit. A quote whose first phrase
+# appears twenty times in one record is not being let through by the twenty-first.
+_MAX_ALIGNMENTS = 20
 
 
-def _fold_for_quote_match(text: str) -> str:
+def _fold_for_quote_match(text: str, *, join_line_hyphens: bool = True) -> str:
     # NFKC first: it folds ligatures, decomposed accents and several width variants, so the
     # explicit tables below only have to carry what it leaves alone.
     text = unicodedata.normalize("NFKC", text)
     for raw, plain in {**_QUOTE_INVISIBLES, **_QUOTE_EQUIVALENTS}.items():
         text = text.replace(raw, plain)
-    text = _LINE_HYPHEN_RE.sub("", text)
+    if join_line_hyphens:
+        text = _LINE_HYPHEN_RE.sub("", text)
     text = _DASH_SPACING_RE.sub(" ", text)
     return " ".join(text.split()).casefold()
+
+
+def _haystacks(unit: str) -> list:
+    """Both readings of a hyphen at the end of a line, because no regex can tell them apart.
+
+    "sched-\nule" is one word the layout split; "well-\nknown" is a real hyphen that happens
+    to fall at the break — and typesetting breaks at an existing hyphen first, so the second
+    is the commoner of the two. Joining refuses "well-known"; not joining refuses "schedule".
+    The stored text is read both ways and a quote matching either is faithful, because the
+    only thing in question is where the layout put a line end.
+    """
+    joined = _fold_for_quote_match(unit)
+    apart = _fold_for_quote_match(unit, join_line_hyphens=False)
+    return [joined] if joined == apart else [joined, apart]
 
 
 def _quote_segments(quote: str, where: str) -> list:
@@ -628,20 +646,25 @@ def _quote_is_in(segments: list, texts: list) -> bool:
     """
     quoted = sum(len(s) for s in segments)
     for unit in texts:
-        haystack = _fold_for_quote_match(unit)
-        at, start, elided = 0, None, 0
-        for segment in segments:
-            found = haystack.find(segment, at)
-            if found < 0:
-                break
-            if start is None:
-                start = found
-            elided = (found + len(segment) - start) - quoted
-            if elided > _MAX_ELIDED:
-                break
-            at = found + len(segment)
-        else:
-            return True
+        for haystack in _haystacks(unit):
+            # Every place the first segment occurs, not only the first. Locking `start` to
+            # the leftmost match refused a quote that was verbatim on a recap slide, because
+            # the opening slide also carried its first phrase and the span was then measured
+            # across the whole deck. Recaps that restate the opening are ordinary in decks.
+            # Later segments keep the nearest match, which for a fixed start is optimal.
+            start = haystack.find(segments[0])
+            tries = 0
+            while start >= 0 and tries < _MAX_ALIGNMENTS:
+                tries += 1
+                at = start
+                for segment in segments:
+                    found = haystack.find(segment, at)
+                    if found < 0 or (found + len(segment) - start) - quoted > _MAX_ELIDED:
+                        break
+                    at = found + len(segment)
+                else:
+                    return True
+                start = haystack.find(segments[0], start + 1)
     return False
 
 
@@ -845,9 +868,19 @@ def _clean_closest_precedent(conn, value) -> Optional[dict]:
     similarity = value.get("similarity")
     if similarity is not None:
         try:
-            cleaned["similarity"] = float(similarity)
+            # `bool` is an `int` in Python, so True would have been stored as 1.0 — a
+            # similarity nobody computed. NaN and infinity are worse: `json.dumps` emits them
+            # as bare `NaN`/`Infinity`, which is not JSON, so the row reads back broken in
+            # any strict consumer.
+            if isinstance(similarity, bool):
+                raise TypeError
+            similarity = float(similarity)
+            if similarity != similarity or similarity in (float("inf"), float("-inf")):
+                raise ValueError
         except (TypeError, ValueError):
-            raise ValueError(f"{where}similarity must be a number, got {similarity!r}")
+            raise ValueError(f"{where}similarity must be a real number between 0 and 1, got "
+                             f"{similarity!r}")
+        cleaned["similarity"] = similarity
     return cleaned
 
 

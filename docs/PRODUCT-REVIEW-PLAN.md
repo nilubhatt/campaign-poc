@@ -1268,6 +1268,22 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       — two strangers' remarks stitched into a single quotation, which is the misattribution
       the layer rule exists to stop, one level down. The comparison was also on JSON text, so
       key order decided whether one person's comment was one comment.
+      **A third round, on those fixes.** *Greedy matching refused a faithful quote:* the span
+      was measured from the LEFTMOST occurrence of the first phrase, so a recap slide
+      restating the opening — ordinary in a deck — put the two halves of a verbatim quote at
+      opposite ends of the file. Every starting occurrence is tried now, up to twenty.
+      *The hyphen fold was still asymmetric,* the other way round: no regex can tell
+      "sched-\nule" (one word the layout split) from "well-\nknown" (a real hyphen falling at
+      the break), and typesetting breaks at an existing hyphen FIRST, so the second is the
+      commoner. The stored text is read both ways.
+      *Predicted metrics were quotable as body,* so a finding could record a campaign as
+      stating an outcome it had only forecast — the layer misattribution wearing different
+      clothes. Actual rows only.
+      And the total-elided bound *had no test that could fail*: every case with more than one
+      gap was refused by the gap COUNT before the arithmetic ran, so reverting it to per-hop
+      left the suite green. The commit claiming "thirteen mutations, all killed" did not
+      cover the one that mattered most — which is why a fix round gets its own mutation pass
+      and not just its own review.
       *And `basis` was the wrong word after all.* The first fix replaced `verified: true` with
       `basis: "computed"`, which collides: a finding's `basis` says who produced the FINDING,
       so the same key one level down claims the server wrote the citation. It did not — the

@@ -772,8 +772,8 @@ def text_on_file(conn, campaign_id: str) -> Optional[dict]:
     version included it and enforced that judgment only for stubs, which meant the same quote
     was evidence or not depending on whether the record happened to have a brief.
 
-    **Metric detail is in it.** "CTR was 3.2 percent, well above the benchmark" is the
-    product's most common real citation, `find_similar` shows it to the model as evidence, and
+    **Metric detail is in it**, for `metric_type='actual'` rows only. "CTR was 3.2 percent,
+    well above the benchmark" is the product's most common real citation, `find_similar` shows it to the model as evidence, and
     the first version refused every quote of it — a metrics-only record was told it had
     "title and numbers and nothing else" when the numbers' own words were exactly what was
     being quoted. It is body rather than commentary because it is the record speaking about
@@ -801,9 +801,13 @@ def text_on_file(conn, campaign_id: str) -> Optional[dict]:
     body = [row[field] for field in ("detail", "deck_text")
             if field in columns and row[field]]
     if _columns(conn, "metrics"):
+        # ACTUAL only. The case for quoting metrics is "what this campaign achieved" — a
+        # forecast is not that, and a finding quoting one under `layer: "body"` would read as
+        # the record stating an outcome it only predicted, which is the misattribution the
+        # layer rule exists to stop, wearing different clothes.
         body += [r["detail"] for r in conn.execute(
-            "SELECT detail FROM metrics WHERE campaign_id = ? ORDER BY created_at",
-            (campaign_id,)).fetchall() if r["detail"]]
+            "SELECT detail FROM metrics WHERE campaign_id = ? AND metric_type = 'actual' "
+            "ORDER BY created_at", (campaign_id,)).fetchall() if r["detail"]]
 
     commentary: list[str] = []
     chunk_columns = _columns(conn, "campaign_chunks")

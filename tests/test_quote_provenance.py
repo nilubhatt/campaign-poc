@@ -855,3 +855,87 @@ def test_an_unknown_layer_on_the_headline_precedent_reaches_the_model(conn, peru
                       "finding": "No end date"}]}))
     assert "error" in refused, refused
     assert "hearsay" in refused["error"]
+
+
+# ── third round ─────────────────────────────────────────────────────────────
+
+def test_two_legal_gaps_can_still_add_up_to_an_illegal_quote(conn):
+    """The bound is on the TOTAL, and nothing pinned that: reverting it to a per-hop check
+    left the whole suite green, because every test with more than one gap is refused by the
+    gap COUNT before the arithmetic ever runs."""
+    # Each gap has to be comfortably UNDER the limit, or a per-hop check refuses it too and
+    # the test passes for the wrong reason — which is exactly what the first version did.
+    filler = "Ordinary briefing prose that nobody would ever quote in a finding. "
+    deck = core.ingest_campaign(conn, title="Two gaps", detail=(
+        "alpha bravo charlie " + filler * 2 + " delta echo foxtrot " + filler * 2 +
+        " golf hotel india"))["campaign_id"]
+    assert len(filler * 2) < 200, "each gap legal on its own"
+    assert len(filler * 4) > 200, "the two of them together are not"
+
+    with pytest.raises(ValueError):
+        core.save_evaluation(conn, **_evaluation({
+            "severity": "blocking", "kind": "precedent_departure", "finding": "Departs",
+            "precedent": {"campaign_id": deck,
+                          "quote": "alpha bravo charlie … delta echo foxtrot … "
+                                   "golf hotel india"}}))
+
+
+def test_a_quote_is_matched_where_it_fits_not_where_it_first_appears(conn):
+    """A recap slide restating the opening is ordinary in a deck. Locking the span to the
+    leftmost occurrence of the first phrase measured it across the whole deck and refused a
+    quote that is verbatim and contiguous on one slide."""
+    deck = core.ingest_campaign(conn, title="With a recap", deck_text=(
+        "Budget is fixed at 40,000 USD for the flight.\n\n"
+        + "Ordinary briefing prose for this market.\n\n" * 18 +
+        "Key takeaways: Budget is fixed at 40,000 USD for the flight. Nothing goes live "
+        "before the embargo."))["campaign_id"]
+
+    assert core.save_evaluation(conn, **_evaluation({
+        "severity": "blocking", "kind": "precedent_departure", "finding": "Departs",
+        "precedent": {"campaign_id": deck,
+                      "quote": "Budget is fixed at 40,000 USD … Nothing goes live before "
+                               "the embargo"}}))["evaluation_id"]
+
+
+@pytest.mark.parametrize("stored,quoted", [
+    ("A well-\nknown creator roster is fixed for the flight.", "well-known creator roster"),
+    ("A well-\nknown creator roster is fixed for the flight.", "well known creator roster"),
+    ("Posting sched-\nule per creator agreed.", "Posting schedule per creator"),
+    ("Flight runs 3-\n28 March in Lima.", "3-28 March in Lima"),
+])
+def test_a_hyphen_at_a_line_end_is_read_both_ways(conn, stored, quoted):
+    """No regex can tell "sched-\nule" (one word the layout split) from "well-\nknown" (a real
+    hyphen that happened to fall at the break) — and typesetting breaks at an existing hyphen
+    first, so the second is the commoner of the two. Joining refuses one, not joining refuses
+    the other; the stored text is read both ways."""
+    cid = core.ingest_campaign(conn, title="Justified", detail=stored)["campaign_id"]
+    assert core.save_evaluation(conn, **_evaluation({
+        "severity": "blocking", "kind": "precedent_departure", "finding": "Departs",
+        "precedent": {"campaign_id": cid, "quote": quoted}}))["evaluation_id"]
+
+
+def test_a_forecast_is_not_what_the_campaign_achieved(conn):
+    """Metric detail is quotable because it is what a campaign DID. A predicted row is not
+    that, and quoting one under `layer: body` records the campaign as stating an outcome it
+    only forecast."""
+    cid = core.ingest_campaign(conn, title="Jakarta launch",
+                               detail="Six-week flight.")["campaign_id"]
+    core.add_metrics(conn, campaign_id=cid, metric_type="predicted",
+                     detail="We forecast CTR around 4 percent for this one.")
+
+    with pytest.raises(ValueError):
+        core.save_evaluation(conn, **_evaluation({
+            "severity": "should_fix", "kind": "precedent_departure", "finding": "Departs",
+            "precedent": {"campaign_id": cid, "quote": "forecast CTR around 4 percent"}}))
+
+
+@pytest.mark.parametrize("similarity", ["nan", float("inf"), True, "very high"])
+def test_a_similarity_has_to_be_a_real_number(conn, peru, similarity):
+    """`float("nan")` serialises as a bare `NaN`, which is not JSON — the row reads back
+    broken in any strict consumer. `True` would have been stored as a similarity of 1.0 that
+    nobody computed."""
+    with pytest.raises(ValueError):
+        core.save_evaluation(
+            conn, closest_precedent={"campaign_id": peru, "similarity": similarity},
+            **_evaluation({"severity": "blocking", "kind": "missing_information",
+                           "finding": "No end date"}))
