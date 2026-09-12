@@ -1,0 +1,83 @@
+name: weights-provenance
+
+# "Why should I trust a 300MB checkpoint hosted in someone's GitHub repo?" is a fair
+# question from a security-conscious customer, and the honest answer is not "because we say
+# so" — it is that the conversion is deterministic, so anyone can rebuild the file and get
+# the same bytes. This job proves that on every change to the weights tooling: fetch the
+# pinned upstream fp32, convert it, and require the result to equal the hash the product
+# ships against. Then attach build provenance, so `gh attestation verify` can confirm the
+# asset came from this workflow in this repo rather than from someone's laptop.
+
+on:
+  push:
+    paths:
+      - 'scripts/convert_fp16.py'
+      - 'scripts/fetch_weights.py'
+      - '.github/workflows/weights-provenance.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the conversion dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # CPU wheels only: this job converts a checkpoint, it never runs the model on a GPU.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install safetensors
+
+      - name: Fetch the pinned upstream fp32 checkpoint
+        run: |
+          python - <<'PY'
+          import sys, urllib.request
+          from pathlib import Path
+          sys.path.insert(0, "scripts")
+          import fetch_weights as fw
+
+          dest = Path("upstream.safetensors")
+          print(f"downloading {fw.UPSTREAM.note}: {fw.UPSTREAM.url}")
+          fw._download(fw.UPSTREAM.url, dest, fw.UPSTREAM.size_bytes)
+          fw.verify(dest, fw.UPSTREAM.sha256)
+          print(f"upstream verified: {fw.UPSTREAM.sha256}")
+          PY
+
+      - name: Rebuild the fp16 checkpoint and require it to match what we ship
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, "scripts")
+          import fetch_weights as fw
+          from convert_fp16 import convert
+
+          rebuilt = convert(Path("upstream.safetensors"), Path("rebuilt.safetensors"))
+          actual = fw.sha256_of(rebuilt)
+          expected = fw.MIRROR.sha256
+
+          print(f"rebuilt : {actual}")
+          print(f"expected: {expected}")
+          if actual != expected:
+              raise SystemExit(
+                  "the fp16 conversion is no longer reproducible.\n"
+                  "Either the conversion changed, or the mirrored asset does not match "
+                  "what this source produces. Do not ship until this is explained."
+              )
+          print(f"reproducible: {rebuilt.stat().st_size:,} bytes, hash matches the shipped mirror")
+          PY
+
+      - name: Attest that this workflow built these bytes
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: rebuilt.safetensors

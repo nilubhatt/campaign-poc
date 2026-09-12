@@ -32,6 +32,30 @@ machine, with nothing configured. A **source checkout** has no bundled copy and 
 model by tag from huggingface.co on first use; run `python scripts/fetch_weights.py models`
 once if you want the offline behaviour locally too.
 
+### Weights provenance — verify rather than trust
+
+The shipped checkpoint is vendored in this repo's [`weights-v1`](https://github.com/nilubhatt/campaign-poc/releases/tag/weights-v1)
+release, because the networks this product targets block huggingface.co. You should not have
+to take that file on trust:
+
+| | |
+|---|---|
+| shipped (fp16) | `cbd90e47b939016c1cb2e3dc63e3d5ee3d663da57dc929c6ebb3067eedd0c452` · 302,588,458 bytes |
+| upstream (fp32) | `e6d1bd7789aa45192b3bf90570a789b478bae1b74ebcce7eddd908e83a2b7c31` · 605,143,284 bytes |
+| upstream source | `timm/vit_base_patch32_clip_224.openai` @ `a6f597a30f7b82c51704746581f9a4e41421e878` |
+
+The conversion is deterministic, so you can rebuild the exact bytes:
+
+```bash
+python scripts/convert_fp16.py upstream_fp32.safetensors rebuilt.safetensors
+shasum -a 256 rebuilt.safetensors   # matches the fp16 hash above
+```
+
+CI does this on every change to the weights tooling (`.github/workflows/weights-provenance.yml`)
+and fails if the rebuild stops matching, then attaches build provenance — so
+`gh attestation verify open_clip_model.safetensors --repo nilubhatt/campaign-poc` confirms
+the bytes came from that workflow rather than from someone's laptop.
+
 ### Offline / restricted networks — pointing at local CLIP weights
 
 Resolving the model by tag goes to **huggingface.co**, which plenty of corporate networks

@@ -140,15 +140,16 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
         re-derived `cbd90e47…` from the pinned upstream blob). Worth a CI job that rebuilds
         it from upstream and attaches build provenance, so "why trust this mirror" has an
         answer a customer can run themselves. Added as **1.2c**.
-- [ ] **1.2c Prove the mirror, don't ask to be trusted.** The fp16 conversion is
+- [x] **1.2c Prove the mirror, don't ask to be trusted.** The fp16 conversion is
       bit-for-bit reproducible — a reviewer independently re-derived `cbd90e47…` from the
-      pinned upstream blob using the checked-in script, which is the strongest possible
-      answer to "why should I trust a checkpoint hosted in someone's GitHub repo". Make CI
-      demonstrate it: a job that downloads upstream by pinned hash, converts, asserts the
-      result equals `MIRROR.sha256`, and attaches build provenance
-      (`actions/attest-build-provenance`) so a customer can run `gh attestation verify`.
-      Add a README "weights provenance" section with both hashes, the upstream commit, and
-      the one-line reproduction command.
+      pinned upstream blob using the checked-in script, which is a better answer to "why
+      should I trust a checkpoint hosted in someone's GitHub repo" than asking for trust.
+      `.github/workflows/weights-provenance.yml` now demonstrates it on every change to the
+      weights tooling: fetch the pinned upstream fp32, convert, require the result to equal
+      `MIRROR.sha256` (failing loudly with "do not ship until this is explained" if it ever
+      diverges), then attach build provenance via `actions/attest-build-provenance` so a
+      customer can run `gh attestation verify`. README gained a "weights provenance" section
+      with both hashes, the upstream commit, and the one-line rebuild command.
 
 - [ ] **1.3 No Hub dependency at runtime** (defect 03). Verified, not assumed: with weights
       present locally, assert **zero** network calls (socket/hf_hub blocked in the test) and
