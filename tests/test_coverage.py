@@ -244,14 +244,19 @@ def test_one_collection_spelled_two_ways_is_one_cell(conn):
 
 
 def test_the_two_surfaces_agree_about_a_case_split_library(conn):
-    """What C16 claimed and did not deliver."""
+    """What C16 claimed and did not deliver. A measured campaign elsewhere keeps the library
+    out of the wholly-unmeasured state, where the first-run guidance takes over from the
+    cell list (§5.6, D66)."""
+    _campaign(conn, "Jakarta", market="SEA", outcomes=True)
     _campaign(conn, "Bogota", market="LATAM")
     _campaign(conn, "Lima", market="latam")
 
-    thin = {t["market"] for t in core.coverage(conn)["thin"]}
+    thin = [t["market"] for t in core.coverage(conn)["thin"]]
     gap = [g for g in core.gaps(conn)["gaps"] if g["code"] == "market_without_outcomes"]
 
-    assert thin == {"LATAM"}
+    # SEA is legitimately thin too — one measured campaign is `single_example`. What matters
+    # is that LATAM appears ONCE, and that gaps names the same barren market.
+    assert thin.count("LATAM") == 1, f"one cell, not two spellings: {thin}"
     assert gap and set(gap[0]["counts"]["markets"]) == {"LATAM"}
 
 

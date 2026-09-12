@@ -799,6 +799,36 @@ def diff_campaigns(earlier: str, later: str) -> dict:
 
 @mcp.tool()
 @_catch_value_errors
+def getting_started() -> dict:
+    """What this library can and cannot do yet, and the shortest way to more.
+
+    Call it on the first interaction of a session when list_campaigns is short or empty, and
+    whenever the user asks what the product can do, why an answer looked thin, or what to add
+    next.
+
+    **Say the limits before giving any judgment from a library this size.** A confident,
+    evidence-free verdict is exactly what a new user will believe, and `cannot` is what stops
+    that — each entry names the record that would lift it, so it is a next step rather than a
+    disclaimer.
+
+    `shortest_path` is ORDERED and is the review's own prescription: one brief you liked, one
+    you did not, the rulebook. The contrast is the point — two briefs somebody liked teach
+    the library nothing about the axis it is being asked to judge on. Offer the first step;
+    do not read the list out.
+
+    There is deliberately no "you need N records" number. Usefulness depends on what is in
+    the library, not how much: two contrasting briefs make the like/dislike comparison work
+    at two records, and a hundred concluded campaigns with nothing measured still cannot say
+    whether any of it worked."""
+    conn = store.connect()
+    try:
+        return core.readiness(conn)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
 def coverage() -> dict:
     """Where the library is thick and where it is thin — by market, collection and stage.
 

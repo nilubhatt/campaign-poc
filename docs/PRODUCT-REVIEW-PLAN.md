@@ -1078,7 +1078,37 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       for the word "title" in prose.
       And `health_check` already had a field called `coverage`, meaning indexing
       completeness, whose docstring now read as a pointer to this tool; disambiguated.
-- [ ] **5.6 (F) Guided first run** on an empty or thin library.
+- [x] **5.6 (F) Guided first run** on an empty or thin library.
+      **Done, in two halves.** The *shortest path* is the review's own prescription and is
+      ordered rather than offered as a menu: one brief you liked, one you did not, the
+      rulebook. The contrast is the point — two briefs somebody liked teach the library
+      nothing about the axis it is being asked to judge on. Steps drop off as they are taken,
+      because a path that still lists what you have done is a checklist nobody believes.
+      **There is deliberately no "you need N records" number**, and the review asked for one
+      ("how many records it takes before judgments become useful"). Giving a number would be
+      the kind of confident, unfounded figure this whole review was written against:
+      usefulness depends on WHAT is in the library, not how much. Two contrasting briefs make
+      the like/dislike comparison work at two records; a hundred concluded campaigns with
+      nothing measured still cannot say whether any of it worked. So readiness is stated as
+      what the product **can** and **cannot** do given what is actually present, and every
+      limit names the record that would lift it — a capability statement nobody can act on is
+      a disclaimer.
+      Each `can`/`cannot` carries a stable `code` beside its prose, for §3.1's reason: the
+      sentence is for the user and will be rewritten, and nothing reading it should break
+      when it is. Two of this item's own tests were coupled to wording before that existed.
+      **It reaches somebody.** `list_campaigns` — the surface the review named, "returns
+      eight rows" with nothing to say whether eight is enough — carries the guidance while
+      the library is not yet working, and stops once it is, because guidance that never goes
+      away is the thing nobody reads.
+      **Closes three tracker rows.** D43: every step here is an offer whose arguments only
+      the user has, so `needs` is what keeps "accepting is one step" honest. D66: `coverage`'s
+      `thin` list collapses to one summary line plus the path when nothing in the library is
+      measured at all — listing 25 weak cells in a wholly-weak library is the matrix again,
+      and the answer at that size is not "fix LATAM". D68: `unmeasured_campaigns` groups the
+      fix per campaign, so one campaign in three thin cells is offered once.
+      Found while wiring D66: "nothing is measured" has to be a fact about the LIBRARY, not
+      about the cell markers — five cells of one measured campaign each read `single_example`
+      rather than `measured`, and that is a library with real evidence in it.
 
 ## Phase 6 — Making the reasoning defensible (ideas G–L)
 

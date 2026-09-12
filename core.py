@@ -1735,6 +1735,27 @@ def coverage(conn) -> dict:
                                           -c["campaigns"], c["market"] or ""))
     thin = [c for c in ranked if c["evidence"] in ("no_outcomes", "single_example")]
 
+    # D66: when nothing in the library is strong, listing every weak cell is the matrix
+    # again — and the answer at that size is not "fix LATAM", it is the first-run guidance.
+    # "Nothing here is measured yet" is about the LIBRARY, not about the cell markers: five
+    # cells of one measured campaign each read `single_example` rather than `measured`, and
+    # that is a library with real evidence in it, not one to hand back to the first-run
+    # guidance.
+    everything_is_thin = bool(campaigns) and not measured
+
+    # D68: the same campaign sits in one cell per market, so a campaign that ran in three
+    # markets had the same fix offered three times. The grid is right for "what do I have in
+    # Colombia"; the ACTION is per campaign.
+    unmeasured: dict[str, dict] = {}
+    for cell in thin:
+        for campaign in [c for c in campaigns if c["id"] in cell["campaign_ids"]]:
+            if campaign["id"] in measured:
+                continue
+            entry = unmeasured.setdefault(campaign["id"], {
+                "campaign_id": campaign["id"], "title": campaign["title"], "markets": []})
+            if cell["market"] and cell["market"] not in entry["markets"]:
+                entry["markets"].append(cell["market"])
+
     shown = cells[:MAX_COVERAGE_CELLS]
     hidden: dict = {}
     for cell in cells[MAX_COVERAGE_CELLS:]:
@@ -1753,8 +1774,16 @@ def coverage(conn) -> dict:
                              for kind in _EVIDENCE_ORDER},
         # A matrix is something to browse; the answer is which cells are weak. Worst first,
         # so the first line is the one that matters.
-        "thin": thin[:MAX_COVERAGE_CELLS],
+        "thin": [] if everything_is_thin else thin[:MAX_COVERAGE_CELLS],
         "thin_total": len(thin),
+        "thin_summary": (f"Nothing in this library is measured yet: {len(campaigns)} "
+                         f"campaign(s) across {len({c['market'] for c in cells})} cell(s), "
+                         f"none with results on file. The place to start is not a "
+                         f"particular market."
+                         if everything_is_thin else None),
+        "unmeasured_campaigns": sorted(unmeasured.values(),
+                                       key=lambda c: (-len(c["markets"]), c["title"]))[:10],
+        "next_actions": readiness(conn)["shortest_path"] if everything_is_thin else [],
         "campaigns_total": len(campaigns),
         "markets": sorted({c["market"] for c in cells if c["market"]}),
         "collections": sorted({c["collection"] for c in cells if c["collection"]}),
@@ -1784,6 +1813,175 @@ def _markets_of(campaign: dict) -> list:
             if value.lower() not in {m.lower() for m in named}:
                 named.append(value)
     return named or [None]
+
+
+# ── the first run (§5.6, idea F) ────────────────────────────────────────────
+#
+# "A fresh install has no campaigns and therefore no opinions, and nothing tells a new user
+# how many records it takes before judgments become useful, or which ones to add first."
+#
+# "How many records" has no honest numeric answer, and giving one would be the kind of
+# confident number this whole review was written against. Usefulness depends on WHAT is in
+# the library: two contrasting briefs make the liked/not-liked comparison work at two
+# records, and a hundred concluded campaigns with nothing measured still cannot say whether
+# any of it worked. So readiness is expressed as what the product can and cannot do given
+# what is actually present, and every limit names the record that would lift it — a
+# capability statement nobody can act on is a disclaimer.
+
+
+def readiness(conn) -> dict:
+    """What this library can and cannot do yet, and the shortest path to more.
+
+    The path is the review's own prescription, in its order, because it is a path and not a
+    menu: one brief you liked, one you did not, the rulebook. The contrast is the point —
+    two briefs somebody liked teach nothing about the axis they are asking the product to
+    judge on.
+    """
+    superseded = store.get_superseded_campaign_ids(conn)
+    records = [c for c in store.list_campaigns(conn) if c["id"] not in superseded]
+    campaigns = [c for c in records if c.get("record_type") not in ("reference", "stub")]
+    measured = store.campaigns_with_actual_metrics(conn)
+
+    has_rulebook = any(c.get("record_type") == "reference" for c in records)
+    reactions = {t.get("value") for c in campaigns for t in (c.get("tags") or [])}
+    liked = bool(reactions & {"liked"})
+    disliked = bool(reactions & {"not_liked", "mixed_reaction"})
+    with_outcomes = [c for c in campaigns if c["id"] in measured]
+
+    can: list[dict] = []
+    cannot: list[dict] = []
+
+    if len(campaigns) >= 2:
+        can.append({"code": "compare_to_precedent",
+                    "what": "Compare a new brief against what you have run before, and say "
+                            "where it departs from it."})
+    else:
+        cannot.append({
+            "code": "compare_to_precedent",
+            "what": "Compare a new brief against anything — with fewer than two campaigns "
+                    "there is nothing to compare against, so a judgment would be an opinion "
+                    "rather than a reading of your own record.",
+            "needs": "at least two past campaigns",
+        })
+
+    if liked and disliked:
+        can.append({"code": "weigh_reactions",
+                    "what": "Weigh what you liked against what you did not, because the "
+                            "library holds both."})
+    else:
+        cannot.append({
+            "code": "weigh_reactions",
+            "what": "Tell what you like from what you do not — every record here reads the "
+                    "same way on that axis, so it cannot be used to judge a new brief.",
+            "needs": "a campaign you were unhappy with, tagged as such"
+                     if liked else "one campaign you liked and one you did not",
+        })
+
+    if len(with_outcomes) >= 1:
+        can.append({"code": "say_what_worked",
+                    "what": f"Say whether something worked, for the "
+                            f"{len(with_outcomes)} campaign(s) with measured results."})
+    if len(with_outcomes) < len(campaigns):
+        cannot.append({
+            "code": "say_what_worked",
+            "what": f"Say whether anything worked for the "
+                    f"{len(campaigns) - len(with_outcomes)} campaign(s) with no measured "
+                    f"results — those comparisons are to what was planned, not to what "
+                    f"happened.",
+            "needs": "the results of a campaign that has concluded",
+        })
+
+    if has_rulebook:
+        can.append({"code": "check_against_rules",
+                    "what": "Check a brief against your own guidelines, not just against "
+                            "precedent."})
+    else:
+        cannot.append({
+            "code": "check_against_rules",
+            "what": "Check a brief against a rule. Without your guidelines it can say "
+                    "\u201cthis differs from what you did in Peru\u201d, which invites an "
+                    "argument, but never \u201cthis breaks your own rule\u201d, which does "
+                    "not.",
+            "needs": "your brand guidelines, uploaded as reference material",
+        })
+
+    if not campaigns:
+        stage = "empty"
+        can = []
+    elif len(campaigns) < 2:
+        stage = "first_records"
+    elif not with_outcomes:
+        stage = "thin"
+    else:
+        stage = "working"
+
+    return {
+        "stage": stage,
+        "campaigns": len(campaigns),
+        "with_outcomes": len(with_outcomes),
+        "has_rulebook": has_rulebook,
+        "can": can,
+        "cannot": cannot,
+        "shortest_path": _shortest_path(liked, disliked, has_rulebook),
+        "note": ("Say the stage and what it cannot do yet before giving any judgment from a "
+                 "library this size — a confident, evidence-free verdict is the thing a new "
+                 "user will believe. `shortest_path` is ordered: it is a path, not a menu."),
+    }
+
+
+def _shortest_path(liked: bool, disliked: bool, has_rulebook: bool) -> list[dict]:
+    """The review's three, in its order, minus what is already done.
+
+    Every one of these is an offer whose arguments only the user has — there is nothing in an
+    empty library to prefill from — so `needs` is what keeps "accepting is one step" honest
+    (tracker D43).
+    """
+    steps = []
+    if not liked:
+        steps.append(actions.action(
+            "Add one campaign you were happy with",
+            "upload_campaign",
+            why="The library has nothing it knows you liked, so it has no positive example "
+                "to reason from.",
+            consent="ask",
+            needs=["what it was called", "its deck or a description of it",
+                   "that you were happy with it"],
+            tags=[{"value": "liked"}]))
+    if not disliked:
+        steps.append(actions.action(
+            "Add one campaign you were not happy with",
+            "upload_campaign",
+            why="Without a contrast every record reads the same way, and the comparison the "
+                "product exists to make cannot be made.",
+            consent="ask",
+            needs=["what it was called", "its deck or a description of it",
+                   "what you did not like about it"],
+            tags=[{"value": "not_liked"}]))
+    if not has_rulebook:
+        steps.append(actions.action(
+            "Add your brand guidelines as the rulebook",
+            "upload_campaign",
+            why="A rule that is not on file can only be reported as a departure from "
+                "precedent, which invites an argument.",
+            consent="ask",
+            needs=["the guidelines document, or the rules in your own words"],
+            record_type="reference"))
+    return steps
+
+
+def list_campaigns_with_readiness(conn) -> dict:
+    """`list_campaigns`, plus the guidance when the library is not yet working.
+
+    The review named this surface: "list_campaigns returns eight rows", with nothing to say
+    whether eight is enough. Attached only while it is NOT working — guidance that never
+    stops appearing is the thing nobody reads (tracker D67).
+    """
+    campaigns = store.list_campaigns(conn)
+    state = readiness(conn)
+    result: dict = {"count": len(campaigns), "campaigns": campaigns}
+    if state["stage"] != "working":
+        result["readiness"] = state
+    return result
 
 
 def published_tool_parameters() -> dict[str, list[str]]:
