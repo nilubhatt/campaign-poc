@@ -209,3 +209,150 @@ def test_the_gap_about_markets_is_computed_from_these_cells(conn):
 
     assert set(gap["counts"]["markets"]) <= thin
     assert "Malaysia" in thin and "Singapore" in thin
+
+
+# ══ review of 5.5 ════════════════════════════════════════════════════════════
+
+def test_one_market_spelled_two_ways_is_one_cell(conn):
+    """The 5.3 bug, one file over, and it made this item's own claim false. `_markets_of`
+    folded case WITHIN a record while the bucket key used the raw spelling, so two records
+    spelled differently became two cells — one reading `no_outcomes` and the other
+    `single_example`, for a library that search treats as a single market of two campaigns
+    with one measured. `gaps()` folded correctly and reported no market gap at all, so the
+    two surfaces contradicted each other on the same library."""
+    a = _campaign(conn, "Bogota", market="LATAM", outcomes=True)
+    _campaign(conn, "Lima", market="latam")
+
+    report = core.coverage(conn)
+
+    assert report["markets"] == ["LATAM"], report["markets"]
+    cell = next(c for c in report["cells"] if c["market"] == "LATAM")
+    assert cell["campaigns"] == 2 and cell["with_outcomes"] == 1
+    assert len(store.filter_campaign_ids(conn, market="latam")) == cell["campaigns"]
+
+
+def test_one_collection_spelled_two_ways_is_one_cell(conn):
+    """`filter_campaign_ids` matches `LOWER(collection)`, so one collection became two cells
+    and the headline marker was wrong because of a capital letter."""
+    _campaign(conn, "Bogota", market="LATAM", collection="Q4 launch", outcomes=True)
+    _campaign(conn, "Lima", market="LATAM", collection="q4 launch", outcomes=True)
+
+    report = core.coverage(conn)
+
+    assert report["collections"] == ["Q4 launch"]
+    assert len(report["cells"]) == 1
+
+
+def test_the_two_surfaces_agree_about_a_case_split_library(conn):
+    """What C16 claimed and did not deliver."""
+    _campaign(conn, "Bogota", market="LATAM")
+    _campaign(conn, "Lima", market="latam")
+
+    thin = {t["market"] for t in core.coverage(conn)["thin"]}
+    gap = [g for g in core.gaps(conn)["gaps"] if g["code"] == "market_without_outcomes"]
+
+    assert thin == {"LATAM"}
+    assert gap and set(gap[0]["counts"]["markets"]) == {"LATAM"}
+
+
+def test_a_forecast_is_not_an_outcome_here_either(conn):
+    """Mutation-proof: swapping `campaigns_with_actual_metrics` for any-metric-row left the
+    suite green. It is the §5.3 bug, and nothing pinned it on this surface."""
+    cid = _campaign(conn, "Bogota", market="LATAM")
+    store.add_metrics(conn, cid, metric_type="predicted", detail="expect CTR 2%")
+
+    cell = next(c for c in core.coverage(conn)["cells"] if c["market"] == "LATAM")
+
+    assert cell["with_outcomes"] == 0
+    assert cell["evidence"] == "no_outcomes"
+
+
+def test_a_campaign_that_has_not_run_is_not_missing_its_outcomes(conn):
+    """§5.3 wrote this lesson out and this surface repeated it: a proposed campaign cannot
+    have results, so marking its cell `no_outcomes` is a complaint nobody can answer."""
+    _campaign(conn, "Next quarter", market="LATAM", status="proposed")
+
+    cell = next(c for c in core.coverage(conn)["cells"] if c["market"] == "LATAM")
+
+    assert cell["evidence"] == "not_yet_run"
+    assert cell not in core.coverage(conn)["thin"]
+
+
+def test_a_placeholder_is_not_coverage(conn):
+    """A `stub` is "a placeholder record" by the product's own definition, so counting it as
+    evidence a judgment can lean on describes content that is not there — and it arrived with
+    a null stage that nothing explained."""
+    core.ingest_campaign(conn, title="Placeholder", detail="to fill in later",
+                         record_type="stub", confirm=True)
+    _campaign(conn, "Bogota", market="LATAM", outcomes=True)
+
+    report = core.coverage(conn)
+
+    assert report["campaigns_total"] == 1
+    assert all(c["stage"] is not None for c in report["cells"])
+
+
+def test_a_library_where_everything_is_thin_gets_one_line_not_the_matrix_twice(conn):
+    """With 25 thin cells, `cells` and `thin` came back byte-identical: no thick cell was
+    shown, ten cells were hidden with no count of what, and `single_example` — this item's
+    own headline — never appeared because `no_outcomes` filled the list. "The matrix is the
+    evidence" failed exactly where it was needed."""
+    for i in range(30):
+        _campaign(conn, f"Unmeasured {i}", market=f"Market {i:02d}")
+    for i in range(5):
+        _campaign(conn, f"Measured {i}", market=f"Strong {i}", outcomes=True)
+
+    report = core.coverage(conn)
+
+    assert sum(report["hidden"].values()) == report["cells_total"] - len(report["cells"])
+    # The list can lose detail; the SHAPE cannot depend on where the cut fell. A report
+    # showing 25 weak cells out of 35 said nothing at all about the 5 measured ones.
+    assert report["evidence_summary"]["measured"] == 0
+    assert report["evidence_summary"]["single_example"] == 5
+    assert report["evidence_summary"]["no_outcomes"] == 30
+    assert report["thin_total"] == 35 and len(report["thin"]) == 25
+
+
+def test_the_cells_are_ordered_for_browsing_and_thin_carries_the_ranking(conn):
+    """Mutation-proof: two mutations of the sort survived, because the only ordering test
+    used two cells whose alphabetical order happened to agree with their ranking."""
+    _campaign(conn, "Zulu", market="ZZ", outcomes=True)
+    _campaign(conn, "Zulu 2", market="ZZ", outcomes=True)
+    _campaign(conn, "Alpha", market="AA")
+
+    report = core.coverage(conn)
+
+    assert [c["market"] for c in report["cells"]] == ["AA", "ZZ"], "browsing order"
+    assert [t["market"] for t in report["thin"]] == ["AA"], "ranked, worst first"
+
+
+def test_a_region_counts_as_a_market_when_nothing_else_does(conn):
+    """Mutation-proof: ignoring `region` in `_markets_of` left the suite green, though
+    `region` is how a single-country activation is recorded."""
+    _campaign(conn, "Jakarta", region="Indonesia", outcomes=True)
+
+    assert core.coverage(conn)["markets"] == ["Indonesia"]
+
+
+def test_an_offer_that_cannot_be_accepted_as_it_stands_says_how_many_things_it_needs(conn):
+    """Accepting it literally — calling with only the prefilled arguments — raised
+    `TypeError: missing 'title'`, and `needs` named only the deck. §5.2's promise is that
+    accepting is one step; where it is not, `needs` has to account for every required
+    argument that is not prefilled.
+
+    Asserted structurally rather than by looking for the word "title" in the prose, which is
+    the wording-coupling §5.1 was written about."""
+    import inspect
+
+    import mcp_server
+
+    offer = core.coverage(conn)["next_actions"][0]
+    signature = inspect.signature(getattr(mcp_server, offer["tool"]))
+    required = {name for name, param in signature.parameters.items()
+                if param.default is inspect.Parameter.empty}
+    unsatisfied = required - set(offer["prefilled_args"])
+
+    assert len(offer.get("needs", [])) >= len(unsatisfied), (
+        f"{offer['tool']} still needs {unsatisfied} and `needs` lists "
+        f"{offer.get('needs')}"
+    )

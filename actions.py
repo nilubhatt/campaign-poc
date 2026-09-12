@@ -172,6 +172,25 @@ def after_upload(*, campaign_id: str, status: Optional[str],
     return trim(offers)
 
 
+def to_first_upload() -> list[dict]:
+    """The one thing an empty library needs. In one place because `gaps()` and `coverage()`
+    both offer it and had the sentence written out twice — two sources of truth for one
+    offer, which is how they drift.
+
+    `needs` names the title as well as the deck: accepting the offer literally, with only the
+    prefilled arguments, raised `TypeError: missing 'title'` — and §5.2's promise is that
+    accepting is one step, so where it is not, `needs` has to be complete.
+    """
+    return trim([action(
+        "Add a campaign you were happy with, and one you were not",
+        "upload_campaign",
+        why="Two contrasting records is the smallest library that can produce a useful "
+            "judgment.",
+        consent="ask",
+        needs=["what the campaign is called",
+               "its deck, or a description of what it was"])])
+
+
 def to_finish_indexing(campaign_id: Optional[str]) -> list[dict]:
     """The offer behind every "this is only partly searchable" warning (tracker D16).
 

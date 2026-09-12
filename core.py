@@ -1096,13 +1096,7 @@ def gaps(conn) -> dict:
                               "what you have already run, so with nothing stored there is "
                               "nothing to compare against.",
             "counts": {"campaigns": 0},
-            "next_actions": actions.trim([actions.action(
-                "Add a campaign you were happy with, and one you were not",
-                "upload_campaign",
-                why="Two contrasting records is the smallest library that can produce a "
-                    "useful judgment.",
-                consent="ask",
-                needs=["the campaign's deck or a description of it"])]),
+            "next_actions": actions.to_first_upload(),
         })
         return _ranked(found)
 
@@ -1660,7 +1654,7 @@ MAX_COVERAGE_CELLS = 25
 # Worst first. `no_outcomes` outranks `single_example` because a cell with two campaigns and
 # nothing measured compares a proposal against what was planned, which is weaker than one
 # measured example.
-_EVIDENCE_ORDER = ("no_outcomes", "single_example", "measured")
+_EVIDENCE_ORDER = ("no_outcomes", "single_example", "measured", "not_yet_run")
 
 
 def coverage(conn) -> dict:
@@ -1672,8 +1666,12 @@ def coverage(conn) -> dict:
     leaving somebody to add them up.
     """
     superseded = store.get_superseded_campaign_ids(conn)
+    # A `stub` is "a placeholder record" by the product's own definition, so counting one as
+    # evidence a judgment can lean on describes content that is not there — and it arrives
+    # with no status, producing a cell whose stage nothing could explain.
     campaigns = [c for c in store.list_campaigns(conn)
-                 if c.get("record_type") != "reference" and c["id"] not in superseded]
+                 if c.get("record_type") not in ("reference", "stub")
+                 and c["id"] not in superseded]
     measured = store.campaigns_with_actual_metrics(conn)
 
     if not campaigns:
@@ -1681,18 +1679,28 @@ def coverage(conn) -> dict:
             "cells": [], "cells_total": 0, "thin": [], "campaigns_total": 0,
             "markets": [], "collections": [], "stages": [],
             "note": "The library is empty, so there is nothing to have coverage of.",
-            "next_actions": actions.trim([actions.action(
-                "Add a campaign you were happy with, and one you were not",
-                "upload_campaign",
-                why="Two contrasting records is the smallest library that can produce a "
-                    "useful judgment.",
-                consent="ask", needs=["the campaign's deck or a description of it"])]),
+            "next_actions": actions.to_first_upload(),
         }
 
+    # Keyed case-insensitively, displayed as first seen. The bucket key used the raw
+    # spelling while `_markets_of` folded case only WITHIN a record, so "LATAM" and "latam"
+    # became two cells — one reading `no_outcomes` and the other `single_example`, for a
+    # library that `filter_campaign_ids` treats as one market of two. `collection` had the
+    # same split, and it matches on `LOWER(collection)` in the store. This is the §5.3 bug
+    # one file over, and it made this item's "the two cannot disagree" claim false.
     buckets: dict[tuple, list] = {}
+    display: dict[str, str] = {}
+
+    def fold(value):
+        if value is None or not str(value).strip():
+            return None
+        text = str(value).strip()
+        display.setdefault(text.lower(), text)
+        return text.lower()
+
     for campaign in campaigns:
         for market in _markets_of(campaign):
-            key = (market, campaign.get("collection") or None,
+            key = (fold(market), fold(campaign.get("collection")),
                    campaign.get("status") or None)
             buckets.setdefault(key, []).append(campaign)
 
@@ -1700,39 +1708,64 @@ def coverage(conn) -> dict:
     for (market, collection, stage), rows in buckets.items():
         with_outcomes = sum(1 for c in rows if c["id"] in measured)
         cells.append({
-            "market": market,
-            "collection": collection,
+            "market": display.get(market) if market else None,
+            "collection": display.get(collection) if collection else None,
             "stage": stage,
             "campaigns": len(rows),
             "with_outcomes": with_outcomes,
-            # Both can be true at once; the marker names the one that costs more, and the
-            # counts above are there so nothing is hidden behind it.
-            "evidence": ("no_outcomes" if not with_outcomes
+            # A campaign that has not run cannot be missing its results, and saying so is
+            # the complaint nobody can answer that §5.3 wrote out. Beyond that, both markers
+            # can be true at once and the one that costs more wins — the counts above are
+            # there so nothing hides behind it.
+            "evidence": ("not_yet_run" if stage != "concluded"
+                         else "no_outcomes" if not with_outcomes
                          else "single_example" if len(rows) == 1
                          else "measured"),
             "campaign_ids": [c["id"] for c in rows][:5],
         })
 
-    cells.sort(key=lambda c: (_EVIDENCE_ORDER.index(c["evidence"]),
-                              -c["campaigns"],
-                              c["market"] or "", c["collection"] or "", c["stage"] or ""))
-    thin = [c for c in cells if c["evidence"] != "measured"]
+    # `cells` is for BROWSING, so it is ordered the way somebody reads a table. `thin` below
+    # carries the ranking. When both were sorted worst-first and then truncated, a library
+    # with 25 weak cells returned the two lists byte-identical: no thick cell was shown, ten
+    # were hidden with no count of what, and `single_example` — this item's own headline —
+    # never appeared because `no_outcomes` filled the list.
+    cells.sort(key=lambda c: (c["market"] or "~", c["collection"] or "~",
+                              c["stage"] or "~"))
+    ranked = sorted(cells, key=lambda c: (_EVIDENCE_ORDER.index(c["evidence"]),
+                                          -c["campaigns"], c["market"] or ""))
+    thin = [c for c in ranked if c["evidence"] in ("no_outcomes", "single_example")]
+
+    shown = cells[:MAX_COVERAGE_CELLS]
+    hidden: dict = {}
+    for cell in cells[MAX_COVERAGE_CELLS:]:
+        hidden[cell["evidence"]] = hidden.get(cell["evidence"], 0) + 1
 
     return {
-        "cells": cells[:MAX_COVERAGE_CELLS],
+        "cells": shown,
         "cells_total": len(cells),
+        "hidden": hidden,
+        # Counts across EVERY cell, truncated or not. The list can lose detail; the shape of
+        # the library must not depend on where the cut fell — a report showing 25 weak cells
+        # out of 35 said nothing about the 5 measured ones it had dropped.
+        # Every kind, including the zeros: "measured: 0" is the most informative line in the
+        # report, and omitting it makes its absence indistinguishable from truncation.
+        "evidence_summary": {kind: sum(1 for c in cells if c["evidence"] == kind)
+                             for kind in _EVIDENCE_ORDER},
         # A matrix is something to browse; the answer is which cells are weak. Worst first,
         # so the first line is the one that matters.
         "thin": thin[:MAX_COVERAGE_CELLS],
+        "thin_total": len(thin),
         "campaigns_total": len(campaigns),
         "markets": sorted({c["market"] for c in cells if c["market"]}),
         "collections": sorted({c["collection"] for c in cells if c["collection"]}),
         "stages": sorted({c["stage"] for c in cells if c["stage"]}),
         "note": ("A campaign that ran in more than one market appears in a cell for each, so "
-                 "the cell counts overlap and do not add up to campaigns_total. `thin` is "
-                 "the same cells ordered worst first: `no_outcomes` means nothing there was "
-                 "ever measured, `single_example` means one campaign is carrying every "
-                 "judgment about that cell."),
+                 "the cell counts overlap and do not add up to campaigns_total. `cells` is "
+                 "ordered for reading; `thin` is the answer, ordered worst first: "
+                 "`no_outcomes` means nothing in that cell was ever measured, "
+                 "`single_example` means one campaign is carrying every judgment about it. "
+                 "`not_yet_run` is neither — a campaign that has not concluded cannot have "
+                 "results yet."),
     }
 
 

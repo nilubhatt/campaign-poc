@@ -466,7 +466,7 @@ def health_check() -> dict:
     unavailable because the image model is missing; everything else works" beats relaying
     component names — and pass on the `remedy` verbatim enough that an admin can act on it.
 
-    `coverage` answers the different question of whether what they uploaded is usable: a
+    this result's `coverage` FIELD (not the `coverage` tool, which is about the library's shape) answers the different question of whether what they uploaded is usable: a
     non-zero `sections_unindexed`/`images_unindexed` means searches will be incomplete until
     finish_indexing is run."""
     conn = store.connect()

@@ -1047,7 +1047,37 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       **Bounded**, because market × collection × stage is multiplicative and this goes inside
       a tool result somebody reads: 25 cells, with `cells_total` saying how many exist.
       Kept distinct from `gaps()`: this is "what do I have", that is "what do I fix first"
-      with prefilled actions. Same grouping, different question, and they cannot disagree.
+      with prefilled actions. Same grouping, different question.
+      **From review — and the "cannot disagree" claim above was false when first written.**
+      `_markets_of` folded case within a record while the bucket key used the raw spelling,
+      so "LATAM" and "latam" became two cells — one reading `no_outcomes`, the other
+      `single_example` — for a library `filter_campaign_ids` treats as one market of two with
+      one measured. `gaps()` folded correctly and reported no barren market at all, so the
+      two surfaces contradicted each other on the same library and C16 was not a closure.
+      `collection` had the identical split, and the store matches it on `LOWER(collection)`.
+      Both axes now fold, keyed lower-cased and displayed as first seen.
+      **A campaign that has not run gets `not_yet_run`, not `no_outcomes`** — §5.3 wrote that
+      lesson out and this surface repeated it: a proposed campaign cannot have results, so
+      calling its cell thin is a complaint nobody can answer.
+      **A `stub` is not coverage.** It is a placeholder by the product's own definition, so
+      counting it as evidence describes content that is not there — and it arrived with a
+      null stage that nothing explained.
+      **Truncation can lose detail but never the shape.** With 25 weak cells, `cells` and
+      `thin` came back byte-identical: no thick cell shown, ten hidden with no count of what,
+      and `single_example` — this item's own headline — absent because `no_outcomes` filled
+      the list. `cells` is now ordered for reading, `thin` carries the ranking, `hidden`
+      counts what was cut by kind, and `evidence_summary` counts every cell whether shown or
+      not, so "measured: 0" is stated rather than inferred from an absence.
+      **Six mutations survived the first round** — any-metric-row, two sort mutations, the
+      `campaign_ids` cap, the case dedupe, and `region` being ignored — because the only
+      ordering test used two cells whose alphabetical order happened to match their ranking.
+      Also: the empty-library offer was written out twice, in `gaps()` and here, and neither
+      copy named the title among its `needs`, so accepting it literally raised
+      `TypeError: missing 'title'`. One `actions.to_first_upload()` now, with a test that
+      checks `needs` structurally against the tool's required parameters rather than looking
+      for the word "title" in prose.
+      And `health_check` already had a field called `coverage`, meaning indexing
+      completeness, whose docstring now read as a pointer to this tool; disambiguated.
 - [ ] **5.6 (F) Guided first run** on an empty or thin library.
 
 ## Phase 6 — Making the reasoning defensible (ideas G–L)
