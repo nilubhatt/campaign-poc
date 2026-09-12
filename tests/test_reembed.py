@@ -295,5 +295,5 @@ def test_search_says_when_results_may_be_incomplete(conn, monkeypatch):
     result = core.find_similar_with_context(conn, text="mexico launch")
 
     assert result["matches"]
-    assert any("partly searchable" in w.lower() or "incomplete" in w.lower()
+    assert any(w["code"] == "results_may_be_incomplete"
                for w in result["warnings"]), result["warnings"]

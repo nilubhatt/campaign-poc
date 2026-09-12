@@ -17,7 +17,7 @@ def test_ingest_empty_campaign_embeds_nothing(conn):
     assert r["chunks_total"] == 0
     assert r["chunks_embedded"] == 0
     assert r["embedded"] is False
-    assert "nothing to embed" in r["warnings"][0]
+    assert r["warnings"][0]["code"] == "nothing_to_embed"
 
 
 def test_ingest_long_flat_deck_text_splits_into_multiple_chunks(conn):
@@ -57,7 +57,7 @@ def test_partial_embedding_failure_is_reported_per_chunk_not_swallowed(conn, mon
     # conflation defect 05 complained about. The partial story is told by the counts.
     assert r["embedded"] is False
     assert 0 < r["chunks_embedded"] < r["chunks_total"]
-    assert any("not embedded" in w for w in r["warnings"])
+    assert any(w["code"] == "chunk_not_embedded" for w in r["warnings"])
 
     c = store.get_campaign(conn, r["campaign_id"])
     assert c["chunks_embedded"] == r["chunks_embedded"]

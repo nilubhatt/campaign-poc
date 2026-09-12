@@ -21,6 +21,7 @@ import config
 import embedding
 import extract
 import images
+import notices
 import store
 import vectorstore
 
@@ -119,8 +120,10 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                     config.PPTX_MIME, "application/pdf")
             except Exception as exc:              # noqa: BLE001
                 commentary = []
-                warnings.append(f"comments and notes could not be read ({exc}); the deck "
-                                f"itself was ingested normally")
+                warnings.append(notices.notice(
+                    "commentary_unreadable",
+                    detail=f"comments and notes could not be read ({exc}); the deck itself "
+                           f"was ingested normally"))
             if not deck_text:
                 units, w2 = extract.extract_units(path)
                 warnings += w2
@@ -154,8 +157,10 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
             warnings += img_warnings
         except Exception as exc:
             found_images = []
-            warnings.append(f"image extraction failed (deck images will not be searchable "
-                            f"or reuse-checked): {exc}")
+            warnings.append(notices.notice(
+                "images_unreadable",
+                detail=f"image extraction failed (deck images will not be searchable or "
+                       f"reuse-checked): {exc}"))
         else:
             images_checked = image_mime in (config.PPTX_MIME, "application/pdf")
 
@@ -177,7 +182,9 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
             except Exception as exc:
                 if stored_name:
                     (config.ASSET_DIR / stored_name).unlink(missing_ok=True)
-                warnings.append(f"deck image on slide/page {location} could not be stored: {exc}")
+                warnings.append(notices.notice(
+                    "image_not_stored",
+                    detail=f"deck image on slide/page {location} could not be stored: {exc}"))
                 continue
             entry = {"asset_id": aid, "location": location, "fingerprinted": False,
                      "visually_embedded": False, "reuse_flags": [],
@@ -187,13 +194,19 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                 store.set_asset_fingerprint(conn, aid, h)
                 entry["fingerprinted"] = True
             except Exception as exc:
-                warnings.append(f"deck image {aid} not fingerprinted (reuse detection will miss it): {exc}")
+                warnings.append(notices.notice(
+                    "image_not_fingerprinted",
+                    detail=f"deck image {aid} not fingerprinted (reuse detection will miss "
+                           f"it): {exc}"))
             else:
                 try:
                     entry["reuse_flags"] = _phash_matches(
                         conn, h, exclude_campaign_id=cid, current=current_campaign)
                 except Exception as exc:
-                    warnings.append(f"deck image {aid} fingerprinted but reuse check failed: {exc}")
+                    warnings.append(notices.notice(
+                        "reuse_check_failed",
+                        detail=f"deck image {aid} fingerprinted but reuse check failed: "
+                               f"{exc}"))
             image_assets.append(entry)
 
         # PASS 2 — the expensive half. This is what yields when time runs out; the images
@@ -201,12 +214,15 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         # similarity, and every skipped one has a row waiting to be finished.
         for entry in image_assets:
             if time.monotonic() >= deadline:
-                warnings.append(
-                    f"visually embedded {images_embedded} of {len(image_assets)} deck images "
-                    f"before the {config.TOOL_TIME_BUDGET_SECONDS:g}s time budget ran out. All "
-                    f"of them were still stored and checked for reuse; the rest can be "
-                    f"finished later without re-uploading the deck."
-                )
+                warnings.append(notices.notice(
+                    "indexing_incomplete",
+                    remedy=f"{images_embedded} of {len(image_assets)} images in this deck "
+                           f"are in visual search so far; all of them were still stored and "
+                           f"checked for reuse. Finish the rest with "
+                           f"finish_indexing(campaign_id='{cid}') — no re-upload needed.",
+                    detail=f"visually embedded {images_embedded} of {len(image_assets)} "
+                           f"deck images before the "
+                           f"{config.TOOL_TIME_BUDGET_SECONDS:g}s time budget ran out"))
                 break
             try:
                 vec = clip_embed.embed_image(entry["_path"])
@@ -215,7 +231,10 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                 entry["visually_embedded"] = True
                 images_embedded += 1
             except Exception as exc:
-                warnings.append(f"deck image {entry['asset_id']} not visually embedded: {exc}")
+                warnings.append(notices.notice(
+                    "visual_search_offline" if not clip_embed.weights_status().ok
+                    else "image_not_embedded",
+                    detail=f"deck image {entry['asset_id']} not visually embedded: {exc}"))
 
         for entry in image_assets:
             entry.pop("_path", None)
@@ -232,13 +251,15 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
     # so a deck whose body extracted to nothing reported the notes as found and then threw
     # them away — the count described something that no longer existed.
     if not chunk_texts and not commentary:
-        warnings.append("nothing to embed (no title/detail/deck_text)")
+        warnings.append(notices.notice(
+            "nothing_to_embed", detail="nothing to embed (no title/detail/deck_text)"))
         return {"campaign_id": cid, "title": title, "record_type": record_type,
                 "embedded": False, "chunks_total": 0, "chunks_embedded": 0,
                 "image_assets": image_assets, "images_checked": images_checked,
                 "images_total": len(image_assets), "images_embedded": images_embedded,
                 "commentary_found": len(commentary),
-                "commentary_checked": commentary_checked, "warnings": warnings}
+                "commentary_checked": commentary_checked,
+                "warnings": notices.collapse(warnings)}
 
     chunk_ids = store.insert_chunks(conn, cid, chunk_texts)
 
@@ -269,13 +290,14 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
     for chunk_id, text in zip(chunk_ids, chunk_texts):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            warnings.append(
-                f"embedded {embedded_count} of {len(chunk_texts)} sections before the "
-                f"{config.TOOL_TIME_BUDGET_SECONDS:g}s time budget ran out. Tell the user: the "
-                f"campaign is saved, {embedded_count} of {len(chunk_texts)} sections are "
-                f"searchable so far. Offer to finish it now — call "
-                f"finish_indexing(campaign_id='{cid}'); no re-upload needed."
-            )
+            warnings.append(notices.notice(
+                "indexing_incomplete",
+                remedy=f"The campaign is saved and {embedded_count} of {len(chunk_texts)} "
+                       f"sections are searchable so far. Tell the user that, and offer to "
+                       f"finish it now — call finish_indexing(campaign_id='{cid}'); no "
+                       f"re-upload needed.",
+                detail=f"embedded {embedded_count} of {len(chunk_texts)} sections before "
+                       f"the {config.TOOL_TIME_BUDGET_SECONDS:g}s time budget ran out"))
             break
         try:
             # Only the time that is actually left, so no single call can push the handler
@@ -285,7 +307,9 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
             store.set_chunk_embedded(conn, chunk_id)
             embedded_count += 1
         except Exception as exc:
-            warnings.append(f"chunk {chunk_id} not embedded (search will miss it): {exc}")
+            warnings.append(notices.notice(
+                "chunk_not_embedded",
+                detail=f"chunk {chunk_id} not embedded (search will miss it): {exc}"))
 
     # "embedded" means SEARCHABLE, not "we managed at least one". Since 2.1 made a partial
     # result a designed outcome, `> 0` would report a deck with 2 of 12 sections indexed as
@@ -300,7 +324,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         "images_total": len(image_assets), "images_embedded": images_embedded,
         "commentary_found": len(commentary),
         "commentary_checked": commentary_checked,
-        "warnings": warnings,
+        "warnings": notices.collapse(warnings),
     }
 
 
@@ -1008,16 +1032,17 @@ def find_similar_with_context(conn, **kwargs) -> dict:
     still waiting to be indexed. An absent result cannot announce itself, so the search has
     to."""
     matches = find_similar(conn, **kwargs)
-    warnings: list[str] = []
+    warnings: list[dict] = []
     left = store.count_unembedded(conn)
     outstanding = left["chunks"] + left["assets"]
     if outstanding:
         records = len(store.outstanding_by_campaign(conn))
-        warnings.append(
-            f"{records} record(s) are only partly searchable ({outstanding} items still to "
-            f"index), so these results may be incomplete. Mention this if the answer looks "
-            f"thin, and offer to run finish_indexing."
-        )
+        warnings.append(notices.notice(
+            "results_may_be_incomplete",
+            remedy=f"{records} record(s) are only partly searchable ({outstanding} items "
+                   f"still to index), so these results may be incomplete. Mention this if "
+                   f"the answer looks thin, and offer to run finish_indexing.",
+            detail=f"{outstanding} unembedded items across {records} campaigns"))
     return {"matches": matches, "warnings": warnings}
 
 
@@ -1366,7 +1391,10 @@ def _store_and_fingerprint_image(conn, campaign_id: str, stored_name: str) -> di
         store.set_asset_fingerprint(conn, aid, h)
         fingerprinted = True
     except Exception as exc:
-        warnings.append(f"asset stored but not fingerprinted (reuse detection will miss it): {exc}")
+        warnings.append(notices.notice(
+            "image_not_fingerprinted",
+            detail=f"asset stored but not fingerprinted (reuse detection will miss it): "
+                   f"{exc}"))
 
     visually_embedded = False
     try:
@@ -1375,12 +1403,21 @@ def _store_and_fingerprint_image(conn, campaign_id: str, stored_name: str) -> di
         store.mark_asset_embedded(conn, aid)
         visually_embedded = True
     except Exception as exc:
-        warnings.append(f"asset stored but not visually embedded (aesthetic similarity will "
-                        f"miss it): {exc}. Run finish_indexing to complete it — the image "
-                        f"is saved, so it does not need uploading again.")
+        warnings.append(notices.notice(
+            # Which warning this is depends on WHY: the model being absent from the machine
+            # is the operator's problem to fix once, while one image failing to embed on a
+            # working model is this record's problem. The review's example is the first, and
+            # telling a marketer to "ask IT to run setup" over a single bad PNG would be the
+            # same mistake in the other direction.
+            "visual_search_offline" if not clip_embed.weights_status().ok
+            else "image_not_embedded",
+            detail=f"asset stored but not visually embedded (aesthetic similarity will "
+                   f"miss it): {exc}. Run finish_indexing to complete it — the image is "
+                   f"saved, so it does not need uploading again."))
 
     return {"asset_id": aid, "campaign_id": campaign_id, "fingerprinted": fingerprinted,
-            "visually_embedded": visually_embedded, "warnings": warnings}
+            "visually_embedded": visually_embedded,
+            "warnings": notices.collapse(warnings)}
 
 
 def check_image_provenance(conn, *, asset_ref: dict, campaign_id: Optional[str] = None,

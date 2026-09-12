@@ -16,13 +16,16 @@ def test_guess_mime_unknown_extension_falls_back():
 def test_legacy_ppt_returns_no_units_with_warning():
     units, warnings = extract.extract_units(Path("whatever.ppt"), mime=config.PPT_LEGACY_MIME)
     assert units == []
-    assert "legacy .ppt" in warnings[0]
+    assert warnings[0]["code"] == "legacy_ppt"
+    assert "legacy .ppt" in warnings[0]["detail"]
+    assert ".pptx" in warnings[0]["remedy"], "tell them what to actually do about it"
 
 
 def test_unsupported_mime_returns_no_units_with_warning():
     units, warnings = extract.extract_units(Path("whatever.docx"), mime="application/msword")
     assert units == []
-    assert "unsupported type" in warnings[0]
+    assert warnings[0]["code"] == "unsupported_file_type"
+    assert "unsupported type" in warnings[0]["detail"]
 
 
 class _FakePage:

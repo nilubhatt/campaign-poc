@@ -446,8 +446,31 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 
 ## Phase 3 — P2 defects
 
-- [ ] **3.1 Structured warnings** (defect 09). Stable `code`, one-line human `remedy`, raw
+- [x] **3.1 Structured warnings** (defect 09). Stable `code`, one-line human `remedy`, raw
       `detail` — so a surface can say "Visual search is offline — ask IT to run setup".
+      **Done:** `notices.py` (named that way because `warnings` is a standard library module
+      and shadowing it from the project root would break any import of the real one) holds a
+      registry of `code -> (severity, remedy)`, and every warning site in `core.py` and
+      `extract.py` now emits `{code, severity, remedy, detail}`. An unregistered code raises
+      rather than producing a blank remedy — a warning with no remedy is one that quietly
+      reverted to being engineer-only, which is the defect itself.
+      `severity` was added on top of what the review asked for: `blocked` (a capability is
+      off until somebody acts), `degraded` (this record is incomplete, the product works),
+      `note`. "Visual search is offline" and "one image of forty was skipped" are not the
+      same news, and a flat list of strings made every surface treat them identically.
+      `notices.collapse()` folds repeats of one code into a single entry with a `count`,
+      because a deck with twenty unreadable images produced twenty near-identical lines,
+      which is how the one warning that mattered got scrolled past.
+      Which code an image failure gets depends on WHY: the model being absent is the
+      operator's problem to fix once (`visual_search_offline`), while one bad PNG on a
+      working model is this record's problem (`image_not_embedded`). Telling a marketer to
+      "ask IT to run setup" over a single corrupt image would be the same mistake pointing
+      the other way.
+      **Verified on a simulation of the reviewer's own machine** — weights path invalid,
+      Hugging Face cache empty, `HF_HUB_OFFLINE=1` — the upload now returns "Visual search
+      is offline, so image similarity and reuse checks will miss this one. Ask IT to run
+      setup on this machine — everything else works normally.", with the original "Failed to
+      download weights for tag 'openai'" text intact in `detail`.
 - [ ] **3.2 Version surface + stale-schema documentation** (defect 10). Build version in the
       server description; README documents that the host app must be fully quit and reopened
       after a rebuild (closing the window leaves the server running).

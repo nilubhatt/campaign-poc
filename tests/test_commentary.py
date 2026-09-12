@@ -181,7 +181,7 @@ def test_unreadable_commentary_is_a_warning_not_a_failed_upload(tmp_path):
     commentary, warnings = extract.extract_commentary(path)
 
     assert commentary == []
-    assert any("comment" in w.lower() for w in warnings)
+    assert any(w["code"] == "commentary_unreadable" for w in warnings)
 
 
 # ── it is a distinct layer, not more deck text ───────────────────────────────
@@ -417,7 +417,7 @@ def test_a_deck_whose_commentary_cannot_be_read_still_ingests(tmp_path, conn, mo
                                   confirm=True)
 
     assert result["chunks_total"] > 0
-    assert any("comment" in w.lower() for w in result["warnings"])
+    assert any(w["code"] == "commentary_unreadable" for w in result["warnings"])
 
 
 def test_commentary_is_capped_like_every_other_unbounded_input(tmp_path, monkeypatch):
@@ -434,7 +434,7 @@ def test_commentary_is_capped_like_every_other_unbounded_input(tmp_path, monkeyp
     commentary, warnings = extract.extract_commentary(path)
 
     assert len(commentary) == config.MAX_COMMENTARY_ITEMS
-    assert any(str(config.MAX_COMMENTARY_ITEMS) in w for w in warnings)
+    assert any(str(config.MAX_COMMENTARY_ITEMS) in w["detail"] for w in warnings)
 
 
 def _add_modern_comment(path, *, author, when, text):

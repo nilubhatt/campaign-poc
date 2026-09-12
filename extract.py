@@ -5,6 +5,7 @@ import mimetypes
 from pathlib import Path
 
 import config
+import notices
 
 
 def guess_mime(filename: str) -> str:
@@ -24,8 +25,13 @@ def extract_units(path: Path, mime: str | None = None) -> tuple[list[str], list[
     if mime == config.PPTX_MIME:
         return _read_pptx(path), []
     if mime == config.PPT_LEGACY_MIME:
-        return [], ["legacy .ppt stored but not text-extracted; convert to .pptx for searchability"]
-    return [], [f"unsupported type {mime}; POC accepts PDF and PPTX"]
+        return [], [notices.notice(
+            "legacy_ppt",
+            detail="legacy .ppt stored but not text-extracted; convert to .pptx for "
+                   "searchability")]
+    return [], [notices.notice(
+        "unsupported_file_type",
+        detail=f"unsupported type {mime}; POC accepts PDF and PPTX")]
 
 
 def extract_images(path: Path, mime: str | None = None) -> tuple[list[tuple[bytes, str, int]], list[str]]:
@@ -46,7 +52,8 @@ def extract_images(path: Path, mime: str | None = None) -> tuple[list[tuple[byte
         return _read_pdf_images(path)
     if mime == config.PPTX_MIME:
         return _read_pptx_images(path)
-    return [], [f"image extraction not supported for {mime}"]
+    return [], [notices.notice(
+        "unsupported_file_type", detail=f"image extraction not supported for {mime}")]
 
 
 def _dedup_and_cap(
@@ -64,10 +71,11 @@ def _dedup_and_cap(
         unique.append((data, ext, location))
 
     if len(unique) > config.MAX_EXTRACTED_IMAGES_PER_DECK:
-        warnings.append(
-            f"deck has more than {config.MAX_EXTRACTED_IMAGES_PER_DECK} distinct embedded "
-            f"images; only the first {config.MAX_EXTRACTED_IMAGES_PER_DECK} were checked"
-        )
+        warnings.append(notices.notice(
+            "images_capped",
+            detail=f"deck has more than {config.MAX_EXTRACTED_IMAGES_PER_DECK} distinct "
+                   f"embedded images; only the first "
+                   f"{config.MAX_EXTRACTED_IMAGES_PER_DECK} were checked"))
     return unique[: config.MAX_EXTRACTED_IMAGES_PER_DECK]
 
 
@@ -83,7 +91,9 @@ def _read_pdf_images(path: Path) -> tuple[list[tuple[bytes, str, int]], list[str
         try:
             n = len(page.images)
         except Exception as exc:
-            warnings.append(f"page {page_num}: could not read embedded images ({exc}); skipped")
+            warnings.append(notices.notice(
+                "images_unreadable",
+                detail=f"page {page_num}: could not read embedded images ({exc}); skipped"))
             continue
         for j in range(n):
             try:
@@ -91,7 +101,10 @@ def _read_pdf_images(path: Path) -> tuple[list[tuple[bytes, str, int]], list[str
                 ext = Path(img.name).suffix or ".png"
                 raw.append((img.data, ext, page_num))
             except Exception as exc:
-                warnings.append(f"page {page_num} image {j + 1}: could not be read ({exc}); skipped")
+                warnings.append(notices.notice(
+                    "images_unreadable",
+                    detail=f"page {page_num} image {j + 1}: could not be read ({exc}); "
+                           f"skipped"))
     return _dedup_and_cap(raw, warnings), warnings
 
 
@@ -114,7 +127,10 @@ def _read_pptx_images(path: Path) -> tuple[list[tuple[bytes, str, int]], list[st
                 try:
                     raw.append((shape.image.blob, f".{shape.image.ext}", slide_num))
                 except Exception as exc:
-                    warnings.append(f"slide {slide_num}: image could not be read ({exc}); skipped")
+                    warnings.append(notices.notice(
+                        "images_unreadable",
+                        detail=f"slide {slide_num}: image could not be read ({exc}); "
+                               f"skipped"))
 
     for i, slide in enumerate(prs.slides):
         if i >= config.MAX_PPTX_SLIDES:
@@ -187,12 +203,16 @@ def extract_commentary(path: Path, mime: str | None = None) -> tuple[list[dict],
         else:
             return [], []
     except Exception as exc:                      # noqa: BLE001 - see docstring
-        return [], [f"comments and notes could not be read ({exc}); the deck itself was "
-                    f"ingested normally"]
+        return [], [notices.notice(
+            "commentary_unreadable",
+            detail=f"comments and notes could not be read ({exc}); the deck itself was "
+                   f"ingested normally")]
 
     if len(items) > config.MAX_COMMENTARY_ITEMS:
-        warnings.append(f"deck carries more than {config.MAX_COMMENTARY_ITEMS} comments and "
-                        f"notes; only the first {config.MAX_COMMENTARY_ITEMS} were indexed")
+        warnings.append(notices.notice(
+            "commentary_capped",
+            detail=f"deck carries more than {config.MAX_COMMENTARY_ITEMS} comments and "
+                   f"notes; only the first {config.MAX_COMMENTARY_ITEMS} were indexed"))
         items = items[:config.MAX_COMMENTARY_ITEMS]
     return items, warnings
 
@@ -240,7 +260,9 @@ def _read_pdf_commentary(path: Path, warnings: list[str]) -> list[dict]:
         try:
             annots = page.get("/Annots") or []
         except Exception as exc:                  # noqa: BLE001
-            warnings.append(f"page {i + 1}: comments could not be read ({exc}); skipped")
+            warnings.append(notices.notice(
+                "commentary_unreadable",
+                detail=f"page {i + 1}: comments could not be read ({exc}); skipped"))
             continue
         for ref in annots:
             try:
@@ -262,7 +284,9 @@ def _read_pdf_commentary(path: Path, warnings: list[str]) -> list[dict]:
                     "anchor": f"page {i + 1}",
                 })
             except Exception as exc:              # noqa: BLE001
-                warnings.append(f"page {i + 1}: a comment could not be read ({exc}); skipped")
+                warnings.append(notices.notice(
+                    "commentary_unreadable",
+                    detail=f"page {i + 1}: a comment could not be read ({exc}); skipped"))
     return items
 
 
@@ -299,7 +323,9 @@ def _read_pptx_notes(path: Path, warnings: list[str]) -> list[dict]:
                 "anchor": f"slide {i + 1}",
             })
         except Exception as exc:                  # noqa: BLE001
-            warnings.append(f"slide {i + 1}: speaker notes could not be read ({exc}); skipped")
+            warnings.append(notices.notice(
+                "commentary_unreadable",
+                detail=f"slide {i + 1}: speaker notes could not be read ({exc}); skipped"))
     return items
 
 
@@ -326,7 +352,9 @@ def _read_pptx_comments(path: Path, warnings: list[str]) -> list[dict]:
             try:
                 root = ET.fromstring(z.read(name))
             except ET.ParseError as exc:
-                warnings.append(f"{name}: comments could not be parsed ({exc}); skipped")
+                warnings.append(notices.notice(
+                    "commentary_unreadable",
+                    detail=f"{name}: comments could not be parsed ({exc}); skipped"))
                 continue
             for node in root:
                 items.extend(_comment_and_replies(node, authors, name))
@@ -391,8 +419,10 @@ def _pptx_authors(z, names: set[str], warnings: list[str]) -> dict[str, str]:
         try:
             root = ET.fromstring(z.read(part))
         except ET.ParseError as exc:
-            warnings.append(f"{part}: comment authors could not be parsed ({exc}); the "
-                            f"comments were kept without a name")
+            warnings.append(notices.notice(
+                "commentary_unreadable",
+                detail=f"{part}: comment authors could not be parsed ({exc}); the comments "
+                       f"were kept without a name"))
             continue
         for node in root:
             ident, name = node.get("id"), node.get("name")

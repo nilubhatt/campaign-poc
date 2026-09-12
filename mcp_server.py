@@ -213,8 +213,16 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
     confusing retrieval, without being deleted.
 
     Add results later with add_metrics. On confirm=True, returns the campaign_id plus
-    chunks_total/chunks_embedded (partial embedding failures are reported per-chunk in
-    warnings, not silently), and images_checked/image_assets (see above)."""
+    chunks_total/chunks_embedded (partial embedding failures are reported in warnings, not
+    silently), and images_checked/image_assets (see above).
+
+    Every warning is `{code, severity, remedy, detail}`. Say the REMEDY — it is written for
+    the person you are talking to and says what to do. `detail` is the engineering text, for
+    when they ask why or need to send it to IT; reading it out is how "Failed to download
+    weights for tag openai" reaches a marketer. `severity` orders them: `blocked` means a
+    capability is off until somebody acts and leads whatever you say; `degraded` means this
+    record is incomplete but the product works; `note` is worth one mention. If several
+    share a `code` they arrive folded into one entry with a `count`."""
     conn = store.connect()
     try:
         return core.ingest_campaign(conn, title=title, detail=detail, deck_text=deck_text,

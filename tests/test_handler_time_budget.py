@@ -71,16 +71,20 @@ def test_running_out_of_budget_says_what_happened_and_how_to_finish(conn, monkey
     long_deck = "\n\n".join(f"section {i} " + "word " * 200 for i in range(10))
     result = core.ingest_campaign(conn, title="Slow", deck_text=long_deck, confirm=True)
 
-    budget_warnings = [w for w in result["warnings"] if "budget" in w.lower()]
+    budget_warnings = [w for w in result["warnings"] if w["code"] == "indexing_incomplete"]
     assert budget_warnings, f"no warning explained the early stop: {result['warnings']}"
-    warning = budget_warnings[0]
-    assert str(result["chunks_embedded"]) in warning and str(result["chunks_total"]) in warning
-    assert "saved" in warning.lower(), "must say the upload itself survived"
+    # 3.1 split the one string into three readers: the remedy is what the marketer is told,
+    # the detail is what support gets. The counts and the recovery call belong to the remedy,
+    # because they are what somebody has to act on.
+    remedy = budget_warnings[0]["remedy"]
+    assert str(result["chunks_embedded"]) in remedy and str(result["chunks_total"]) in remedy
+    assert "saved" in remedy.lower(), "must say the upload itself survived"
     # 2.1 deliberately left this open: naming a recovery tool that did not exist yet would
     # have sent a marketer after something Claude could not find. 2.2 built it, so the
     # sentence can now be closed - this is that promise being kept.
-    assert "finish_indexing" in warning, "must name the tool that finishes the job"
-    assert "no re-upload" in warning.lower()
+    assert "finish_indexing" in remedy, "must name the tool that finishes the job"
+    assert "no re-upload" in remedy.lower()
+    assert "time budget" in budget_warnings[0]["detail"], "the mechanism stays, for support"
 
 
 def test_a_fast_embedder_still_completes_everything(conn):
@@ -89,7 +93,7 @@ def test_a_fast_embedder_still_completes_everything(conn):
     result = core.ingest_campaign(conn, title="Fast", deck_text=deck, confirm=True)
 
     assert result["chunks_embedded"] == result["chunks_total"] > 0
-    assert not [w for w in result["warnings"] if "budget" in w.lower()]
+    assert not [w for w in result["warnings"] if w["code"] == "indexing_incomplete"]
 
 
 def test_the_campaign_survives_even_if_nothing_embeds(conn, monkeypatch):
@@ -137,7 +141,7 @@ def test_the_image_loop_shares_one_budget_with_the_text_loop(conn, tmp_path, mon
     elapsed = time.monotonic() - started
 
     assert elapsed < 1.2, "the image loop must respect the budget too"
-    assert any("budget" in w.lower() for w in result["warnings"])
+    assert any(w["code"] == "indexing_incomplete" for w in result["warnings"])
     assert result["campaign_id"], "the campaign is still saved"
 
 
