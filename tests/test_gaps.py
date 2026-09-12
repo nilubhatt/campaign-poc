@@ -66,9 +66,13 @@ def test_a_library_where_everything_is_measured_does_not_raise_it(conn):
 
 
 def test_a_market_with_no_measured_campaign_at_all_is_named(conn):
-    """The review's second: "no LATAM store launch has ever carried a budget" — a gap
-    located in a *slice* of the library rather than in its total. A marketer asking about
-    Colombia does not care that the library is 60% measured overall if the LATAM part is 0%."""
+    """A gap located in a *slice* of the library rather than in its total: a marketer asking
+    about Colombia does not care that the library is 60% measured overall if the LATAM part
+    is 0%.
+
+    NOT the review's budget example, which this docstring used to claim. "No LATAM store
+    launch has ever carried a budget" is about a missing FIELD within records; nothing
+    detects a budget, and that is D49."""
     _with_results(conn, "Jakarta launch", market="SEA")
     _concluded(conn, "Bogota launch", market="LATAM")
     _concluded(conn, "Lima launch", market="LATAM")
@@ -200,15 +204,17 @@ def test_the_missing_input_is_one_thing_not_a_list(conn):
 
 # ── what the tracker was carrying ───────────────────────────────────────────
 
-def test_a_deck_whose_comments_were_never_read_is_still_reportable_later(conn):
+def test_a_deck_whose_comments_were_never_read_is_recorded_for_later(conn):
     """Tracker D17. Warnings are ephemeral — they exist for the length of one response — so
-    "this deck's comments were never read" was unrecoverable the moment the upload returned,
-    and `gaps()` could never report it."""
-    core.ingest_campaign(conn, title="Pasted in", deck_text="a brief, as text", confirm=True)
+    "this deck's comments were never read" was unrecoverable the moment the upload returned.
 
-    report = core.gaps(conn)
+    Recorded, but deliberately not REPORTED as a gap: see
+    test_a_gap_is_not_reported_when_nothing_can_close_it. The fact is what D17 was about;
+    reporting it needs D39 first."""
+    created = core.ingest_campaign(conn, title="Pasted in", deck_text="a brief, as text",
+                                   confirm=True)
 
-    assert any(g["code"] == "commentary_never_read" for g in report["gaps"])
+    assert store.get_campaign(conn, created["campaign_id"])["commentary_checked"] == 0
 
 
 def test_the_incompleteness_warning_offers_the_tool_behind_it(conn, monkeypatch):
@@ -226,3 +232,125 @@ def test_the_incompleteness_warning_offers_the_tool_behind_it(conn, monkeypatch)
 
     assert warning["next_actions"][0]["tool"] == "finish_indexing"
     assert warning["next_actions"][0]["consent"] == "do"
+
+
+# ══ design review of 5.3 ═════════════════════════════════════════════════════
+
+def test_a_forecast_is_not_a_measured_outcome(conn):
+    """`has_metrics` counts any metric row, so adding a `predicted` figure silenced both the
+    library gap and the judgment line. The review says "verified outcomes"; a forecast is the
+    opposite of one — it is the thing reconciliation later scores AGAINST the actuals."""
+    cid = _concluded(conn, "Colombia")
+    store.add_metrics(conn, cid, metric_type="predicted", detail="expect CTR 2%")
+
+    report = core.gaps(conn)
+
+    assert any(g["code"] == "few_verified_outcomes" for g in report["gaps"])
+
+
+def test_a_campaign_that_has_not_run_is_not_missing_its_results(conn):
+    """A proposed campaign has no outcomes by definition. Counting it as a gap, and
+    prefilling it into "record what this achieved", is a request nobody can satisfy — the
+    permanent-complaint failure, on the highest-ranked gap. `after_upload` already gates on
+    `concluded`; this did not."""
+    core.ingest_campaign(conn, title="Next quarter", detail="a proposal", status="proposed",
+                         confirm=True)
+    _with_results(conn, "Colombia")
+
+    report = core.gaps(conn)
+
+    assert all(g["code"] != "few_verified_outcomes" for g in report["gaps"]), report["gaps"]
+
+
+def test_the_market_offered_first_is_the_one_that_matters_most(conn):
+    """`barren[0]` was alphabetical, so the single place magnitude decided anything decided
+    it by the alphabet: Andorra with one campaign offered ahead of LATAM with twenty."""
+    _with_results(conn, "Jakarta", market="SEA")
+    _concluded(conn, "Andorra one", market="Andorra")
+    for i in range(4):
+        _concluded(conn, f"LATAM {i}", market="LATAM")
+
+    gap = next(g for g in core.gaps(conn)["gaps"] if g["code"] == "market_without_outcomes")
+
+    assert "LATAM" in gap["next_actions"][0]["label"]
+
+
+def test_a_gap_is_not_reported_when_nothing_can_close_it(conn):
+    """`commentary_never_read` offered `upload_campaign` — which creates a SECOND record and
+    fires `duplicate_title`. Item 5.2 refused exactly this offer, in writing, one commit
+    earlier: no tool attaches a deck to an existing record (D39). A gap whose only action
+    makes things worse is a complaint, which this item's own rule forbids."""
+    core.ingest_campaign(conn, title="Pasted in", deck_text="a brief, as text", confirm=True)
+
+    report = core.gaps(conn)
+
+    assert all(g["code"] != "commentary_never_read" for g in report["gaps"])
+
+
+def test_the_fact_is_still_recorded_even_though_it_is_not_reported(conn):
+    """The column stays — D17's reasoning was right, and the gap can be reported the moment
+    D39 gives it an action that works."""
+    created = core.ingest_campaign(conn, title="Pasted in", deck_text="text", confirm=True)
+
+    assert store.get_campaign(conn, created["campaign_id"])["commentary_checked"] == 0
+
+
+def test_an_upgraded_library_does_not_invent_gaps_for_records_it_already_read(conn):
+    """The migration adds `commentary_checked` with DEFAULT 0, so every record whose file WAS
+    read before this column existed reads as never-read. The backfill is derivable: a record
+    with commentary chunks was, by definition, read."""
+    import sqlite3
+
+    cid = store.insert_campaign(conn, title="Read before the column existed",
+                                deck_text="body")
+    store.insert_chunks(conn, cid, ["a speaker note"], kind="commentary",
+                        sources=[{"kind": "speaker_note", "anchor": "slide 1"}])
+    conn.execute("UPDATE campaigns SET commentary_checked = 0 WHERE id = ?", (cid,))
+    conn.commit()
+
+    store._migrate_schema(conn)
+
+    assert store.get_campaign(conn, cid)["commentary_checked"] == 1
+
+
+def test_the_verdict_itself_says_what_would_most_change_it(conn):
+    """The line was only on `prepare_evaluation` — two calls before the verdict the user
+    actually hears, and this project's own stated principle is that models mirror the shape
+    of a tool result far more reliably than they follow instructions inside one. So the line
+    delivered earlier, with a note asking for it to be repeated later, is the thing that gets
+    dropped."""
+    cid = _concluded(conn, "Peru seeding", detail="influencer seeding")
+
+    result = core.save_evaluation(
+        conn, subject_title="Colombia seeding", verdict="revise",
+        summary="Nothing is dated.", cited_ids=[cid],
+        findings=[{"severity": "blocking", "finding": "No dates"}])
+
+    missing = result["most_valuable_missing_input"]
+    assert missing["code"] == "no_measured_precedent"
+
+
+def test_the_line_is_computed_by_the_server_not_accepted_from_the_model(conn):
+    """Like `evidence` and `provenance`: a fact about what the library holds is the server's
+    to state. A model asserting "nothing is missing" would be asserting it about records it
+    cannot see."""
+    cid = _with_results(conn, "Peru seeding", detail="influencer seeding")
+
+    result = core.save_evaluation(
+        conn, subject_title="Colombia", verdict="approve", findings=[],
+        summary="Matches a measured precedent.", cited_ids=[cid])
+
+    assert result["most_valuable_missing_input"] is None
+
+
+def test_the_line_survives_to_be_read_back_later(conn):
+    """`get_evaluation` and the §7.6 stamp both need it, and neither can recover something
+    that was never stored."""
+    cid = _concluded(conn, "Peru seeding", detail="influencer seeding")
+
+    saved = core.save_evaluation(
+        conn, subject_title="Colombia", verdict="revise", summary="Nothing is dated.",
+        cited_ids=[cid], findings=[{"severity": "blocking", "finding": "No dates"}])
+
+    stored = store.get_evaluation(conn, saved["evaluation_id"])
+    assert stored["evidence"]["most_valuable_missing_input"]["code"] == "no_measured_precedent"

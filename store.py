@@ -180,6 +180,16 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
                      "DEFAULT 'body'")
     if chunk_columns and "source" not in chunk_columns:
         conn.execute("ALTER TABLE campaign_chunks ADD COLUMN source TEXT")
+    # After the chunk columns exist, not before: the backfill reads `kind`, which the block
+    # above is what adds. Without it every record read since §2.5 reads as never-read — on
+    # the reviewer's own database first. Derivable: a campaign with commentary chunks was, by
+    # definition, read. A record with a deck and no commentary chunks stays 0, because "read
+    # and found none" and "never read" are genuinely indistinguishable from here.
+    if _columns(conn, "campaign_chunks") and _columns(conn, "campaigns"):
+        conn.execute("""UPDATE campaigns SET commentary_checked = 1
+                        WHERE commentary_checked = 0 AND id IN (
+                            SELECT DISTINCT campaign_id FROM campaign_chunks
+                            WHERE kind = 'commentary')""")
     legacy_analysis = evaluation_columns.get("analysis")
     if legacy_analysis is not None and legacy_analysis["notnull"]:
         _rebuild_evaluations(conn)
@@ -1081,6 +1091,17 @@ def get_evaluation(conn, evaluation_id: str) -> Optional[dict]:
         "SELECT * FROM reconciliations WHERE evaluation_id = ? ORDER BY created_at", (evaluation_id,)
     ).fetchall()]
     return d
+
+
+def campaigns_with_actual_metrics(conn) -> set:
+    """Ids of campaigns with at least one MEASURED outcome.
+
+    Distinct from `has_metrics`, which counts any row including a `predicted` forecast — and
+    a forecast is the opposite of a measured outcome, being the thing reconciliation later
+    scores against the actuals (§5.3).
+    """
+    return {r["campaign_id"] for r in conn.execute(
+        "SELECT DISTINCT campaign_id FROM metrics WHERE metric_type = 'actual'").fetchall()}
 
 
 def unreconciled_evaluation_id(conn, campaign_id: str) -> Optional[str]:

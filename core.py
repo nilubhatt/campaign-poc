@@ -719,6 +719,14 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
     # Identify the findings so a later version can say which one it closed, and so two
     # evaluations of the same brief can be compared by reference rather than by string
     # match. Assigned after the sort, so an id also reads as a position.
+    # §5.3: the single thing that would most change THIS verdict, computed here rather than
+    # carried from prepare_evaluation, and stored so get_evaluation and §7.6's stamp can
+    # recover it.
+    missing = missing_input_for_citations(conn, cited_ids)
+    if missing:
+        evidence = dict(evidence or {})
+        evidence["most_valuable_missing_input"] = missing
+
     eid = store.next_evaluation_id()
     for n, finding in enumerate(cleaned, start=1):
         finding["id"] = f"{eid}#{n}"
@@ -747,6 +755,7 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         "findings": [{k: f[k] for k in ("id", "severity", "kind", "finding", "fix")}
                      for f in cleaned if f["severity"] in ("blocking", "should_fix")],
         "approve_if": approve_if,
+        "most_valuable_missing_input": missing,
         # §5.2: the three things anyone actually does after a judgment, prefilled. The
         # supersession offer only appears when there IS an earlier version — an approval of
         # a new brief supersedes nothing, and an offer that is always there stops being read.
@@ -1037,7 +1046,7 @@ _GAP_RANK = {
     "few_verified_outcomes": 2,
     "market_without_outcomes": 3,
     "partly_indexed": 4,
-    "commentary_never_read": 5,
+    # "commentary_never_read" is recorded but not reported — see gaps() for why.
 }
 
 
@@ -1050,6 +1059,10 @@ def gaps(conn) -> dict:
     """
     campaigns = [c for c in store.list_campaigns(conn)
                  if c.get("record_type") != "reference"]
+    # A campaign that has not run cannot be missing its results, and asking for them is a
+    # request nobody can satisfy — the permanent-complaint failure, on the highest-ranked
+    # gap. `after_upload` already drew this line; this did not.
+    ran = [c for c in campaigns if c.get("status") == "concluded"]
     found: list[dict] = []
 
     if not campaigns:
@@ -1072,33 +1085,41 @@ def gaps(conn) -> dict:
         })
         return _ranked(found)
 
-    with_outcomes = [c for c in campaigns if c.get("has_metrics")]
-    if len(with_outcomes) < len(campaigns):
+    # `has_metrics` counts any metric row, so a PREDICTED figure silenced this gap — and a
+    # forecast is the opposite of a measured outcome; it is the thing reconciliation later
+    # scores against the actuals.
+    measured_ids = store.campaigns_with_actual_metrics(conn)
+    with_outcomes = [c for c in ran if c["id"] in measured_ids]
+    if ran and len(with_outcomes) < len(ran):
         found.append({
             "code": "few_verified_outcomes",
-            "what": f"{len(with_outcomes)} of {len(campaigns)} campaigns have measured "
+            "what": f"{len(with_outcomes)} of {len(ran)} finished campaigns have measured "
                     f"results on file.",
             "why_it_matters": "A campaign with no outcome data can be cited as a precedent "
                               "but cannot show whether it worked, so a judgment resting on "
                               "it rests on somebody's impression.",
-            "counts": {"campaigns": len(campaigns), "with_outcomes": len(with_outcomes)},
+            "counts": {"campaigns": len(ran), "with_outcomes": len(with_outcomes)},
             "next_actions": actions.trim([actions.action(
                 "Record what one of these campaigns actually achieved",
                 "add_metrics",
-                why=f"{len(campaigns) - len(with_outcomes)} campaigns have no results.",
+                why=f"{len(ran) - len(with_outcomes)} finished campaigns have no results.",
                 consent="ask", needs=["which campaign, and the numbers"],
-                campaign_id=next(c["id"] for c in campaigns if not c.get("has_metrics")))]),
+                campaign_id=next(c["id"] for c in ran if c["id"] not in measured_ids))]),
         })
 
     # A gap located in a SLICE rather than in the total. A marketer asking about Colombia
     # does not care that the library is 60% measured overall if the LATAM part is 0%.
     by_market: dict[str, list] = {}
-    for campaign in campaigns:
+    for campaign in ran:
         market = campaign.get("market") or campaign.get("region")
         if market:
             by_market.setdefault(market, []).append(campaign)
-    barren = sorted(m for m, rows in by_market.items()
-                    if not any(c.get("has_metrics") for c in rows))
+    # Ordered by how many campaigns are affected, not alphabetically. The one place magnitude
+    # decides anything was deciding it by the alphabet, offering Andorra's single campaign
+    # ahead of LATAM's twenty.
+    barren = sorted((m for m, rows in by_market.items()
+                     if not any(c["id"] in measured_ids for c in rows)),
+                    key=lambda m: (-len(by_market[m]), m))
     if barren and len(barren) < len(by_market):
         found.append({
             "code": "market_without_outcomes",
@@ -1129,24 +1150,12 @@ def gaps(conn) -> dict:
                 by_campaign[0]["campaign_id"] if by_campaign else None),
         })
 
-    unread = [c for c in campaigns
-              if not c.get("commentary_checked") and (c.get("deck_text")
-                                                      or c.get("asset_path"))]
-    if unread:
-        found.append({
-            "code": "commentary_never_read",
-            "what": f"{len(unread)} record(s) were stored without their file, so any "
-                    f"comments and speaker notes in them were never read.",
-            "why_it_matters": "A deck returned with tracked client comments is the feedback "
-                              "this library most wants to remember, and pasted text does "
-                              "not carry it.",
-            "counts": {"records": len(unread)},
-            "next_actions": actions.trim([actions.action(
-                "Send the deck files themselves for these records",
-                "upload_campaign",
-                why="Comments and speaker notes can only be read from the file.",
-                consent="ask", needs=["the original deck files"])]),
-        })
+    # DELIBERATELY not reported, though it is recorded (§5.2's D39). The only offer available
+    # is `upload_campaign`, which creates a SECOND record and fires `duplicate_title` — item
+    # 5.2 refused exactly this offer in writing, one commit before this one asked for it. No
+    # tool attaches a deck to an existing campaign. A gap whose only action makes things
+    # worse is a complaint, which this item's own rule forbids; `commentary_checked` is kept
+    # so it can be reported the moment there is something that closes it (D51).
 
     return _ranked(found)
 
@@ -1156,6 +1165,32 @@ def _ranked(found: list[dict]) -> dict:
         gap["rank"] = _GAP_RANK[gap["code"]]
     found.sort(key=lambda g: g["rank"])
     return {"gaps": found, "most_valuable": found[0]["code"] if found else None}
+
+
+def missing_input_for_citations(conn, cited_ids: Optional[list]) -> Optional[dict]:
+    """The standing line, recomputed at save time from what the judgment actually cited.
+
+    It lived only on `prepare_evaluation` — two calls before the verdict a user hears, with a
+    note asking for it to be repeated. This project's own stated principle is that models
+    mirror the shape of a tool result far more reliably than they follow instructions inside
+    one, so a line delivered earlier and asked to be carried forward is the thing that gets
+    dropped.
+
+    Computed by the server rather than accepted from the model, for the same reason
+    `evidence` and `provenance` are: it is a fact about what the library holds, and a model
+    asserting "nothing is missing" would be asserting it about records it cannot see.
+    """
+    if not cited_ids:
+        return most_valuable_missing_input([])
+    measured = store.campaigns_with_actual_metrics(conn)
+    cited = [store.get_campaign(conn, cid) for cid in cited_ids]
+    cited = [c for c in cited if c]
+    if not cited:
+        return most_valuable_missing_input([])
+    return most_valuable_missing_input([
+        {"campaign_id": c["id"], "title": c["title"],
+         "metrics": [m for m in c["metrics"] if m["metric_type"] == "actual"]}
+        for c in cited])
 
 
 def most_valuable_missing_input(evidence: list[dict]) -> Optional[dict]:

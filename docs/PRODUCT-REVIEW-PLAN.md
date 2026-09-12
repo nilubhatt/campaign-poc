@@ -878,6 +878,39 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       **Kept deliberately distinct from 6.6.** The evidence-strength line says what a
       judgment RESTS ON — how many precedents, how many concluded, top similarity. This says
       what would most improve it. One describes, the other asks.
+      **Narrower than the idea, and that is now recorded rather than implied.** The review
+      gave three examples; this covers one. "No LATAM store launch has ever carried a budget"
+      is about a missing FIELD within records and nothing detects a budget (D49 → 7.1); "the
+      KPI workbook named in its own rubric has never been supplied" needs a rulebook that
+      declares its expected inputs (D50 → 12.1). The test that quoted the budget example was
+      testing something else and has been re-attributed.
+      **From design review.** The standing line lived only on `prepare_evaluation` — two
+      calls before the verdict a user actually hears, with a note asking for it to be
+      repeated. This project's own principle, stated three lines above that return, is that
+      models mirror the shape of a tool result far more reliably than they follow
+      instructions inside one; a line delivered early and asked to be carried forward is the
+      thing that gets dropped. It is recomputed at `save_evaluation` from `cited_ids`,
+      returned there, and persisted in `evidence` so `get_evaluation` and §7.6's stamp can
+      recover it. Computed by the server, not accepted from the model, for the same reason
+      `evidence` and `provenance` are.
+      `commentary_never_read` is recorded but **no longer reported**: its only available
+      offer was `upload_campaign`, which creates a second record and fires `duplicate_title`
+      — the exact offer §5.2 refused in writing one commit earlier, because no tool attaches
+      a deck to an existing record. A gap whose only action makes things worse is a
+      complaint, which this item's own rule forbids (D51 holds it until D39 lands).
+      A **forecast was counting as a measured outcome**: `has_metrics` counts any metric row,
+      so a `predicted` figure silenced both the gap and the judgment line — and a forecast is
+      the opposite of an outcome, being the thing reconciliation later scores against the
+      actuals. And a **campaign that has not run was counted as missing its results**, which
+      is a request nobody can satisfy, on the highest-ranked gap; `after_upload` already drew
+      that line and this did not.
+      The migration **manufactured a gap for every record it had already read** —
+      `commentary_checked` defaults to 0, so everything ingested since §2.5 read as
+      never-read, on the reviewer's own database first. Backfilled from the commentary chunks
+      themselves, which are proof the file was read.
+      And the one place magnitude decided anything decided it **alphabetically**: the market
+      offered for repair was `barren[0]`, so Andorra's single campaign was offered ahead of
+      LATAM's twenty.
 - [ ] **5.4 (D) `diff_campaigns(a, b)`** — adopted / ignored / newly-introduced /
       carried-stale, computed against the earlier version's evaluation findings. Flagged by
       the reviewer as the highest-value feature not already on the list.

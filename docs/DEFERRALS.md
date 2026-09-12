@@ -40,7 +40,7 @@ three times (the Windows installer version, `TOOL_NAMES`, and the plan's own cou
 | D15 | Decide whether tracked client comments *are* the `approval_notes` schema gap, or whether a separate structured field is still owed | 2.5 | 12.4 | Needs the rulebook's schema decisions |
 | D18 | Notices raised during `prepare_evaluation` belong in the verdict stamp alongside `embedding_model` | 3.1 | 7.6 | The stamp does not exist yet |
 | D19 | `compare_execution` must emit `visual_search_offline` when CLIP is down, not a new code; 9.8's "caveat travels with the metric" should use the notice shape | 3.1 | 9.2 / 9.8 | Those tools do not exist yet |
-| D20 | Fold persisted `blocked`/`degraded` notices into the feedback queue — a notice addressed to a person is by definition "needs something from a human" | 3.1 | 10.1 / 10.6 | Depends on D17 |
+| D20 | Fold persisted `blocked`/`degraded` notices into the feedback queue — a notice addressed to a person is by definition "needs something from a human" | 3.1 | 10.1 / 10.6 | Needs notices persisted per record; D17's half of that closed as C14, the rest is this row |
 | D21 | `scope: machine` says "ask whoever installed this"; when the current user *is* the administrator that is the wrong sentence | 3.1 | 11.1 / 11.4 | Needs the role attribution those items introduce |
 | D22 | `detail` interpolates exception text and asset paths, which on Windows embed `C:\Users\<name>\` — and `detail` is explicitly "send this to support" text | 3.1 | 11.7 | Disclosure surface; 11.7 owns the position |
 | D25 | Run the Windows installer end to end in CI — silently against a good bundle and a deliberately broken one — rather than only compiling it | 4.1 | 4.4 | The `[Code]` path has still never been executed anywhere; compiling it is new but is not the same thing |
@@ -63,6 +63,14 @@ three times (the Windows installer version, `TOOL_NAMES`, and the plan's own cou
 | D43 | An offer whose arguments the user must supply needs a defined shape — `needs` is a list of prose today, and 5.6's guided first run is made almost entirely of such offers | 5.2 | 5.6 | 5.6 is the item that will actually depend on it |
 | D46 | `supersedes` is never validated to exist — `upload_campaign(supersedes="camp_doesnotexist")` is accepted and stored | 5.2 | 6.4 | Supersession integrity belongs with the item that makes the reasoning defensible |
 | D47 | `bulk_import_metrics` still flattens `BadValue` to a string, so the structured retry (field/valid/suggestion) is available on the single-write path and not on the batch path — which the plan itself named as the likeliest place "Target" arrives | 5.2 | 8.8 | 8.8 is the bulk-import item |
+| D49 | `gaps()` reports missing fields *within* records — "no LATAM store launch has ever carried a budget" is one of the review's own three examples and is about an absent field, not an absent record | 5.3 | 7.1 | Needs 7.1's computed facts (budget detected, on the body layer) to produce the per-record signal before anything can aggregate it |
+| D50 | `gaps()` reports a named expected input that has never been supplied — the review's third example, the KPI workbook the rubric itself names | 5.3 | 12.1 | Needs a rulebook that *declares* expected inputs; today the rubric is a `reference` row retrieved by similarity |
+| D51 | `commentary_never_read` reported as a gap once a deck can be attached to an existing record | 5.3 | 12.4 | Blocked on D39: the only offer available today creates a duplicate campaign, which is the offer 5.2 refused in writing |
+| D52 | Gap ranking by judgments affected rather than a fixed rank per kind — one unindexed record currently outranks forty | 5.3 | 10.1 | "Ordered by value" is 10.1's subject, and there is not enough evaluation traffic to rank by yet |
+| D53 | An "acknowledged" or "not applicable" state for a gap the user cannot close | 5.3 | 10.2 | Needs a human answer, which is what the numbered queue is for |
+| D54 | `gaps()` offered at session start and after an upload that changes the top gap, rather than by a sentence in a docstring | 5.3 | 10.6 | Proactive offers are 10.6's; the instructions are 7.4's |
+| D55 | `market_without_outcomes` computed from 5.5's coverage cells, honouring the `markets` list and collection/stage, rather than its own market-or-region grouping | 5.3 | 5.5 | 5.5 owns the cell computation |
+| D56 | Verdict agreement stratified by whether the missing-input line fired | 5.3 | 7.7 | No golden set yet |
 | D23 | The customer overlay should name *who IT is here* (a support contact), so a remedy can say "contact X" rather than the generic "ask whoever installed this" | 3.1 | 12.2 | No overlay file yet |
 
 ## Open — decided against
