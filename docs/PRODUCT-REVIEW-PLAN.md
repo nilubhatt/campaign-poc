@@ -366,11 +366,45 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       `prepare_evaluation` is stateless, so the server cannot today tell a real quote from a
       plausible one); `closest_precedent`, `evidence` and `provenance` are still whatever the
       caller passes (7.2/7.6); `findings` has no per-evaluation golden set yet (7.7).
-- [ ] **2.5 Commentary layer: comments, annotations, speaker notes** (defect 08). PDF
+- [x] **2.5 Commentary layer: comments, annotations, speaker notes** (defect 08). PDF
       `/Annots` (Text/FreeText/Highlight/StrikeOut/Underline/Square/Caret/Ink) with
       `/Contents`, `/T`, `/M`, page index; PPTX `notesSlide` + `ppt/comments/` +
       `ppt/modernComments/`. Stored as `commentary[]` `{page, author, date, text, kind}` —
       a distinct layer from `deck_text`, embedded but tagged so retrieval can weigh it.
+      **Done:** `extract.extract_commentary()` reads all three sources; PPTX reviewer
+      comments come straight out of the package (`ppt/comments/` and
+      `ppt/modernComments/`, authors resolved from `ppt/commentAuthors.xml` /
+      `ppt/authors.xml`) because python-pptx has no API for them. `/Link` is excluded on
+      purpose — the reviewer noted every other deck in the library carries link annotations
+      only, and a hyperlink is not an opinion; indexing them would put URL fragments into
+      the evidence a judgment cites. An empty `notesSlide` is not a note: PowerPoint creates
+      one the moment anything touches a slide, so the common case is blank, and a library of
+      empty commentary rows dilutes every retrieval it appears in.
+      `campaign_chunks` gains `kind` (`body`|`commentary`) and `source` (JSON `{kind, author,
+      date, anchor}`). One chunk per comment, never merged: two notes packed together would
+      share one author and one anchor, and the anchor is half of what makes a comment worth
+      keeping. Every hit carries `matched_kind`, plus `matched_author`/`matched_anchor`/
+      `matched_date` when commentary matched, so a reviewer's objection cannot be cited as
+      something the brief itself claimed. `include_commentary=False` answers "what does the
+      brief say" as opposed to "what did people think of it".
+      **Measured against the review's own number.** The reviewer probed a note that was not
+      indexed and got 0.63, matching the human-written summary instead: "had the note been
+      ingested, a near-verbatim query would score above 0.9." Over the real MCP protocol, on
+      a deck carrying two speaker notes and one tracked client comment: the near-verbatim
+      note query returns **0.9929**, `matched_kind: commentary`, `anchor: slide 1`; the
+      client-comment query returns 0.8836 attributed to *Dana Ruiz*; the same query with
+      `include_commentary=False` drops to 0.4361 on a body chunk, which is what proves the
+      layers are genuinely separate rather than nominally tagged.
+      **Not gated on `not deck_text`** — the trap the image extractor fell into, which
+      silently skipped extraction on the documented demo flow. Claude passing deck_text says
+      nothing about whether the notes were read, and the realistic call passes both.
+      Extraction never raises: a malformed comments part costs the user a warning, never the
+      deck they actually uploaded. Capped at `MAX_COMMENTARY_ITEMS` (200) like every other
+      caller-sized loop.
+      **Migration:** `campaign_chunks` gains both columns additively, existing chunks
+      default to `body`, with the pre-2.5-database test 2.4 taught us to write. Fixed while
+      here: `_migrate_schema` crashed on a table that does not exist — harmless in every real
+      install, because `init_db` runs `_SCHEMA` first, which is exactly why nobody noticed.
 
 ## Phase 3 — P2 defects
 

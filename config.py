@@ -111,6 +111,11 @@ ALLOWED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp"}
 # asset_ref) so creative-reuse detection doesn't require re-uploading every image by hand -
 # "who'll use it then?" Capped to bound per-upload phash/CLIP cost on a deck with many images.
 MAX_EXTRACTED_IMAGES_PER_DECK = int(os.getenv("CAMPAIGN_POC_MAX_EXTRACTED_IMAGES", "20"))
+# Comments, annotations and speaker notes carried by a deck (§2.5, defect 08). How many
+# there are is decided by whoever made the deck, so like every other caller-sized loop in
+# this server it is bounded — one reviewed PDF carried eight, but a deck round-tripped
+# through a client's legal team can carry hundreds.
+MAX_COMMENTARY_ITEMS = int(os.getenv("CAMPAIGN_POC_MAX_COMMENTARY", "200"))
 MAX_ASSET_BYTES = int(os.getenv("CAMPAIGN_POC_MAX_ASSET_MB", "100")) * 1024 * 1024
 MAX_INLINE_BYTES = int(os.getenv("CAMPAIGN_POC_MAX_INLINE_MB", "10")) * 1024 * 1024
 

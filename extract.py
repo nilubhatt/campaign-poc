@@ -154,3 +154,207 @@ def _read_pptx(path: Path) -> list[str]:
             units.append(text)
             total += len(text)
     return units
+
+
+# ── commentary: comments, annotations and speaker notes (§2.5, defect 08) ────
+#
+# A distinct layer from the deck body, deliberately. The review was explicit about why:
+# commentary "is usually the internal reaction to the work rather than the work itself", so
+# concatenating it into deck_text makes a reviewer's objection read back as something the
+# brief itself claimed. It carries an author, a date and a page or slide anchor; the body
+# carries none of those.
+
+# Subtypes that hold somebody's words. /Link is excluded on purpose: the reviewer found that
+# every other deck in the library carries /Link annotations only, and a hyperlink is not an
+# opinion — indexing them would put URL fragments into the evidence a judgment cites.
+_COMMENT_SUBTYPES = {"/Text", "/FreeText", "/Highlight", "/StrikeOut", "/Underline",
+                     "/Square", "/Caret", "/Ink"}
+
+
+def extract_commentary(path: Path, mime: str | None = None) -> tuple[list[dict], list[str]]:
+    """Return ([{kind, text, author, date, page|slide, anchor}, ...], warnings).
+
+    Never raises: commentary is the bonus layer, and a malformed comments part must not cost
+    the user the deck they actually uploaded.
+    """
+    mime = mime or guess_mime(path.name)
+    warnings: list[str] = []
+    try:
+        if mime == "application/pdf":
+            items = _read_pdf_commentary(path, warnings)
+        elif mime == config.PPTX_MIME:
+            items = _read_pptx_commentary(path, warnings)
+        else:
+            return [], []
+    except Exception as exc:                      # noqa: BLE001 - see docstring
+        return [], [f"comments and notes could not be read ({exc}); the deck itself was "
+                    f"ingested normally"]
+
+    if len(items) > config.MAX_COMMENTARY_ITEMS:
+        warnings.append(f"deck carries more than {config.MAX_COMMENTARY_ITEMS} comments and "
+                        f"notes; only the first {config.MAX_COMMENTARY_ITEMS} were indexed")
+        items = items[:config.MAX_COMMENTARY_ITEMS]
+    return items, warnings
+
+
+def _pdf_date(raw) -> str | None:
+    """PDF /M is `D:YYYYMMDDHHmmSS±HH'mm'`. Returned ISO-ish so it sorts and reads the same
+    way as every other date in the library; unparseable values are kept verbatim rather than
+    dropped, since a date nobody can parse is still evidence of when someone said it."""
+    if not raw:
+        return None
+    text = str(raw)
+    digits = text[2:] if text.startswith("D:") else text
+    try:
+        stamp = f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}"
+        if len(digits) >= 14:
+            stamp += f"T{digits[8:10]}:{digits[10:12]}:{digits[12:14]}"
+        int(digits[:8])
+        return stamp
+    except (ValueError, IndexError):
+        return text
+
+
+def _read_pdf_commentary(path: Path, warnings: list[str]) -> list[dict]:
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(path))
+    items: list[dict] = []
+    for i, page in enumerate(reader.pages):
+        if i >= config.MAX_PDF_PAGES:
+            break
+        try:
+            annots = page.get("/Annots") or []
+        except Exception as exc:                  # noqa: BLE001
+            warnings.append(f"page {i + 1}: comments could not be read ({exc}); skipped")
+            continue
+        for ref in annots:
+            try:
+                annot = ref.get_object()
+                if annot.get("/Subtype") not in _COMMENT_SUBTYPES:
+                    continue
+                text = str(annot.get("/Contents") or "").strip()
+                if not text:
+                    continue
+                items.append({
+                    "kind": "annotation",
+                    "text": text,
+                    "author": str(annot["/T"]) if annot.get("/T") else None,
+                    "date": _pdf_date(annot.get("/M")),
+                    "page": i + 1,
+                    "anchor": f"page {i + 1}",
+                })
+            except Exception as exc:              # noqa: BLE001
+                warnings.append(f"page {i + 1}: a comment could not be read ({exc}); skipped")
+    return items
+
+
+def _read_pptx_commentary(path: Path, warnings: list[str]) -> list[dict]:
+    items = _read_pptx_notes(path, warnings)
+    items.extend(_read_pptx_comments(path, warnings))
+    return items
+
+
+def _read_pptx_notes(path: Path, warnings: list[str]) -> list[dict]:
+    from pptx import Presentation
+
+    prs = Presentation(str(path))
+    items: list[dict] = []
+    for i, slide in enumerate(prs.slides):
+        if i >= config.MAX_PPTX_SLIDES:
+            break
+        try:
+            # PowerPoint creates a notesSlide as soon as anything touches the slide, so
+            # `has_notes_slide` is true far more often than there is a note — the common
+            # case is an empty one, and a library of blank commentary rows dilutes every
+            # retrieval it appears in.
+            if not slide.has_notes_slide:
+                continue
+            text = (slide.notes_slide.notes_text_frame.text or "").strip()
+            if not text:
+                continue
+            items.append({
+                "kind": "speaker_note",
+                "text": text,
+                "author": None,          # a notesSlide records no author
+                "date": None,
+                "slide": i + 1,
+                "anchor": f"slide {i + 1}",
+            })
+        except Exception as exc:                  # noqa: BLE001
+            warnings.append(f"slide {i + 1}: speaker notes could not be read ({exc}); skipped")
+    return items
+
+
+def _read_pptx_comments(path: Path, warnings: list[str]) -> list[dict]:
+    """Reviewer comments, read straight out of the package: python-pptx has no API for them.
+
+    Two formats, because PowerPoint changed it. `ppt/comments/` is the classic one, keyed to
+    an author list in `ppt/commentAuthors.xml`; `ppt/modernComments/` is what current
+    PowerPoint writes, keyed to `ppt/authors.xml`. A deck can carry either, and a deck that
+    has been round-tripped can carry both — which is the deck that matters here, since "a
+    partner deck returned with tracked client comments is the feedback the library exists to
+    remember".
+    """
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    items: list[dict] = []
+    with zipfile.ZipFile(path) as z:
+        names = set(z.namelist())
+        authors = _pptx_authors(z, names, warnings)
+        for name in sorted(n for n in names
+                           if n.startswith(("ppt/comments/", "ppt/modernComments/"))
+                           and n.endswith(".xml")):
+            try:
+                root = ET.fromstring(z.read(name))
+            except ET.ParseError as exc:
+                warnings.append(f"{name}: comments could not be parsed ({exc}); skipped")
+                continue
+            for node in root:
+                text = " ".join(t.text for t in node.iter()
+                                if t.tag.endswith("}t") and t.text).strip()
+                if not text:
+                    continue
+                author_id = node.get("authorId")
+                items.append({
+                    "kind": "comment",
+                    "text": text,
+                    "author": authors.get(author_id),
+                    "date": (node.get("created") or node.get("dt") or "").strip() or None,
+                    "slide": _slide_number_from_part(name),
+                    "anchor": _comment_anchor(name),
+                })
+    return items
+
+
+def _pptx_authors(z, names: set[str], warnings: list[str]) -> dict[str, str]:
+    import xml.etree.ElementTree as ET
+
+    authors: dict[str, str] = {}
+    for part in ("ppt/authors.xml", "ppt/commentAuthors.xml"):
+        if part not in names:
+            continue
+        try:
+            root = ET.fromstring(z.read(part))
+        except ET.ParseError as exc:
+            warnings.append(f"{part}: comment authors could not be parsed ({exc}); the "
+                            f"comments were kept without a name")
+            continue
+        for node in root:
+            ident, name = node.get("id"), node.get("name")
+            if ident and name:
+                authors[ident] = name
+    return authors
+
+
+def _slide_number_from_part(name: str) -> int | None:
+    import re
+
+    match = re.search(r"(\d+)", name.rsplit("/", 1)[-1])
+    return int(match.group(1)) if match else None
+
+
+def _comment_anchor(name: str) -> str:
+    number = _slide_number_from_part(name)
+    return f"slide {number}" if number else "deck"

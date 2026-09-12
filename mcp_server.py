@@ -148,6 +148,11 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
     freeform detail you have (brief, audience, budget, channel, timeline). The server chunks
     and embeds it per slide/section for search.
 
+    Pass asset_ref (the file itself) whenever you have it, even alongside deck_text: comments,
+    annotations and speaker notes can only be read from the file, and a partner deck returned
+    with tracked client comments is the feedback this library most wants to remember. The
+    result's `commentary_found` says how many were indexed.
+
     Passing deck_text alone does NOT check images — you also need asset_ref (a reference to
     the actual file: POST /upload first to get one, or a local path in stdio mode). Prefer
     passing asset_ref whenever you have the file, alongside deck_text if you already read it
@@ -443,7 +448,11 @@ def list_campaigns(record_type: Optional[RecordType] = None, status: Optional[St
 @mcp.tool()
 @_catch_value_errors
 def get_campaign(campaign_id: str) -> dict:
-    """Full detail + all metrics for one campaign by id."""
+    """Full detail + all metrics for one campaign by id, plus its `commentary`: the speaker
+    notes, annotations and tracked reviewer comments its deck carried, each with author,
+    date and the page or slide it sits on. That layer is what people said ABOUT the work and
+    is kept separate from the deck body deliberately — do not read it back as the brief's
+    own content."""
     conn = store.connect()
     try:
         c = store.get_campaign(conn, campaign_id)
@@ -461,7 +470,8 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
                            match_all_tags: bool = False, region: Optional[str] = None,
                            market: Optional[str] = None, markets: Optional[Union[str, list[str]]] = None,
                            collection: Optional[str] = None,
-                           full_detail: bool = False) -> dict:
+                           full_detail: bool = False,
+                           include_commentary: bool = True) -> dict:
     """Semantic search: find prior campaigns most similar to a description (text) or to an
     existing campaign (campaign_id). Matches at the slide/section level and rolls up to the
     best-matching campaign, so long decks match on the relevant part.
@@ -485,9 +495,18 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
     you require verification on just the performance tag while leaving the reaction tag
     open to any source.
 
+    Decks are indexed in two layers. The BODY is what the deck says; COMMENTARY is what
+    people said about it — speaker notes, PDF annotations and tracked reviewer comments,
+    each carrying its author, date and page or slide. Both are searched by default, and
+    `matched_kind` on every hit says which one matched: a `commentary` hit is somebody's
+    opinion of the work, not a claim the brief made, and citing it as the latter attributes
+    a reviewer's objection to the deck. Pass include_commentary=False when the question is
+    strictly "what does the brief say".
+
     Returns ranked evidence — title, status/tags/region/market/collection, similarity,
-    detail, the matched excerpt, and metrics (each tag shows its value AND source) — for you
-    to reason over. detail and metrics are trimmed by default (detail_truncated/
+    detail, the matched excerpt with its matched_kind (and matched_author/matched_anchor/
+    matched_date when commentary matched), and metrics (each tag shows its value AND source)
+    — for you to reason over. detail and metrics are trimmed by default (detail_truncated/
     metrics_truncated flag it) — pass full_detail=True, or call get_campaign, for the
     untrimmed record."""
     conn = store.connect()
@@ -498,7 +517,8 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
                                              match_all_tags=match_all_tags, region=region,
                                              market=market, markets=markets,
                                              collection=collection,
-                                             full_detail=full_detail)
+                                             full_detail=full_detail,
+                                             include_commentary=include_commentary)
     finally:
         conn.close()
 

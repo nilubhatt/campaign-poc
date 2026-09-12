@@ -85,6 +85,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
     warnings: list[str] = []
     stored_path = None
     units: list[str] = []  # natural per-page/slide units, when extraction ran
+    commentary: list[dict] = []  # comments, annotations and speaker notes (§2.5)
     asset_path_for_images: Optional[Path] = None  # only set when a real file reached us
     # ONE clock for the whole handler, not one per loop: this call embeds up to 20 images
     # and then every text chunk, and two independent budgets would let it take twice the
@@ -102,6 +103,17 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
             # plus the file itself via asset_ref for storage/image extraction).
             stored_path = _keep_asset(path)
             asset_path_for_images = path
+            # NOT gated on `not deck_text`. Commentary is a different layer from the body,
+            # so "Claude already read the deck and passed deck_text" says nothing about
+            # whether the notes were read — and the realistic case is both being passed.
+            # (The same gate silently skipped image extraction on the documented demo flow.)
+            try:
+                commentary, cw = extract.extract_commentary(path)
+                warnings += cw
+            except Exception as exc:              # noqa: BLE001
+                commentary = []
+                warnings.append(f"comments and notes could not be read ({exc}); the deck "
+                                f"itself was ingested normally")
             if not deck_text:
                 units, w2 = extract.extract_units(path)
                 warnings += w2
@@ -218,6 +230,20 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                 "warnings": warnings}
 
     chunk_ids = store.insert_chunks(conn, cid, chunk_texts)
+
+    # Commentary is embedded alongside the deck chunks but stored as its own kind, so
+    # retrieval can weigh it or leave it out (defect 08). One chunk per comment, never
+    # merged: two notes packed together would share one author and one anchor, and the
+    # anchor is half of what makes a comment worth keeping. A note longer than a chunk is
+    # split, with every piece keeping the same attribution.
+    for item in commentary:
+        source = {k: item.get(k) for k in ("kind", "author", "date", "anchor")}
+        pieces = chunking.pack([item["text"]])
+        ids = store.insert_chunks(conn, cid, pieces, kind="commentary",
+                                  sources=[source] * len(pieces))
+        chunk_ids += ids
+        chunk_texts += pieces
+
     embedded_count = 0
     # One embed call per chunk, against an embedder that can be slow or wedged. Without a
     # wall-clock budget a long deck simply outlives the transport: the client reports "did
@@ -256,6 +282,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         "chunks_total": len(chunk_texts), "chunks_embedded": embedded_count,
         "image_assets": image_assets, "images_checked": images_checked,
         "images_total": len(image_assets), "images_embedded": images_embedded,
+        "commentary_found": len(commentary),
         "warnings": warnings,
     }
 
@@ -955,12 +982,27 @@ def find_similar_with_context(conn, **kwargs) -> dict:
     return {"matches": matches, "warnings": warnings}
 
 
+def _matched_source(matched: Optional[dict]) -> dict:
+    """Attribution for a commentary match: who said it, when, and which page or slide. A
+    body chunk has none of these, so it contributes nothing rather than a row of nulls."""
+    import json as _json
+
+    raw = (matched or {}).get("source")
+    if not raw:
+        return {}
+    source = _json.loads(raw) if isinstance(raw, str) else raw
+    return {"matched_anchor": source.get("anchor"),
+            "matched_author": source.get("author"),
+            "matched_date": source.get("date"),
+            "matched_commentary_kind": source.get("kind")}
+
+
 def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str] = None,
                  top_k: int = 5, record_type: Optional[str] = None, status: Optional[str] = None,
                  tags: Optional[Union[str, dict, list]] = None, match_all_tags: bool = False,
                  region: Optional[str] = None, market: Optional[str] = None,
                  markets: Optional[Union[str, list]] = None, collection: Optional[str] = None,
-                 full_detail: bool = False) -> list[dict]:
+                 full_detail: bool = False, include_commentary: bool = True) -> list[dict]:
     """
     Rank prior campaigns by semantic similarity to `text` (or to an existing campaign's
     own content). Searches at chunk level (§6.1 — one vector per slide/section) and rolls
@@ -1027,11 +1069,22 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
 
     chunk_to_campaign = store.map_chunks_to_campaigns(conn, [chunk_id for chunk_id, _ in hits])
 
+    # Commentary is indexed alongside the body but is a different kind of evidence — the
+    # internal reaction to the work rather than the work itself (defect 08). Callers who are
+    # asking "what does the brief say", not "what did someone think of it", can leave it
+    # out; the default keeps it, because a client's tracked comment is exactly the feedback
+    # this library exists to remember.
+    excluded_kinds = set() if include_commentary else {"commentary"}
+
     best: dict[str, tuple[float, str]] = {}
     for chunk_id, sim in hits:
         cid = chunk_to_campaign.get(chunk_id)
         if cid is None or cid in superseded_ids or (cid in best and sim <= best[cid][0]):
             continue
+        if excluded_kinds:
+            chunk = store.get_chunk(conn, chunk_id)
+            if chunk and chunk.get("kind") in excluded_kinds:
+                continue
         best[cid] = (sim, chunk_id)
     ranked = sorted(best.items(), key=lambda kv: kv[1][0], reverse=True)[:top_k]
 
@@ -1073,6 +1126,10 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
             "detail": detail,
             "detail_truncated": truncated,
             "matched_excerpt": matched["text"] if matched else "",
+            # Which layer matched, and its attribution — a judgment that cites a reviewer's
+            # objection as though the brief itself claimed it is citing the wrong thing.
+            "matched_kind": (matched or {}).get("kind") or "body",
+            **_matched_source(matched),
             "metrics": metrics,
             "metrics_total": len(all_metrics),
             "metrics_truncated": metrics_truncated,

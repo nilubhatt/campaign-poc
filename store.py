@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS campaign_chunks (
     campaign_id   TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
     chunk_index   INTEGER NOT NULL,
     text          TEXT NOT NULL,
+    kind          TEXT NOT NULL DEFAULT 'body',   -- body | commentary (§2.5, defect 08):
+                                    -- commentary is the internal reaction to the work, not
+                                    -- the work itself, so retrieval can weigh or exclude it
+    source        TEXT,            -- JSON {kind, author, date, anchor} for commentary: who
+                                    -- said it, when, and which page or slide it sits on -
+                                    -- the deck body carries none of those
     embedded      INTEGER NOT NULL DEFAULT 0,
     created_at    REAL NOT NULL
 );
@@ -121,6 +127,17 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+def _columns(conn: sqlite3.Connection, table: str) -> dict[str, Any]:
+    """Column rows by name, or {} for a table that does not exist.
+
+    Every real caller reaches here through init_db, which runs _SCHEMA first, so the tables
+    are always present — which is exactly why the assumption went unnoticed until a test
+    built a partial legacy database and this crashed on a table the migration has nothing
+    to say about. Creating tables is _SCHEMA's job; a migration only ever adjusts one that
+    is already there."""
+    return {r["name"]: r for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
 def _migrate_schema(conn: sqlite3.Connection) -> None:
     """Additive migrations for columns added after a release — CREATE TABLE IF NOT EXISTS
     (in _SCHEMA) does nothing for an EXISTING table, so a column added since someone's last
@@ -129,16 +146,15 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     reproduced against a pre-collection schema). Never destructive — only ever adds a column
     (nullable, or NOT NULL with a constant default — SQLite allows the latter on ADD COLUMN,
     backfilling existing rows) to an existing table; a fresh DB already has it via _SCHEMA."""
-    existing = {r["name"] for r in conn.execute("PRAGMA table_info(campaigns)").fetchall()}
-    if "collection" not in existing:
+    existing = _columns(conn, "campaigns")
+    if existing and "collection" not in existing:
         conn.execute("ALTER TABLE campaigns ADD COLUMN collection TEXT")
-    if "markets" not in existing:
+    if existing and "markets" not in existing:
         conn.execute("ALTER TABLE campaigns ADD COLUMN markets TEXT NOT NULL DEFAULT '[]'")
-    evaluation_columns = {r["name"]: r for r in
-                          conn.execute("PRAGMA table_info(evaluations)").fetchall()}
+    evaluation_columns = {r["name"]: r for r in _columns(conn, "evaluations").values()}
     for column in ("verdict", "summary", "findings", "resolved", "closest_precedent",
                    "approve_if", "evidence", "provenance"):
-        if column not in evaluation_columns:
+        if evaluation_columns and column not in evaluation_columns:
             conn.execute(f"ALTER TABLE evaluations ADD COLUMN {column} TEXT")
     # The one migration ADD COLUMN cannot do. Before §2.4 a judgment was one required
     # free-text `analysis`; it is now optional and structured, and SQLite has no way to
@@ -149,6 +165,13 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     # reproduced it independently; it was invisible to the whole suite because every test
     # starts from a fresh _SCHEMA. Rebuild copies the legacy essays across untouched —
     # they are the record of what the library was told, and the evidence for defect 07.
+    chunk_columns = _columns(conn, "campaign_chunks")
+    if chunk_columns and "kind" not in chunk_columns:
+        # Existing chunks are all deck body — the only kind that existed before §2.5.
+        conn.execute("ALTER TABLE campaign_chunks ADD COLUMN kind TEXT NOT NULL "
+                     "DEFAULT 'body'")
+    if chunk_columns and "source" not in chunk_columns:
+        conn.execute("ALTER TABLE campaign_chunks ADD COLUMN source TEXT")
     legacy_analysis = evaluation_columns.get("analysis")
     if legacy_analysis is not None and legacy_analysis["notnull"]:
         _rebuild_evaluations(conn)
@@ -418,6 +441,7 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
         "SELECT id FROM campaigns WHERE supersedes = ?", (campaign_id,)
     ).fetchall()]
     d["is_superseded"] = len(d["superseded_by"]) > 0
+    d["commentary"] = get_commentary(conn, campaign_id)
     # Derived, not maintained — same reasoning as superseded_by/is_superseded above: a
     # freeform collection value on its own isn't usable from a single record without a way
     # to find the other members (design review flagged this as the missing half of the
@@ -657,19 +681,40 @@ def get_superseded_campaign_ids(conn) -> set[str]:
 
 # ── campaign chunks (§6.1: one vector per chunk, not per campaign) ───────────
 
-def insert_chunks(conn, campaign_id: str, texts: list[str]) -> list[str]:
+def insert_chunks(conn, campaign_id: str, texts: list[str], *, kind: str = "body",
+                  sources: Optional[list[dict]] = None) -> list[str]:
+    """`sources` carries one {kind, author, date, anchor} per text for commentary, so a
+    match can say who said it and where, rather than only that the deck mentions it."""
     now = _now()
     ids = []
+    start = conn.execute(
+        "SELECT COALESCE(MAX(chunk_index), -1) + 1 FROM campaign_chunks WHERE campaign_id = ?",
+        (campaign_id,)).fetchone()[0]
     for i, text in enumerate(texts):
         chid = _id("chunk")
+        source = (sources or [None] * len(texts))[i]
         conn.execute(
-            """INSERT INTO campaign_chunks (id, campaign_id, chunk_index, text, created_at)
-               VALUES (?,?,?,?,?)""",
-            (chid, campaign_id, i, text, now),
+            """INSERT INTO campaign_chunks (id, campaign_id, chunk_index, text, kind,
+                                            source, created_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (chid, campaign_id, start + i, text, kind,
+             json.dumps(source) if source else None, now),
         )
         ids.append(chid)
     conn.commit()
     return ids
+
+
+def get_commentary(conn, campaign_id: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT text, source FROM campaign_chunks WHERE campaign_id = ? AND kind = "
+        "'commentary' ORDER BY chunk_index", (campaign_id,)).fetchall()
+    items = []
+    for r in rows:
+        item = json.loads(r["source"]) if r["source"] else {}
+        item["text"] = r["text"]
+        items.append(item)
+    return items
 
 
 def set_chunk_embedded(conn, chunk_id: str) -> None:

@@ -114,8 +114,8 @@ Offline smoke test (no Ollama): `CAMPAIGN_POC_EMBED_PROVIDER=hash python -m http
 `upload_campaign` · `update_campaign` · `delete_campaign` · `add_metrics` ·
 `bulk_import_metrics` · `upload_image_asset` · `check_image_provenance` ·
 `find_similar_images` · `list_campaigns` · `get_campaign` · `find_similar_campaigns` ·
-`prepare_evaluation` · `save_evaluation` · `list_evaluations` · `reconcile_evaluation` ·
-`save_reconciliation`
+`prepare_evaluation` · `save_evaluation` · `get_evaluation` · `list_evaluations` ·
+`reconcile_evaluation` · `save_reconciliation` · `finish_indexing` · `health_check`
 
 ## Files
 
@@ -124,7 +124,8 @@ config.py        env-driven config
 store.py         SQLite schema + CRUD (campaigns, campaign_chunks, assets, asset_fingerprints, metrics, evaluations, reconciliations)
 vectorstore.py   sqlite-vec vector table, keyed by chunk id (+ pure-Python cosine fallback)
 embedding.py     ollama | voyage | hash embedders + cosine
-extract.py       PDF / PPTX text extraction, one unit per page/slide
+extract.py       PDF / PPTX text, embedded images, and commentary (comments, annotations,
+                 speaker notes) — one text unit per page/slide
 chunking.py      packs text units into embeddable chunks (server-side, per slide/section)
 images.py        perceptual hashing (pHash) for exact/near-duplicate creative-reuse detection
 clip_embed.py    CLIP visual embeddings for aesthetic/regional similarity (torch, heavy)
