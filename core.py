@@ -19,6 +19,7 @@ import chunking
 import clip_embed
 import config
 import embedding
+import enums
 import extract
 import images
 import notices
@@ -346,6 +347,13 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
     """
     if store.get_campaign(conn, campaign_id) is None:
         return {"error": f"campaign {campaign_id} not found"}
+    # Validate and normalise BEFORE previewing. The preview used to return first, so a
+    # marketer was shown "metric_type: target" as if it were about to be saved and the
+    # rejection arrived only after they said yes — and a normalised value ("Results" ->
+    # "actual") was hidden from the one screen that exists for them to correct it.
+    metric_type = enums.normalise(metric_type, field="metric_type",
+                                  valid=store.VALID_METRIC_TYPES,
+                                  synonyms=enums.METRIC_TYPE_SYNONYMS, allow_none=False)
     if not confirm:
         return {
             "preview": True, "campaign_id": campaign_id, "metric_type": metric_type,

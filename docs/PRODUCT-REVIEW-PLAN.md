@@ -693,8 +693,36 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 
 ## Phase 5 — Making it intuitive (ideas A–F)
 
-- [ ] **5.1 (A) Forgiving enums, teaching errors.** Every enum error returns the valid set
+- [x] **5.1 (A) Forgiving enums, teaching errors.** Every enum error returns the valid set
       and the closest match; normalise on the way in ("client stated" → `stated`).
+      **Reproduced first, and one case was worse than reported.** The tag-source rejection
+      came from `Union[str, TagObject]`, which reports only its FIRST branch's failure — so
+      an unknown source produced *"tags.0.str: Input should be a valid string"* about a
+      dict, telling a marketer their object should be a string and never mentioning `source`
+      at all. The bare-string-where-a-list-was-required case was already fixed.
+      **Done:** `enums.py`, in three layers because they are three different claims. *Shape*
+      — case, spacing and punctuation are not meaning, so "In Flight", "in-flight" and
+      "in_flight" are one value and no synonym table has to list all three. *Synonyms* — an
+      explicit table a person can read and argue with, covering what a marketer actually
+      types ("client stated", "live", "done", "a pitch"). *Teach* — the valid set always,
+      plus the closest match only when something really is close, since a suggestion that is
+      not close just sends somebody to retype a word that will also be rejected.
+      The values are normalised identically on the **filter** side, because a value the
+      library accepted that cannot then be used to search for itself is a trap rather than a
+      kindness.
+      **Deliberately not guessed:** `target` for a metric type — the reviewer's own example.
+      A target is what somebody wants to happen and a prediction is what this library expects
+      to happen; filing one as the other corrupts every later reconciliation, which exists to
+      compare predictions against actuals. That one teaches, and says why. `goal` and
+      `benchmark` get the same treatment.
+      **The schema still advertises the enum** while the Python type is a plain string: the
+      enum is what stops a well-behaved caller guessing in the first place, and the
+      normalising is for when it guesses anyway. Without loosening the type, the value dies
+      at pydantic's boundary before any of this code can see it.
+      **Found while verifying over the protocol:** `add_metrics(confirm=False)` returned its
+      preview *before* validating, so a marketer was shown `metric_type: "target"` as though
+      it were about to be saved and the rejection arrived only after they agreed — and a
+      normalised value was hidden from the one screen that exists for them to correct it.
 - [ ] **5.2 (B) `next_actions`** on every result — `{label, tool, prefilled_args}`.
 - [ ] **5.3 (C) `gaps()`** + a standing line on every evaluation naming the single most
       valuable missing input for that judgment.

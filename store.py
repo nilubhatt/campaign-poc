@@ -18,6 +18,7 @@ import uuid
 from typing import Any, Optional, Union
 
 import config
+import enums
 import vectorstore
 
 _SCHEMA = """
@@ -229,21 +230,24 @@ def _id(prefix: str) -> str:
 
 # ── campaigns ────────────────────────────────────────────────────────────────
 
-_VALID_RECORD_TYPES = {"campaign", "reference", "stub"}
-_VALID_STATUSES = {"proposed", "in_flight", "concluded"}
+# Tuples, not sets: these are shown to a person, and set iteration order is arbitrary, so
+# the same error could list the options differently on two runs.
+VALID_RECORD_TYPES = ("campaign", "reference", "stub")
+VALID_STATUSES = ("proposed", "in_flight", "concluded")
+VALID_TAG_SOURCES = ("verified", "stated")
+_VALID_RECORD_TYPES = VALID_RECORD_TYPES          # older internal names, kept
+_VALID_STATUSES = VALID_STATUSES
+_VALID_TAG_SOURCES = VALID_TAG_SOURCES
 
 
-def _validate_record_type(value) -> None:
-    if value not in _VALID_RECORD_TYPES:
-        raise ValueError(f"invalid record_type {value!r}, must be one of {sorted(_VALID_RECORD_TYPES)}")
+def _normalise_record_type(value):
+    return enums.normalise(value, field="record_type", valid=VALID_RECORD_TYPES,
+                           synonyms=enums.RECORD_TYPE_SYNONYMS, allow_none=False)
 
 
-def _validate_status(value) -> None:
-    if value is not None and value not in _VALID_STATUSES:
-        raise ValueError(f"invalid status {value!r}, must be one of {sorted(_VALID_STATUSES)} or None")
-
-
-_VALID_TAG_SOURCES = {"verified", "stated"}
+def _normalise_status(value):
+    return enums.normalise(value, field="status", valid=VALID_STATUSES,
+                           synonyms=enums.STATUS_SYNONYMS)
 
 
 def normalize_tags(tags, *, has_actual_metrics: bool = False) -> list[dict]:
@@ -280,9 +284,10 @@ def normalize_tags(tags, *, has_actual_metrics: bool = False) -> list[dict]:
             if not isinstance(raw_value, str) or not raw_value.strip():
                 raise ValueError(f"tag object must have a non-empty string 'value', got {t!r}")
             value = raw_value.strip()
-            source = t.get("source", "stated")
-            if source not in _VALID_TAG_SOURCES:
-                raise ValueError(f"invalid tag source {source!r}, must be one of {sorted(_VALID_TAG_SOURCES)}")
+            source = enums.normalise(t.get("source", "stated"), field="tag 'source'",
+                                     valid=VALID_TAG_SOURCES,
+                                     synonyms=enums.TAG_SOURCE_SYNONYMS,
+                                     allow_none=False)
         else:
             raise ValueError(f"tag must be a string or {{value, source}} object, got {t!r}")
         if not value:
@@ -373,10 +378,11 @@ def _parse_tag_query(tags) -> list[tuple[str, Optional[str]]]:
             if not isinstance(raw_value, str) or not raw_value.strip():
                 raise ValueError(f"tag query object must have a non-empty string 'value', got {t!r}")
             value = raw_value.strip()
-            source = t.get("source")
-            if source is not None and source not in _VALID_TAG_SOURCES:
-                raise ValueError(f"invalid tag source {source!r} in query, must be one of "
-                                 f"{sorted(_VALID_TAG_SOURCES)} or omitted")
+            # Normalised exactly as on the way in: a value the library accepted must be
+            # usable to search for itself, or the forgiveness is a trap.
+            source = enums.normalise(t.get("source"), field="tag 'source'",
+                                     valid=VALID_TAG_SOURCES,
+                                     synonyms=enums.TAG_SOURCE_SYNONYMS)
         else:
             raise ValueError(f"tag query entry must be a string or {{value, source}} object, got {t!r}")
         if not value:
@@ -388,8 +394,8 @@ def _parse_tag_query(tags) -> list[tuple[str, Optional[str]]]:
 def insert_campaign(conn, *, title, record_type="campaign", status=None, detail=None,
                     deck_text=None, asset_path=None, tags=None, region=None, market=None,
                     markets=None, collection=None, supersedes=None) -> str:
-    _validate_record_type(record_type)
-    _validate_status(status)
+    record_type = _normalise_record_type(record_type)
+    status = _normalise_status(status)
     tags = normalize_tags(tags, has_actual_metrics=False)  # brand-new: no metrics can exist yet
     markets = normalize_markets(markets)
     cid = _id("camp")
@@ -468,10 +474,10 @@ def list_campaigns(conn, *, record_type: Optional[str] = None,
     clauses, params = [], []
     if record_type:
         clauses.append("record_type = ?")
-        params.append(record_type)
+        params.append(_normalise_record_type(record_type))
     if status:
         clauses.append("status = ?")
-        params.append(status)
+        params.append(_normalise_status(status))
     sql = "SELECT * FROM campaigns"
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
@@ -558,10 +564,10 @@ def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Opti
     params: list = []
     if record_type:
         clauses.append("record_type = ?")
-        params.append(record_type)
+        params.append(_normalise_record_type(record_type))
     if status:
         clauses.append("status = ?")
-        params.append(status)
+        params.append(_normalise_status(status))
     if region:
         clauses.append("LOWER(region) = LOWER(?)")
         params.append(region)
@@ -611,11 +617,9 @@ def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_t
     if detail is not None:
         fields.append("detail = ?"); params.append(detail)
     if record_type is not None:
-        _validate_record_type(record_type)
-        fields.append("record_type = ?"); params.append(record_type)
+        fields.append("record_type = ?"); params.append(_normalise_record_type(record_type))
     if status is not None:
-        _validate_status(status)
-        fields.append("status = ?"); params.append(status)
+        fields.append("status = ?"); params.append(_normalise_status(status))
     if tags is not None:
         has_actual = conn.execute(
             "SELECT 1 FROM metrics WHERE campaign_id = ? AND metric_type = 'actual' LIMIT 1",
@@ -900,17 +904,17 @@ def list_assets(conn, *, campaign_ids: Optional[list[str]] = None,
 
 # ── metrics ──────────────────────────────────────────────────────────────────
 
-_VALID_METRIC_TYPES = {"actual", "predicted"}
+VALID_METRIC_TYPES = ("actual", "predicted")
+_VALID_METRIC_TYPES = VALID_METRIC_TYPES
 
 
 def add_metrics(conn, campaign_id: str, *, detail=None, structured=None,
                 metric_type: str = "actual", commit: bool = True) -> str:
     """commit=False lets a bulk import batch many rows into one transaction — a commit per
     row is an fsync per row, which the caller's row count controls."""
-    metric_type = str(metric_type).strip().lower()
-    if metric_type not in _VALID_METRIC_TYPES:
-        raise ValueError(f"invalid metric_type {metric_type!r}, "
-                         f"must be one of {sorted(_VALID_METRIC_TYPES)}")
+    metric_type = enums.normalise(metric_type, field="metric_type",
+                                  valid=VALID_METRIC_TYPES,
+                                  synonyms=enums.METRIC_TYPE_SYNONYMS, allow_none=False)
     mid = _id("met")
     conn.execute(
         """INSERT INTO metrics (id, campaign_id, metric_type, detail, structured, created_at)

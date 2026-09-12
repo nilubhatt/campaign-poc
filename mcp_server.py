@@ -9,7 +9,9 @@ Claude Web / cowork custom connector points at.
 from __future__ import annotations
 
 import functools
-from typing import Literal, NotRequired, Optional, TypedDict, Union
+from typing import Annotated, Literal, NotRequired, Optional, TypedDict, Union
+
+from pydantic import Field
 
 from mcp.server.mcpserver import MCPServer
 
@@ -67,13 +69,24 @@ def _catch_value_errors(fn):
             return {"error": str(exc)}
     return wrapper
 
-# Constrains the JSON schema the LLM sees for these params, instead of relying on prose in
-# a docstring alone — a typo ("inflight") is now a schema-validation error, not a silent
-# value that never matches any filter (review flagged this as the cheapest correctness win
-# available; store.py enforces the same values server-side regardless).
-RecordType = Literal["campaign", "reference", "stub"]
-Status = Literal["proposed", "in_flight", "concluded"]
-MetricType = Literal["actual", "predicted"]
+# The JSON schema still advertises the valid values — that is what stops a well-behaved
+# caller guessing in the first place — but the PYTHON type is a plain string, so a value that
+# gets guessed anyway reaches this project's code instead of dying at pydantic's boundary
+# (§5.1, idea A).
+#
+# That boundary was the problem. Three enum values were rejected before the reviewer found
+# the right one, and pydantic's message names the valid set but never the closest match, and
+# cannot normalise "client stated" into `stated` because it never sees the value. store.py
+# now does both: it accepts what a marketer would actually type, and when it genuinely
+# cannot tell, the error carries the valid set and the nearest match.
+def _enum(*values: str):
+    """A string in the schema's eyes, an enum in the reader's."""
+    return Annotated[str, Field(json_schema_extra={"enum": list(values)})]
+
+
+RecordType = _enum("campaign", "reference", "stub")
+Status = _enum("proposed", "in_flight", "concluded")
+MetricType = _enum("actual", "predicted")
 
 # Suggested tag vocabulary (not enforced — tags stay freeform, this is guidance for the
 # conversational intake). Two independent axes that commonly co-occur on the same campaign
@@ -81,6 +94,8 @@ MetricType = Literal["actual", "predicted"]
 # "missing quadrant" — liked but underperformed, or disliked but performed well — is where
 # the real lessons are; querying it needs tags=["liked","underperformed"],
 # match_all_tags=True (see find_similar_campaigns).
+TagSource = _enum("verified", "stated")
+
 SUGGESTED_TAGS = {
     "creative reaction": ["liked", "not_liked", "mixed_reaction"],
     "performance": ["performed_well", "underperformed", "performed_as_expected", "no_data_yet"],
@@ -95,7 +110,11 @@ SUGGESTED_TAGS = {
 # agent will weight it as if it were measured.
 class TagObject(TypedDict):
     value: str
-    source: NotRequired[Literal["verified", "stated"]]  # omitted -> defaults to 'stated'
+    # A plain string, not a Literal: the union below reports only its FIRST branch's
+    # failure, so an unknown source produced "tags.0.str: Input should be a valid string"
+    # about a dict — telling a marketer their object should be a string, and never
+    # mentioning `source` at all. store.normalize_tags names the field and its values.
+    source: NotRequired[TagSource]  # omitted -> defaults to 'stated'
 
 TagInput = Union[str, TagObject]
 
