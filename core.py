@@ -1130,18 +1130,17 @@ def gaps(conn) -> dict:
 
     # A gap located in a SLICE rather than in the total. A marketer asking about Colombia
     # does not care that the library is 60% measured overall if the LATAM part is 0%.
-    # Grouped the way the rest of the product groups: the `markets` LIST counts (it is the
-    # only way to reach a multi-country activation), blanks are not markets, and matching is
-    # case-insensitive because `filter_campaign_ids` treats "LATAM" and "latam" as one.
+    # Grouped by §5.5's `_markets_of`, not by a second implementation here. This grew its
+    # own market-or-region grouping and the two surfaces then described the same library
+    # differently — one of them ignoring the `markets` list entirely (tracker D55).
     by_market: dict[str, list] = {}
     display: dict[str, str] = {}
     for campaign in ran:
-        for raw in (campaign.get("market"), campaign.get("region"),
-                    *(campaign.get("markets") or [])):
-            if not raw or not str(raw).strip():
+        for raw in _markets_of(campaign):
+            if raw is None:
                 continue
-            key = str(raw).strip().lower()
-            display.setdefault(key, str(raw).strip())
+            key = raw.strip().lower()
+            display.setdefault(key, raw.strip())
             if campaign not in by_market.setdefault(key, []):
                 by_market[key].append(campaign)
 
@@ -1638,6 +1637,120 @@ def _stale_citations(conn, evaluation, cited_by: str) -> list[dict]:
                               "something no search would return today.",
         })
     return stale
+
+
+# ── coverage (§5.5, idea E) ─────────────────────────────────────────────────
+#
+# "list_campaigns returns eight rows. The question a marketer actually has is where the holes
+# are: which markets, collections and launch types are represented, which have outcomes,
+# which have only one example carrying all the weight."
+#
+# The third question is the one nothing else in the product answers. A cell carried by a
+# single campaign produces judgments that are really that one campaign's opinion, and the
+# similarity score looks identical whether it came from one precedent or nine.
+#
+# Distinct from gaps() (§5.3), which is "what do I fix first" — one ranked list with actions.
+# This is "what do I have", a matrix. §5.3's market gap is computed from these cells so the
+# two surfaces cannot describe the same library differently (tracker D55).
+
+# Market x collection x stage is multiplicative, and this goes inside a tool result somebody
+# has to read.
+MAX_COVERAGE_CELLS = 25
+
+# Worst first. `no_outcomes` outranks `single_example` because a cell with two campaigns and
+# nothing measured compares a proposal against what was planned, which is weaker than one
+# measured example.
+_EVIDENCE_ORDER = ("no_outcomes", "single_example", "measured")
+
+
+def coverage(conn) -> dict:
+    """Where the library is thick and where it is thin, by market, collection and stage.
+
+    Cells OVERLAP by construction: a campaign that ran in three markets belongs to three
+    cells, because "what do I have in Colombia" is asked per market. So the counts do not sum
+    to the number of campaigns, and `campaigns_total` plus the note say so rather than
+    leaving somebody to add them up.
+    """
+    superseded = store.get_superseded_campaign_ids(conn)
+    campaigns = [c for c in store.list_campaigns(conn)
+                 if c.get("record_type") != "reference" and c["id"] not in superseded]
+    measured = store.campaigns_with_actual_metrics(conn)
+
+    if not campaigns:
+        return {
+            "cells": [], "cells_total": 0, "thin": [], "campaigns_total": 0,
+            "markets": [], "collections": [], "stages": [],
+            "note": "The library is empty, so there is nothing to have coverage of.",
+            "next_actions": actions.trim([actions.action(
+                "Add a campaign you were happy with, and one you were not",
+                "upload_campaign",
+                why="Two contrasting records is the smallest library that can produce a "
+                    "useful judgment.",
+                consent="ask", needs=["the campaign's deck or a description of it"])]),
+        }
+
+    buckets: dict[tuple, list] = {}
+    for campaign in campaigns:
+        for market in _markets_of(campaign):
+            key = (market, campaign.get("collection") or None,
+                   campaign.get("status") or None)
+            buckets.setdefault(key, []).append(campaign)
+
+    cells = []
+    for (market, collection, stage), rows in buckets.items():
+        with_outcomes = sum(1 for c in rows if c["id"] in measured)
+        cells.append({
+            "market": market,
+            "collection": collection,
+            "stage": stage,
+            "campaigns": len(rows),
+            "with_outcomes": with_outcomes,
+            # Both can be true at once; the marker names the one that costs more, and the
+            # counts above are there so nothing is hidden behind it.
+            "evidence": ("no_outcomes" if not with_outcomes
+                         else "single_example" if len(rows) == 1
+                         else "measured"),
+            "campaign_ids": [c["id"] for c in rows][:5],
+        })
+
+    cells.sort(key=lambda c: (_EVIDENCE_ORDER.index(c["evidence"]),
+                              -c["campaigns"],
+                              c["market"] or "", c["collection"] or "", c["stage"] or ""))
+    thin = [c for c in cells if c["evidence"] != "measured"]
+
+    return {
+        "cells": cells[:MAX_COVERAGE_CELLS],
+        "cells_total": len(cells),
+        # A matrix is something to browse; the answer is which cells are weak. Worst first,
+        # so the first line is the one that matters.
+        "thin": thin[:MAX_COVERAGE_CELLS],
+        "campaigns_total": len(campaigns),
+        "markets": sorted({c["market"] for c in cells if c["market"]}),
+        "collections": sorted({c["collection"] for c in cells if c["collection"]}),
+        "stages": sorted({c["stage"] for c in cells if c["stage"]}),
+        "note": ("A campaign that ran in more than one market appears in a cell for each, so "
+                 "the cell counts overlap and do not add up to campaigns_total. `thin` is "
+                 "the same cells ordered worst first: `no_outcomes` means nothing there was "
+                 "ever measured, `single_example` means one campaign is carrying every "
+                 "judgment about that cell."),
+    }
+
+
+def _markets_of(campaign: dict) -> list:
+    """Every market this campaign counts towards, or `[None]` when it has none.
+
+    The `markets` list is the only way to express a multi-country activation, so ignoring it
+    would report a real LATAM campaign as covering nothing. And a record with no market at
+    all is most of a young library — dropping those would describe a library nobody has.
+    """
+    named = []
+    for raw in (campaign.get("market"), campaign.get("region"),
+                *(campaign.get("markets") or [])):
+        if raw and str(raw).strip():
+            value = str(raw).strip()
+            if value.lower() not in {m.lower() for m in named}:
+                named.append(value)
+    return named or [None]
 
 
 def published_tool_parameters() -> dict[str, list[str]]:

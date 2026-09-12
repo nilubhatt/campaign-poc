@@ -799,6 +799,36 @@ def diff_campaigns(earlier: str, later: str) -> dict:
 
 @mcp.tool()
 @_catch_value_errors
+def coverage() -> dict:
+    """Where the library is thick and where it is thin — by market, collection and stage.
+
+    `list_campaigns` answers "what have I got" one record at a time. This answers the
+    question a marketer actually has: which markets and collections are represented, which
+    have measured results, and which rest on a single example.
+
+    Each cell carries `campaigns`, `with_outcomes` and an `evidence` marker:
+      `no_outcomes`     campaigns are there and none was ever measured, so judgments about
+                        this cell compare a proposal to what was planned, not what happened.
+      `single_example`  one campaign is carrying every judgment about this cell. Worth saying
+                        out loud: the similarity score looks the same whether it came from
+                        one precedent or nine.
+      `measured`        two or more, with results.
+
+    Read `thin` rather than the matrix — it is the same cells, worst first. Cells OVERLAP: a
+    campaign that ran in three markets is in three of them, so the counts do not add up to
+    `campaigns_total`, and `cells_total` says how many exist if the list was truncated.
+
+    This is "what do I have". For "what should I fix first", with prefilled actions, call
+    gaps() — the two are computed from the same grouping and cannot disagree."""
+    conn = store.connect()
+    try:
+        return core.coverage(conn)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
 def gaps() -> dict:
     """What this library is missing, ranked, with what would close each one.
 

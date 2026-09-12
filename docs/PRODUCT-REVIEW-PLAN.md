@@ -1019,7 +1019,35 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       category tie-break, and the creation-order fallback. All three now have tests.
       **And I broke the tracker's own rule** — 5.4 created eight deferrals and recorded none
       in the same commit. D57-D64, plus amendments to D41 and D46.
-- [ ] **5.5 (E) Coverage view** — market × collection × stage, counts and evidence quality.
+- [x] **5.5 (E) Coverage view** — market × collection × stage, counts and evidence quality.
+      **Done.** `coverage()` answers the three questions the review asks, and the third is
+      the one nothing else in the product answered: *"which have only one example carrying
+      all the weight"*. A cell carried by a single campaign produces judgments that are
+      really that one campaign's opinion, and the similarity score looks identical whether it
+      came from one precedent or nine. `evidence` is `no_outcomes`, `single_example` or
+      `measured` — worst first, with both counts present so nothing hides behind the marker.
+      `no_outcomes` outranks `single_example` deliberately: two campaigns with nothing
+      measured compare a proposal against what was *planned*, which is weaker than one
+      measured example.
+      **Cells overlap by construction** and the report says so. A campaign that ran in three
+      markets belongs to three cells, because "what do I have in Colombia" is asked per
+      market — so the counts do not sum to `campaigns_total`, and leaving somebody to add
+      them up would be the quiet kind of wrong.
+      **`thin` is the answer; the matrix is the evidence for it.** A matrix is something to
+      browse, so the same cells come back ordered worst-first and the docstring tells Claude
+      to read that instead.
+      **Records with no market are included**, since that is most of a young library and
+      dropping them would describe a library nobody has. Superseded and `reference` records
+      are excluded, for the reason §5.3 needed: a superseded record is invisible to every
+      search, so counting it as coverage describes evidence no judgment can reach.
+      **Closes D55.** `gaps()` had grown its own market-or-region grouping, so the two
+      surfaces could describe the same library differently — and one of them ignored the
+      `markets` list entirely. Both now group through `_markets_of`, verified over the
+      protocol: coverage reported MENA thin and `gaps()` named MENA.
+      **Bounded**, because market × collection × stage is multiplicative and this goes inside
+      a tool result somebody reads: 25 cells, with `cells_total` saying how many exist.
+      Kept distinct from `gaps()`: this is "what do I have", that is "what do I fix first"
+      with prefilled actions. Same grouping, different question, and they cannot disagree.
 - [ ] **5.6 (F) Guided first run** on an empty or thin library.
 
 ## Phase 6 — Making the reasoning defensible (ideas G–L)
