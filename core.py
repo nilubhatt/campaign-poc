@@ -1775,7 +1775,9 @@ def coverage(conn) -> dict:
         # A matrix is something to browse; the answer is which cells are weak. Worst first,
         # so the first line is the one that matters.
         "thin": [] if everything_is_thin else thin[:MAX_COVERAGE_CELLS],
-        "thin_total": len(thin),
+        # Not the total of a list that is not being shown: `thin: []` beside
+        # `thin_total: 3` is an inconsistent pair for a reader.
+        "thin_total": 0 if everything_is_thin else len(thin),
         "thin_summary": (f"Nothing in this library is measured yet: {len(campaigns)} "
                          f"campaign(s) across {len({c['market'] for c in cells})} cell(s), "
                          f"none with results on file. The place to start is not a "
@@ -1783,7 +1785,10 @@ def coverage(conn) -> dict:
                          if everything_is_thin else None),
         "unmeasured_campaigns": sorted(unmeasured.values(),
                                        key=lambda c: (-len(c["markets"]), c["title"]))[:10],
-        "next_actions": readiness(conn)["shortest_path"] if everything_is_thin else [],
+        # The measurement offer, not the first-run path: the path never mentions results, so
+        # once liked/not_liked/rulebook existed the summary named measurement as the problem
+        # and offered nothing at all — while `gaps()` on the same library offered add_metrics.
+        "next_actions": (_offer_to_measure(conn, unmeasured) if everything_is_thin else []),
         "campaigns_total": len(campaigns),
         "markets": sorted({c["market"] for c in cells if c["market"]}),
         "collections": sorted({c["collection"] for c in cells if c["collection"]}),
@@ -1796,6 +1801,25 @@ def coverage(conn) -> dict:
                  "`not_yet_run` is neither — a campaign that has not concluded cannot have "
                  "results yet."),
     }
+
+
+def _offer_to_measure(conn, unmeasured: dict) -> list[dict]:
+    """The single thing that would lift a wholly unmeasured library out of it.
+
+    Falls back to the first-run path only when there is nothing to measure yet — a library
+    with no concluded campaign cannot record results for one.
+    """
+    candidates = sorted(unmeasured.values(), key=lambda c: (-len(c["markets"]), c["title"]))
+    if not candidates:
+        return readiness(conn)["shortest_path"]
+    first = candidates[0]
+    return actions.trim([actions.action(
+        f"Record what \u201c{first['title']}\u201d actually achieved",
+        "add_metrics",
+        why="Nothing in the library has measured results, so every judgment compares a "
+            "proposal to what was planned rather than to what happened.",
+        consent="ask", needs=["the numbers, or what happened in words"],
+        campaign_id=first["campaign_id"])])
 
 
 def _markets_of(campaign: dict) -> list:
@@ -1843,18 +1867,29 @@ def readiness(conn) -> dict:
     measured = store.campaigns_with_actual_metrics(conn)
 
     has_rulebook = any(c.get("record_type") == "reference" for c in records)
-    reactions = {t.get("value") for c in campaigns for t in (c.get("tags") or [])}
-    liked = bool(reactions & {"liked"})
-    disliked = bool(reactions & {"not_liked", "mixed_reaction"})
+    # Case-folded, because tags are freeform and stored as typed while the store folds them
+    # when filtering. "Liked" left a marketer who had done exactly what the path asked being
+    # told forever to add a campaign they liked.
+    reactions = {str(t.get("value") or "").strip().lower()
+                 for c in campaigns for t in (c.get("tags") or [])}
+    liked = "liked" in reactions
+    # `mixed_reaction` is deliberately NOT a dislike. The item's own rationale asks for "one
+    # you did not like", and a mixed reaction is not that contrast — counting it would tell
+    # the user the axis works when it does not.
+    disliked = "not_liked" in reactions or "not liked" in reactions
     with_outcomes = [c for c in campaigns if c["id"] in measured]
+    concluded = [c for c in campaigns if c.get("status") == "concluded"]
 
     can: list[dict] = []
     cannot: list[dict] = []
 
     if len(campaigns) >= 2:
+        # "on file", not "run before": `gaps()` draws the line that a campaign which has not
+        # concluded cannot have results, and this said "what you have run" for a library of
+        # proposals.
         can.append({"code": "compare_to_precedent",
-                    "what": "Compare a new brief against what you have run before, and say "
-                            "where it departs from it."})
+                    "what": "Compare a new brief against what you already have on file, and "
+                            "say where it departs from it."})
     else:
         cannot.append({
             "code": "compare_to_precedent",
@@ -1877,33 +1912,48 @@ def readiness(conn) -> dict:
                      if liked else "one campaign you liked and one you did not",
         })
 
-    if len(with_outcomes) >= 1:
+    # One code, one list. It used to appear on BOTH for any partly measured library, so a
+    # reader keying on the code could not tell which side won.
+    if with_outcomes and len(with_outcomes) == len(campaigns):
         can.append({"code": "say_what_worked",
-                    "what": f"Say whether something worked, for the "
-                            f"{len(with_outcomes)} campaign(s) with measured results."})
-    if len(with_outcomes) < len(campaigns):
+                    "what": f"Say whether something worked: all "
+                            f"{len(with_outcomes)} campaign(s) here have measured results."})
+    elif with_outcomes:
+        can.append({"code": "say_what_worked",
+                    "what": f"Say whether something worked for the {len(with_outcomes)} of "
+                            f"{len(campaigns)} campaign(s) with measured results. For the "
+                            f"rest, comparisons are to what was planned, not what happened."})
+    else:
         cannot.append({
             "code": "say_what_worked",
-            "what": f"Say whether anything worked for the "
-                    f"{len(campaigns) - len(with_outcomes)} campaign(s) with no measured "
-                    f"results — those comparisons are to what was planned, not to what "
-                    f"happened.",
-            "needs": "the results of a campaign that has concluded",
+            "what": "Say whether anything worked — nothing here has measured results, so "
+                    "every comparison is to what was planned rather than what happened.",
+            # Asking for "a concluded campaign's results" when nothing has concluded is a
+            # request nobody can satisfy.
+            "needs": ("the results of a campaign that has concluded" if concluded
+                      else "a campaign that has concluded, and its results"),
         })
 
     if has_rulebook:
-        can.append({"code": "check_against_rules",
-                    "what": "Check a brief against your own guidelines, not just against "
-                            "precedent."})
-    else:
-        cannot.append({
-            "code": "check_against_rules",
-            "what": "Check a brief against a rule. Without your guidelines it can say "
-                    "\u201cthis differs from what you did in Peru\u201d, which invites an "
-                    "argument, but never \u201cthis breaks your own rule\u201d, which does "
-                    "not.",
-            "needs": "your brand guidelines, uploaded as reference material",
-        })
+        # NOT "check a brief against a rule". `has_rulebook` is "some reference record
+        # exists", and nothing pins, fetches or checks against it — `prepare_evaluation` is
+        # similarity retrieval, so the rulebook reaches the evidence only if it happens to
+        # rank. Promising the "this breaks your own rule" finding would be exactly the
+        # confident, unfounded claim this item exists to prevent (§7.5/§12.1 make it true).
+        can.append({"code": "rulebook_on_file",
+                    "what": "Cite your guidelines when they happen to be among the most "
+                            "similar records retrieved for a brief."})
+    cannot.append({
+        "code": "check_against_rules",
+        "what": "Check a brief against a rule reliably. Guidelines on file are retrieved by "
+                "similarity like anything else, so a guardrail that is not retrieved is not "
+                "a guardrail — it can say \u201cthis differs from what you did in Peru\u201d, "
+                "which invites an argument, but not \u201cthis breaks your own rule\u201d, "
+                "which does not.",
+        "needs": ("the rulebook to be pinned rather than retrieved, which is planned work"
+                  if has_rulebook else "your brand guidelines, uploaded as reference "
+                                       "material"),
+    })
 
     if not campaigns:
         stage = "empty"
@@ -1969,19 +2019,19 @@ def _shortest_path(liked: bool, disliked: bool, has_rulebook: bool) -> list[dict
     return steps
 
 
-def list_campaigns_with_readiness(conn) -> dict:
-    """`list_campaigns`, plus the guidance when the library is not yet working.
+def readiness_for_listing(conn) -> Optional[dict]:
+    """The guidance to attach to a listing, or None once the library works.
 
-    The review named this surface: "list_campaigns returns eight rows", with nothing to say
-    whether eight is enough. Attached only while it is NOT working — guidance that never
-    stops appearing is the thing nobody reads (tracker D67).
+    Replaces a `list_campaigns_with_readiness` that returned its own differently-shaped rows
+    and that no tool ever called — so the guidance reached nobody, which is the exact failure
+    the tracker row behind it was written about. This returns only the readiness part, and
+    the tool keeps its own field projection.
+
+    Attached only while the library is NOT working: guidance that never stops appearing is
+    the thing nobody reads.
     """
-    campaigns = store.list_campaigns(conn)
     state = readiness(conn)
-    result: dict = {"count": len(campaigns), "campaigns": campaigns}
-    if state["stage"] != "working":
-        result["readiness"] = state
-    return result
+    return state if state["stage"] != "working" else None
 
 
 def published_tool_parameters() -> dict[str, list[str]]:

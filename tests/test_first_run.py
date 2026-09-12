@@ -140,9 +140,11 @@ def test_a_measured_library_is_reported_as_working(conn):
     assert "say_what_worked" in {c["code"] for c in report["can"]}
 
 
-def test_the_rulebook_is_what_makes_a_guardrail_checkable(conn):
-    """Without it the product can compare a proposal against precedent and cannot check it
-    against a rule, which is a different kind of finding entirely."""
+def test_the_rulebook_changes_what_can_be_cited_but_not_what_can_be_checked(conn):
+    """The first version of this test asserted `check_against_rules` moved into `can` once a
+    reference record existed — which was the false claim review caught. Uploading guidelines
+    means they can be CITED when they happen to rank in a similarity search; it does not mean
+    a rule is checked. The limit survives until §7.5/§12.1 pin the rulebook."""
     _campaign(conn, "Bogota", outcomes=True)
 
     before = core.readiness(conn)
@@ -150,33 +152,32 @@ def test_the_rulebook_is_what_makes_a_guardrail_checkable(conn):
                          record_type="reference", confirm=True)
     after = core.readiness(conn)
 
+    assert "rulebook_on_file" not in {c["code"] for c in before["can"]}
+    assert "rulebook_on_file" in {c["code"] for c in after["can"]}
     assert "check_against_rules" in {c["code"] for c in before["cannot"]}
-    assert "check_against_rules" in {c["code"] for c in after["can"]}
+    assert "check_against_rules" in {c["code"] for c in after["cannot"]}, (
+        "having the guidelines on file does not make a guardrail checkable"
+    )
 
 
 # ── it has to reach somebody ────────────────────────────────────────────────
 
-def test_listing_a_thin_library_carries_the_guidance(conn):
-    """Tracker D67. A tool nobody calls is still waiting to be asked, and `list_campaigns`
-    is the surface the review named — eight rows with no sense of whether eight is enough."""
+def test_the_guidance_is_attached_while_the_library_is_not_working(conn):
+    """Tracker D67, at the core level; the tool-level version is below and is the one that
+    matters, since the first attempt at this was a function no tool called."""
     _campaign(conn, "Bogota")
 
-    listed = core.list_campaigns_with_readiness(conn)
-
-    assert listed["readiness"]["stage"] in ("first_records", "thin")
-    assert listed["readiness"]["shortest_path"]
+    assert core.readiness_for_listing(conn)["stage"] in ("first_records", "thin")
 
 
-def test_listing_a_working_library_does_not_lecture(conn):
+def test_the_guidance_stops_once_the_library_works(conn):
     """Guidance that never stops appearing is the thing nobody reads."""
     _campaign(conn, "Bogota", outcomes=True, tags=[{"value": "liked"}])
     _campaign(conn, "Lima", outcomes=True, tags=[{"value": "not_liked"}])
     core.ingest_campaign(conn, title="Brand guidelines", detail="the rules",
                          record_type="reference", confirm=True)
 
-    listed = core.list_campaigns_with_readiness(conn)
-
-    assert "readiness" not in listed or listed["readiness"] is None
+    assert core.readiness_for_listing(conn) is None
 
 
 # ── what the tracker was carrying ───────────────────────────────────────────
@@ -218,3 +219,155 @@ def test_one_campaign_in_several_thin_cells_is_offered_once(conn):
     unmeasured = report["unmeasured_campaigns"]
     assert len(unmeasured) == 1
     assert sorted(unmeasured[0]["markets"]) == ["Malaysia", "Singapore", "Thailand"]
+
+
+# ══ review of 5.6 ════════════════════════════════════════════════════════════
+
+def test_the_list_campaigns_TOOL_carries_the_guidance(conn, monkeypatch):
+    """The claim was false. `core.list_campaigns_with_readiness` existed, was tested, and no
+    tool ever called it — so the guidance reached nobody, which is exactly the failure D67
+    was written about. The commit message, the plan and the docstring all said otherwise."""
+    import mcp_server
+
+    _campaign(conn, "Bogota")
+    monkeypatch.setattr(mcp_server.store, "connect", lambda: _Borrowed(conn))
+
+    listed = mcp_server.list_campaigns()
+
+    assert listed["readiness"]["stage"] in ("first_records", "thin")
+    assert listed["campaigns"][0]["campaign_id"], "the tool's own field projection survives"
+
+
+def test_the_tool_stops_carrying_it_once_the_library_works(conn, monkeypatch):
+    import mcp_server
+
+    _campaign(conn, "Bogota", outcomes=True, tags=[{"value": "liked"}])
+    _campaign(conn, "Lima", outcomes=True, tags=[{"value": "not_liked"}])
+    core.ingest_campaign(conn, title="Brand guidelines", detail="the rules",
+                         record_type="reference", confirm=True)
+    monkeypatch.setattr(mcp_server.store, "connect", lambda: _Borrowed(conn))
+
+    assert "readiness" not in mcp_server.list_campaigns()
+
+
+def test_a_tag_typed_the_way_a_person_types_it_still_counts(conn):
+    """Tags are freeform and stored as typed, and the store folds case when filtering — this
+    did not. So a marketer who did exactly what the path asked was told forever to add a
+    campaign they liked: the permanent complaint this codebase names three files over."""
+    _campaign(conn, "Bogota", tags=[{"value": "Liked"}])
+    _campaign(conn, "Lima", tags=[{"value": "Not_Liked"}])
+
+    report = core.readiness(conn)
+
+    assert "weigh_reactions" in {c["code"] for c in report["can"]}
+    written = [st["prefilled_args"].get("tags", [{}])[0].get("value")
+               for st in report["shortest_path"]]
+    assert written == [None], "both tag steps are done; only the rulebook remains"
+
+
+def test_having_guidelines_on_file_is_not_the_same_as_checking_against_them(conn):
+    """The claim this item was written against, made by this item. `has_rulebook` is "any
+    reference record exists", and nothing pins, fetches or checks against it —
+    `prepare_evaluation` is pure similarity retrieval, so the rulebook reaches the evidence
+    only if it happens to rank. Promising "check a brief against a rule" is the confident,
+    unfounded statement the whole review is about."""
+    _campaign(conn, "Bogota", outcomes=True)
+    core.ingest_campaign(conn, title="Brand guidelines", detail="never use AI imagery",
+                         record_type="reference", confirm=True)
+
+    report = core.readiness(conn)
+    can = {c["code"]: c for c in report["can"]}
+    cannot = {c["code"] for c in report["cannot"]}
+
+    assert "check_against_rules" not in can, "not until the rulebook is actually pinned"
+    assert "rulebook_on_file" in can
+    assert "check_against_rules" in cannot, "still cannot, and says what would change it"
+
+
+def test_a_wholly_unmeasured_library_is_offered_the_thing_that_would_fix_it(conn):
+    """The collapse handed over to `shortest_path`, which never mentions measurement — so
+    once liked/not_liked/rulebook existed, the summary said the problem was measurement and
+    offered nothing at all, while `gaps()` on the same library offered `add_metrics`."""
+    _campaign(conn, "Bogota", tags=[{"value": "liked"}])
+    _campaign(conn, "Lima", tags=[{"value": "not_liked"}])
+    core.ingest_campaign(conn, title="Brand guidelines", detail="the rules",
+                         record_type="reference", confirm=True)
+
+    report = core.coverage(conn)
+
+    assert report["thin_summary"]
+    assert report["next_actions"], "the summary named a problem and offered nothing"
+    assert report["next_actions"][0]["tool"] == "add_metrics"
+
+
+def test_the_collapsed_list_does_not_report_a_total_it_is_hiding(conn):
+    """`thin: []` beside `thin_total: 3` is an inconsistent pair for a reader."""
+    _campaign(conn, "Bogota", market="LATAM")
+    _campaign(conn, "Lima", market="SEA")
+
+    report = core.coverage(conn)
+
+    assert report["thin"] == []
+    assert report["thin_total"] == 0 or report["thin_summary"]
+
+
+def test_a_library_of_proposals_is_not_described_as_things_you_have_run(conn):
+    """`gaps()` draws this line explicitly — a campaign that has not concluded cannot have
+    results — and `readiness`, written beside it, did not. It asserted "compare against what
+    you have run before" for two things that never ran, and asked for the results of a
+    concluded campaign when none had concluded."""
+    _campaign(conn, "Next quarter", status="proposed", tags=[{"value": "liked"}])
+    _campaign(conn, "Also next", status="proposed", tags=[{"value": "not_liked"}])
+
+    report = core.readiness(conn)
+
+    compare = next(c for c in report["can"] if c["code"] == "compare_to_precedent")
+    assert "run" not in compare["what"].lower(), compare["what"]
+
+    worked = next(c for c in report["cannot"] if c["code"] == "say_what_worked")
+    assert "conclude" in worked["needs"].lower(), (
+        f"nothing has concluded, so asking for a concluded campaign's results is a request "
+        f"nobody can satisfy: {worked['needs']}"
+    )
+
+
+def test_a_capability_is_never_on_both_lists_at_once(conn):
+    """`say_what_worked` appeared in `can` and `cannot` simultaneously for any partly measured
+    library, so a reader keying on the code could not tell which side won."""
+    _campaign(conn, "Bogota", outcomes=True)
+    _campaign(conn, "Lima")
+
+    report = core.readiness(conn)
+
+    assert not ({c["code"] for c in report["can"]}
+                & {c["code"] for c in report["cannot"]})
+
+
+def test_a_mixed_reaction_is_not_a_dislike(conn):
+    """Mutation-proof: dropping `mixed_reaction` from the dislike set left all 103 tests
+    green, so nothing pinned the choice. And the item's own rationale asks for "one you did
+    NOT like" — a mixed reaction is not that contrast, and counting it would tell the user
+    the axis works when it does not."""
+    _campaign(conn, "Bogota", tags=[{"value": "liked"}])
+    _campaign(conn, "Lima", tags=[{"value": "mixed_reaction"}])
+
+    report = core.readiness(conn)
+
+    assert "weigh_reactions" in {c["code"] for c in report["cannot"]}
+
+
+class _Borrowed:
+    """Lends the test's connection to a tool without letting the tool close it.
+
+    `sqlite3.Connection.close` is read-only, so it cannot be patched out — and every tool
+    closes the connection it was handed in a `finally`.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def close(self):
+        pass
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)

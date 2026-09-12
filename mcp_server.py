@@ -522,7 +522,7 @@ def list_campaigns(record_type: Optional[RecordType] = None, status: Optional[St
     conn = store.connect()
     try:
         rows = store.list_campaigns(conn, record_type=record_type, status=status)
-        return {"count": len(rows), "campaigns": [
+        listed = {"count": len(rows), "campaigns": [
             {"campaign_id": r["id"], "title": r["title"], "record_type": r["record_type"],
              "status": r["status"], "tags": r["tags"], "region": r["region"],
              "market": r["market"], "collection": r["collection"], "embedded": r["embedded"],
@@ -531,6 +531,12 @@ def list_campaigns(record_type: Optional[RecordType] = None, status: Optional[St
              "has_metrics": r["has_metrics"], "has_evaluations": r["has_evaluations"],
              "supersedes": r["supersedes"], "is_superseded": r["is_superseded"]}
             for r in rows]}
+        # §5.6: eight rows with nothing to say whether eight is enough was the review's own
+        # complaint about this tool. Attached only while the library is not yet working.
+        guidance = core.readiness_for_listing(conn)
+        if guidance:
+            listed["readiness"] = guidance
+        return listed
     finally:
         conn.close()
 

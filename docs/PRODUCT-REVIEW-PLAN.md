@@ -1096,10 +1096,14 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       Each `can`/`cannot` carries a stable `code` beside its prose, for §3.1's reason: the
       sentence is for the user and will be rewritten, and nothing reading it should break
       when it is. Two of this item's own tests were coupled to wording before that existed.
-      **It reaches somebody.** `list_campaigns` — the surface the review named, "returns
-      eight rows" with nothing to say whether eight is enough — carries the guidance while
-      the library is not yet working, and stops once it is, because guidance that never goes
-      away is the thing nobody reads.
+      **It reaches somebody — and the first version of this sentence was false.** The claim
+      was made on the strength of `core.list_campaigns_with_readiness`, which was written,
+      tested, and never called by any tool: the guidance reached nobody, which is the exact
+      failure the tracker row behind it described. The function also returned
+      differently-shaped rows from the tool's own projection, so wiring it in naively would
+      have changed the tool's output. Replaced by `readiness_for_listing`, which returns only
+      the guidance, and the `list_campaigns` TOOL attaches it while the library is not yet
+      working and stops once it is.
       **Closes three tracker rows.** D43: every step here is an offer whose arguments only
       the user has, so `needs` is what keeps "accepting is one step" honest. D66: `coverage`'s
       `thin` list collapses to one summary line plus the path when nothing in the library is
@@ -1109,6 +1113,31 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       Found while wiring D66: "nothing is measured" has to be a fact about the LIBRARY, not
       about the cell markers — five cells of one measured campaign each read `single_example`
       rather than `measured`, and that is a library with real evidence in it.
+      **From review, and one finding is this item committing the mistake it was written to
+      prevent.** `can: check_against_rules` claimed the product could "check a brief against
+      your own guidelines" on the strength of `has_rulebook`, which is only "some `reference`
+      record exists". Nothing pins, fetches or checks against it — `prepare_evaluation` is
+      similarity retrieval, so the rulebook reaches the evidence only if it happens to rank,
+      and the accompanying `cannot` text says in as many words that a guardrail which might
+      not be retrieved is not a guardrail. So the item promising to say plainly what the
+      product cannot do was promising the one thing it cannot. Now `rulebook_on_file`
+      ("cite your guidelines when they happen to be retrieved") is the `can`, and
+      `check_against_rules` stays in `cannot` until §7.5/§12.1 pin the rulebook.
+      The D66 collapse handed over to `shortest_path`, which never mentions measurement — so
+      once the three steps were done, the summary named measurement as the problem and
+      offered nothing, while `gaps()` on the same library offered `add_metrics`. It offers
+      the measurement now, falling back to the path only when nothing has concluded.
+      Tags were matched case-sensitively while the store folds them, so a marketer who typed
+      "Liked" was told forever to add a campaign they liked — the permanent complaint this
+      codebase names three files over. `readiness` also ignored `status`, asserting "compare
+      against what you have RUN before" for a library of proposals and asking for a concluded
+      campaign's results when nothing had concluded; `gaps()` draws that line explicitly and
+      this, written beside it, did not.
+      `say_what_worked` appeared in `can` and `cannot` at once for any partly measured
+      library, so a reader keying on the code could not tell which side won. And
+      `mixed_reaction` counted as a dislike — a mutation removing it passed all 103 tests, so
+      nothing pinned it, and the item's own rationale asks for "one you did NOT like", which
+      a mixed reaction is not.
 
 ## Phase 6 — Making the reasoning defensible (ideas G–L)
 
