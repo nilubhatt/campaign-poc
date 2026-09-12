@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import sqlite3
 import time
 from pathlib import Path
 from typing import Optional, Union
@@ -283,6 +284,232 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
 
 
 # ── retrieval / evidence for Claude ──────────────────────────────────────────
+
+class _WrongDimension(RuntimeError):
+    """The embedder answered, but with vectors this library cannot store."""
+
+
+def health_check_cli() -> dict:
+    """health_check for a terminal or an installer, opening the database READ-ONLY.
+
+    A diagnostic must not repair what it is diagnosing: going through the normal startup
+    path created a fresh database when the real one was missing and then reported "0
+    records, healthy", and a corrupt file crashed with a raw traceback — on the surface
+    built so nobody has to read tracebacks."""
+    import sqlite3
+
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{config.DB_PATH}?mode=rw", uri=True)
+        conn.row_factory = sqlite3.Row
+        conn.execute("SELECT 1 FROM campaigns LIMIT 1")
+    except Exception as exc:
+        if conn is not None:
+            conn.close()
+        missing = not Path(config.DB_PATH).exists()
+        report = health_check(_NoDatabase(), probe=True)
+        report["components"]["database"] = {
+            "ok": False,
+            "code": "db_missing" if missing else "db_unreadable",
+            "detail": (f"no database at {config.DB_PATH}" if missing
+                       else f"the file at {config.DB_PATH} is not a readable database: {exc}"),
+            "affects": "Everything — nothing can be saved, searched or reported.",
+            "remedy": ("Nothing has been uploaded yet, or the data directory was moved or "
+                       "deleted. Start the server once to create it, or restore the file."),
+        }
+        report["ok"] = False
+        report["headline"] = f"Not working: database. {report['headline']}"
+        return report
+    try:
+        return health_check(conn)
+    finally:
+        conn.close()
+
+
+class _NoDatabase:
+    """Stands in for an unusable connection so the other components can still be reported —
+    knowing text search and the vision model are fine narrows the problem."""
+
+    def execute(self, *args, **kwargs):
+        raise sqlite3.OperationalError("no usable database")
+
+
+def health_check(conn, *, probe: bool = True) -> dict:
+    """Answer "is this thing actually working" in one call, in seconds (defect 06).
+
+    Establishing that half the product was dead previously took a 60-second timeout, a
+    second upload to capture a warning string, and a read of the server's source. None of
+    that is available to a marketer, and barely to an admin.
+
+    Three properties are load-bearing, more than the field list:
+      * it never hangs — probes are bounded far below a normal call's budget, because a
+        diagnostic that inherits the timeout it exists to diagnose is useless;
+      * it never raises — a health check that crashes leaves you where you started;
+      * every unhealthy component carries a stable `code` (for installers and later
+        automation), an `affects` line in the user's terms, and a `remedy` for whoever
+        administers the machine. Those are three different audiences and one string cannot
+        serve all of them.
+
+    `ok` is about LIVENESS only. Whether the library is fully indexed is a different
+    question with a different answer (`coverage.complete`) — folding them together would
+    fail an installer gate on a working machine simply because someone uploaded a big deck
+    a minute earlier.
+
+    Components are reported separately because they fail independently: vision being
+    unavailable is not the server being down, and collapsing that would hide which half is
+    broken — the thing the reviewer had to read source to discover.
+
+    probe=False skips the live embedder call, for cheap repeated liveness (e.g. an HTTP
+    healthz poll) that should not hammer Ollama on every request."""
+    components: dict[str, dict] = {}
+
+    try:
+        campaigns = conn.execute("SELECT COUNT(*) AS n FROM campaigns").fetchone()["n"]
+        backend = vectorstore.backend_name(conn)
+        components["database"] = {
+            "ok": True,
+            "detail": f"{campaigns} records in {config.DB_PATH}; vector_index={backend}",
+        }
+        stranded = vectorstore.count_unreadable_vectors(conn)
+        if stranded:
+            components["database"] = {
+                "ok": False, "code": "vector_index_mismatch",
+                "detail": f"{stranded} stored vectors are in a table this build cannot "
+                          f"read (vector_index={backend}). Records look indexed but "
+                          f"searches will return nothing.",
+                "affects": "Searching the library — it will come back empty or short.",
+                "remedy": "This database was written by a build with a different vector "
+                          "backend. Reinstall the matching version, or re-run "
+                          "finish_indexing after removing the stale vectors.",
+            }
+        elif "fallback" in backend or "python" in backend:
+            # Not fatal, but it is a real degradation and it was invisible here while
+            # /healthz reported it — exactly the asymmetry the reviewer kept hitting.
+            components["database"]["degraded"] = (
+                "sqlite-vec is not loaded, so search is using the slower pure-Python "
+                "fallback. Results are the same; large libraries will be slower.")
+    except Exception as exc:
+        campaigns = 0
+        components["database"] = {
+            "ok": False, "code": "db_unreadable",
+            "detail": f"cannot read {config.DB_PATH}: {exc}",
+            "affects": "Nothing can be saved or searched.",
+            "remedy": "The database file is missing or unreadable. Check the install "
+                      "directory exists and the account running this can write to it.",
+        }
+
+    probe_timeout = min(config.HEALTH_PROBE_SECONDS, config.EMBED_TIMEOUT_SECONDS)
+    if not probe:
+        components["text_search"] = {
+            "ok": True, "detail": f"{config.EMBED_PROVIDER} (not probed)"}
+    else:
+        try:
+            started = time.monotonic()
+            vec = embedding.embed("health check", timeout=probe_timeout)
+            if len(vec) != config.EMBED_DIM:
+                # Answering is not the same as answering usefully: a different model
+                # returns a different width, and every upload then fails deep inside the
+                # vector store while this reported everything fine.
+                raise _WrongDimension(
+                    f"{config.EMBED_PROVIDER} returned {len(vec)}-dimension vectors but "
+                    f"this library stores {config.EMBED_DIM}")
+            model = (f" ({config.OLLAMA_EMBED_MODEL})"
+                     if config.EMBED_PROVIDER == "ollama" else "")
+            components["text_search"] = {
+                "ok": True,
+                "detail": f"{config.EMBED_PROVIDER} responded in "
+                          f"{time.monotonic() - started:.2f}s{model}",
+            }
+        except _WrongDimension as exc:
+            components["text_search"] = {
+                "ok": False, "code": "embedder_wrong_dimension", "detail": str(exc),
+                "affects": "Uploading decks and searching — new uploads will fail outright.",
+                "remedy": (f"The embedding model does not match this library. Set "
+                           f"CAMPAIGN_POC_OLLAMA_MODEL back to one producing "
+                           f"{config.EMBED_DIM}-dimension vectors (default: "
+                           f"{config.OLLAMA_EMBED_MODEL}), or start a new library."),
+            }
+        except Exception as exc:
+            message = str(exc).lower()
+            slow = "timed out" in message or "timeout" in type(exc).__name__.lower()
+            missing_model = "404" in message or "not found" in message
+            components["text_search"] = {
+                "ok": False,
+                "code": ("embedder_slow" if slow else
+                         "embedder_model_missing" if missing_model else
+                         "embedder_unreachable"),
+                # The probe's own timeout, not the embed timeout: reporting a number it
+                # never waited is the original complaint in miniature.
+                "detail": (f"{config.EMBED_PROVIDER} did not answer within "
+                           f"{probe_timeout:g}s" if slow
+                           else f"the model {config.OLLAMA_EMBED_MODEL!r} is not installed"
+                           if missing_model
+                           else f"{config.EMBED_PROVIDER} embedder: {exc}"),
+                "affects": "Searching the library, uploading decks and evaluations.",
+                "remedy": (f"If this is Ollama, check it is running at {config.OLLAMA_URL} "
+                           f"and that `ollama pull {config.OLLAMA_EMBED_MODEL}` has been "
+                           f"run. If it was just started it may still be loading the "
+                           f"model — try again in a minute."),
+            }
+
+    try:
+        weights = clip_embed.weights_status()
+        components["visual_search"] = (
+            {"ok": True,
+             "detail": f"weights from {weights.source}"
+                       + (f" ({weights.path})" if weights.path else "")}
+            if weights.ok else
+            {"ok": False, "code": f"clip_weights_{weights.source or 'unknown'}",
+             "detail": weights.reason,
+             "affects": "Finding visually similar creative, and flagging reused images.",
+             "remedy": weights.remedy}
+        )
+    except Exception as exc:
+        components["visual_search"] = {
+            "ok": False, "code": "clip_load_failed",
+            "detail": f"could not determine the vision model's state: {exc}",
+            "affects": "Finding visually similar creative, and flagging reused images.",
+            "remedy": "Reinstall to restore the shipped weights.",
+        }
+
+    try:
+        outstanding = store.count_unembedded(conn)
+        assets = conn.execute("SELECT COUNT(*) AS n FROM assets").fetchone()["n"]
+        by_campaign = store.outstanding_by_campaign(conn)[:5]
+    except Exception:
+        outstanding, assets, by_campaign = {"chunks": 0, "assets": 0}, 0, []
+
+    backlog = outstanding["chunks"] + outstanding["assets"]
+    coverage = {
+        "campaigns": campaigns,
+        "images": assets,
+        "sections_unindexed": outstanding["chunks"],
+        "images_unindexed": outstanding["assets"],
+        "complete": backlog == 0,
+        # Names, not just a number: "212 outstanding" means nothing to a marketer, "your
+        # Mexico deck is fine, two older records are not" is the actual answer.
+        "outstanding": by_campaign,
+    }
+
+    live = all(c["ok"] for c in components.values())
+    broken = [name.replace("_", " ") for name, c in components.items() if not c["ok"]]
+    if not live:
+        headline = f"Not working: {', '.join(broken)}. Everything else is fine."
+    elif not coverage["complete"]:
+        headline = (f"All components working. {backlog} item(s) across "
+                    f"{len(by_campaign)} record(s) are stored but not yet searchable.")
+    else:
+        headline = f"Everything is working; {campaigns} record(s) fully searchable."
+
+    report = {"ok": live, "headline": headline, "components": components,
+              "coverage": coverage}
+    if backlog:
+        report["backlog_remedy"] = (
+            f"{backlog} items are stored but not searchable, so results will be incomplete. "
+            f"Run finish_indexing to complete them — nothing needs re-uploading."
+        )
+    return report
+
 
 def finish_indexing(conn, *, campaign_id: Optional[str] = None) -> dict:
     """Finish records that are stored but not yet searchable (defect 05).

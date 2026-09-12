@@ -178,3 +178,24 @@ def delete_many(conn: sqlite3.Connection, vector_ids: list[str], *, space: str =
 
 def backend_name(conn: sqlite3.Connection) -> str:
     return "sqlite-vec" if _try_load_vec(conn) else "python-cosine-fallback"
+
+
+def count_unreadable_vectors(conn) -> int:
+    """Vectors sitting in the table this process does NOT read.
+
+    The two backends store into different tables (`{space}_vectors` via sqlite-vec,
+    `{space}_vectors_fallback` otherwise). A database written where the extension loaded and
+    opened where it does not — a bundle that lost the native library, a copied file, a
+    Python without extension support — has every row flagged embedded and every search
+    returning nothing. That combination is invisible to a coverage count, which is exactly
+    why it is worth asking about explicitly."""
+    live_is_vec = _try_load_vec(conn)
+    stranded = 0
+    for space in ("campaign", "asset"):
+        vec_table, fallback_table = _table_names(space)
+        unread = fallback_table if live_is_vec else vec_table
+        try:
+            stranded += conn.execute(f"SELECT COUNT(*) AS n FROM {unread}").fetchone()["n"]
+        except Exception:
+            continue  # the table may not exist in this database; nothing stranded there
+    return stranded

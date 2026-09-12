@@ -275,8 +275,11 @@ def test_healthz_reports_the_weights_status(monkeypatch, tmp_path):
 
     body = TestClient(http_app.app).get("/healthz").json()
 
-    assert body["clip_weights"]["ok"] is False
-    assert body["clip_weights"]["remedy"]
+    # /healthz now returns the same component report as the health_check tool and CLI, so
+    # three surfaces cannot disagree about one machine (item 2.3).
+    assert body["components"]["visual_search"]["ok"] is False
+    assert body["components"]["visual_search"]["remedy"]
+    assert body["status"] == "degraded"
 
 
 # ── load failures, not just resolution failures (verification-round findings) ─

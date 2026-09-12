@@ -24,6 +24,8 @@ def main() -> int:
     sub.add_parser("stdio", help="run over stdio for a local Claude Desktop connector")
 
     sub.add_parser("check-weights", help="report whether the CLIP weights resolved (exit 1 if not)")
+    sub.add_parser("health-check", help="check every component and the library's coverage "
+                                        "(exit 1 if anything is wrong)")
 
     c = sub.add_parser("configure-desktop", help="add this server to Claude Desktop's config (merges, backs up)")
     c.add_argument("--http", metavar="URL", default=None,
@@ -66,6 +68,28 @@ def main() -> int:
         if not status.ok:
             print(f"{status.reason} {status.remedy}")
             return 1
+    elif cmd == "health-check":
+        # The same answer the health_check tool gives, for the installer's post-install
+        # self-test (item 4.1) and for an admin at a terminal. A non-zero exit is what lets
+        # an installer refuse to report success over a broken install.
+        import clip_embed
+        import core
+        # Load the vision model for real: "the weights resolved" is not "the weights work",
+        # and a corrupt checkpoint passed the resolved-only check — precisely the case the
+        # post-install self-test exists to catch (item 4.1).
+        clip_embed.warm_up()
+        report = core.health_check_cli()
+        for name, component in report["components"].items():
+            print(f"{'ok ' if component['ok'] else 'FAIL'}  {name}: {component['detail']}")
+            if not component["ok"]:
+                print(f"      -> {component['remedy']}")
+        coverage = report["coverage"]
+        print(f"      {coverage['campaigns']} campaigns, {coverage['images']} images; "
+              f"{coverage['sections_unindexed']} sections and "
+              f"{coverage['images_unindexed']} images not yet searchable")
+        if report.get("backlog_remedy"):
+            print(f"      -> {report['backlog_remedy']}")
+        return 0 if report["ok"] else 1
     elif cmd == "configure-desktop":
         _configure_desktop(http_url=args.http)
     else:

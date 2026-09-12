@@ -24,6 +24,7 @@ import auth
 import clip_embed
 import embedding
 import config
+import core
 import extract
 import store
 import vectorstore
@@ -70,21 +71,17 @@ async def healthz(request: Request):
         # Whether the vision weights actually resolved is the thing that was invisible in
         # the field — the only way to discover visual search was off was a 60s timeout and
         # a read of the server's source. Reported as a value, not by crashing at boot.
-        weights = clip_embed.weights_status()
-        return JSONResponse({
-            "status": "ok",
-            "vector_backend": vectorstore.backend_name(conn),
+        # The same report the health_check tool and the CLI give, so three surfaces cannot
+        # disagree about one machine. probe=False keeps this cheap: /healthz gets polled,
+        # and hitting the embedder on every poll would be its own problem.
+        report = core.health_check(conn, probe=False)
+        report.update({
+            "status": "ok" if report["ok"] else "degraded",
             "embed_provider": config.EMBED_PROVIDER,
             "clip_provider": config.CLIP_PROVIDER,
-            "clip_weights": {
-                "ok": weights.ok,
-                "source": weights.source,
-                "path": weights.path or None,
-                "reason": weights.reason or None,
-                "remedy": weights.remedy or None,
-            },
             "auth_provider": config.AUTH_PROVIDER,
         })
+        return JSONResponse(report)
     finally:
         conn.close()
 

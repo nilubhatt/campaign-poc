@@ -320,6 +320,32 @@ def bulk_import_metrics(rows: list) -> dict:
 
 @mcp.tool()
 @_catch_value_errors
+def health_check() -> dict:
+    """Check whether this server's parts are actually working, and whether the library is
+    fully searchable. Answers in about a second.
+
+    Call it when something seems wrong — a search returning less than expected, an upload
+    warning, an image tool failing — and before any demo or important session, rather than
+    inferring health from a tool call that times out.
+
+    Each component reports separately because they fail independently: visual search being
+    unavailable does not stop text search, uploads or evaluations, and saying "the server is
+    down" when only half is would be wrong. Translate for the user — "visual similarity is
+    unavailable because the image model is missing; everything else works" beats relaying
+    component names — and pass on the `remedy` verbatim enough that an admin can act on it.
+
+    `coverage` answers the different question of whether what they uploaded is usable: a
+    non-zero `sections_unindexed`/`images_unindexed` means searches will be incomplete until
+    finish_indexing is run."""
+    conn = store.connect()
+    try:
+        return core.health_check(conn)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
 def finish_indexing(campaign_id: Optional[str] = None) -> dict:
     """Finish records that are stored but not yet searchable, without re-uploading anything.
 

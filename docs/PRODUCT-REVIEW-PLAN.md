@@ -274,8 +274,46 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       and fingerprinted, so they are the repairable kind, and v0.2.0's schema already carries
       the `embedded` columns — their existing database needs no migration.
 
-- [ ] **2.3 `health_check` tool** (defect 06). Component status (ollama/clip/db) + coverage
-      counts. Doubles as the installer's post-install self-test and a pre-demo preflight.
+- [x] **2.3 `health_check`** (defect 06). One call, about a second, never raises, never
+      hangs — the reviewer needed a 60-second timeout, a second upload, and a read of the
+      source to learn that half the product was dead.
+      **It paid for itself before review.** On its first run against a live Ollama it found
+      a regression item 2.1 had introduced: `keep_alive` was sent as the string `"-1"`, which
+      Ollama rejects (`time: missing unit in duration "-1"`), so every embed returned HTTP
+      400 and text search was entirely dead. 363 tests were green at the time — they all use
+      the offline provider or stub `httpx`, so nothing exercised the real request shape.
+      Fixed (send a number, or a duration with a unit) with a regression test on the wire
+      format. Logged here rather than buried: it is a 2.1 defect, found by 2.3.
+      **Liveness and coverage are separate verdicts.** `ok` means every component is alive;
+      `coverage.complete` means the library is fully searchable. Folding them — the first
+      version did — meant a working machine failed its own health check because someone had
+      just uploaded a big deck, and an installer gating on it would block a good install.
+      Item 2.2 deliberately made partial records a normal recoverable state; the health check
+      must not call that "broken".
+      **Three audiences, three fields.** A stable `code` for installers and later automation
+      (chosen now rather than in 3.1 — this surface has no callers yet, and otherwise 4.1
+      gates by string-matching prose), an `affects` line in the user's terms, and a `remedy`
+      for whoever administers the machine. One string could not serve a marketer, an admin
+      and an exit code.
+      **Adversarial review then found three ways it reported green on a broken system**,
+      each reproduced: vectors written with sqlite-vec loaded are invisible to a build
+      without it, so every record read as indexed, the backlog read as zero, and search
+      returned nothing — now detected as `vector_index_mismatch`; an embedder returning
+      wrong-width vectors passed because the probe discarded the answer; and the CLI ran
+      `init_db()`, so a *deleted* database was recreated and reported "0 records, healthy"
+      while a corrupt one crashed with a raw traceback. The CLI now opens read-only, reports
+      absence as a finding, and loads the vision model for real, because "the weights
+      resolved" is not "the weights work" — a corrupt checkpoint previously passed, which is
+      exactly what 4.1's post-install self-test exists to catch.
+      Also: the failure detail reported the embed timeout (15s) rather than the probe's own
+      (3s) — the wrong number on the surface built to answer that question; a 404 from Ollama
+      was explained as a context-limit problem instead of "the model was never pulled"; and
+      `/healthz` now returns the same report as the tool and the CLI, so three surfaces
+      cannot disagree about one machine.
+      **Left alone deliberately:** `check-weights` stays. CI runs it on a runner with no
+      Ollama and no database, where a full health check would fail on text search; the two
+      answer different questions.
+
 - [ ] **2.4 Structured findings array replaces free-text `analysis`** (defect 07). verdict,
       summary (≤240), closest_precedent, findings[] (severity enum ×3, category, finding
       ≤120, detail, precedent{id,quote}, fix ≤120), resolved[]. Caps and enums enforced

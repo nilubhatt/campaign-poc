@@ -139,6 +139,9 @@ TOOL_TIME_BUDGET_SECONDS = _positive_seconds("CAMPAIGN_POC_TOOL_BUDGET_SECONDS",
 # One embed call, bounded well under that ceiling: a handler embeds once per chunk, so a
 # per-call timeout equal to the ceiling (the old value) let a single deck block for minutes.
 EMBED_TIMEOUT_SECONDS = _positive_seconds("CAMPAIGN_POC_EMBED_TIMEOUT_SECONDS", "15")
+# A health check must answer far faster than the thing it is checking; inheriting the
+# timeout it exists to diagnose is how "is it working?" became a 60-second wait.
+HEALTH_PROBE_SECONDS = _positive_seconds("CAMPAIGN_POC_HEALTH_PROBE_SECONDS", "3")
 # What the transport itself allows. The budget above must stay clear of it; this is the
 # number it is clear OF, recorded so the relationship is visible rather than implied.
 TRANSPORT_CEILING_SECONDS = _positive_seconds("CAMPAIGN_POC_TRANSPORT_CEILING_SECONDS", "60")
@@ -154,7 +157,17 @@ OLLAMA_EMBED_MODEL = os.getenv("CAMPAIGN_POC_OLLAMA_MODEL", "nomic-embed-text")
 # which trades ~270MB of the user's RAM for never paying a model reload inside a tool call —
 # precisely the first-use cost that blows a transport ceiling. Set a duration ("5m") on a
 # memory-constrained machine.
-OLLAMA_KEEP_ALIVE = os.getenv("CAMPAIGN_POC_OLLAMA_KEEP_ALIVE", "-1")
+def _keep_alive(raw: str):
+    """Ollama accepts a NUMBER of seconds (-1 = keep indefinitely) or a duration string with
+    a unit ("10m"). It rejects a numeric string: `keep_alive: "-1"` fails with
+    `time: missing unit in duration "-1"`, which took every embed call down with a 400."""
+    try:
+        return int(raw)
+    except ValueError:
+        return raw   # a duration like "10m", passed through as Ollama expects
+
+
+OLLAMA_KEEP_ALIVE = _keep_alive(os.getenv("CAMPAIGN_POC_OLLAMA_KEEP_ALIVE", "-1"))
 EMBED_DIM = int(os.getenv("CAMPAIGN_POC_EMBED_DIM", "768"))  # nomic-embed-text = 768
 VOYAGE_API_KEY = os.getenv("VOYAGE_API_KEY", "")
 VOYAGE_MODEL = os.getenv("CAMPAIGN_POC_VOYAGE_MODEL", "voyage-3.5")
