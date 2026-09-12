@@ -926,6 +926,13 @@ def add_metrics(conn, campaign_id: str, *, detail=None, structured=None,
     metric_type = enums.normalise(metric_type, field="metric_type",
                                   valid=VALID_METRIC_TYPES,
                                   synonyms=enums.METRIC_TYPE_SYNONYMS, allow_none=False)
+    # A row measuring nothing is not a measurement. It mattered because an empty `actual`
+    # row satisfies the gate that lets a performance tag be marked `verified` — so a
+    # content-free row bought the provenance this library weighs judgments by.
+    if not (detail and str(detail).strip()) and not structured:
+        raise ValueError("a metric needs `detail` (what was measured, in words) or "
+                         "`structured` (the numbers), or both — an empty row records no "
+                         "outcome but still counts as one")
     mid = _id("met")
     conn.execute(
         """INSERT INTO metrics (id, campaign_id, metric_type, detail, structured, created_at)
@@ -1065,6 +1072,19 @@ def get_evaluation(conn, evaluation_id: str) -> Optional[dict]:
         "SELECT * FROM reconciliations WHERE evaluation_id = ? ORDER BY created_at", (evaluation_id,)
     ).fetchall()]
     return d
+
+
+def unreconciled_evaluation_id(conn, campaign_id: str) -> Optional[str]:
+    """The most recent judgment about this campaign that has never been compared with its
+    results, or None. Used to decide whether recording results is worth offering to close a
+    loop with (§5.2) — an offer made when there is no open judgment is the standing kind
+    that stops being read."""
+    row = conn.execute(
+        """SELECT e.id FROM evaluations e
+           WHERE e.campaign_id = ?
+             AND NOT EXISTS (SELECT 1 FROM reconciliations r WHERE r.evaluation_id = e.id)
+           ORDER BY e.created_at DESC LIMIT 1""", (campaign_id,)).fetchone()
+    return row["id"] if row else None
 
 
 def list_evaluations(conn) -> list[dict]:

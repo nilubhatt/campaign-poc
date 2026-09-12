@@ -178,6 +178,14 @@ _REGISTRY: dict[str, tuple] = {
         "Open it in PowerPoint, save it as .pptx, and send that instead.",
         "",
     ),
+    "duplicate_title": (
+        "note", "record",
+        "Another campaign in the library already has this exact title, so anything that "
+        "looks a record up by name — a results import, for one — cannot tell them apart.",
+        "If they are different campaigns, give one a more specific name; if this is the "
+        "same one again, the earlier record can be removed.",
+        "",
+    ),
     "results_may_be_incomplete": (
         "note", "call",
         "",     # always supplied per call: it has to carry the counts
@@ -253,8 +261,13 @@ def collapse(entries: list[dict]) -> list[dict]:
     folded: dict[tuple, dict] = {}
     order: list[tuple] = []
     for entry in entries:
+        # The actions are part of the identity. Two warnings that differ only in which
+        # campaign they would repair are two warnings; folding them kept the first one's
+        # action and a count of two, so one campaign silently lost its offer.
         key = (entry["code"], entry.get("affects"), entry.get("remedy"),
-               entry.get("next_step"))
+               entry.get("next_step"),
+               tuple(sorted((a["tool"], tuple(sorted(a["prefilled_args"].items())))
+                            for a in entry.get("next_actions", []))))
         if key not in folded:
             kept = dict(entry)
             kept["count"] = entry.get("count", 1)

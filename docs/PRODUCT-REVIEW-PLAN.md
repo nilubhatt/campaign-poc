@@ -804,6 +804,48 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       **Found by the protocol round-trip:** the server `instructions` are an f-string, so the
       literal `{label, tool, prefilled_args}` in the new paragraph was read as an expression
       and the server would not start at all.
+      **Both reviewers independently condemned the supersession offer, and it is gone.** It
+      was prefilled from `closest_precedent.campaign_id` — a similarity match the *model*
+      asserts, which the server never computes or validates. "Mark this as replacing the
+      version it revises" is a claim about somebody's intent; a similarity score is a fact
+      about text. The user hears only the label — "add this to the library" — while agreeing,
+      unseen, to hide another record from every future search, and `update_campaign` cannot
+      clear `supersedes`, so a wrong yes is undoable short of deleting the campaign. The gate
+      was inverted too: it suppressed the offer on approvals and permitted it on **rejects**,
+      so rejecting a proposal offered to file it as the replacement of the concluded campaign
+      it happened to resemble — metrics and all. Demonstrated over the protocol: accepting it
+      removed the precedent from `find_similar` entirely. The `campaign_id` branch was worse
+      still — it offered `update_campaign(supersedes=…)`, an argument that tool does not take,
+      and the SDK *drops* unknown keys, so the user got a success-shaped response and nothing
+      happened. That branch existed because the test fixture never passed a `campaign_id`,
+      which is precisely how an untested branch ships. Deferred to 6.3 on real evidence (D41).
+      **The reconcile offer moved to where it can succeed.** Offered at save time it failed
+      on acceptance — there are no actuals yet. An offer with a temporal precondition is a
+      reminder, and this product has no reminder channel; it is offered when results are
+      recorded against a campaign with an open judgment.
+      **Every action now carries `consent`.** Three rules were in play for one action:
+      `next_step` said "act on it, never read it out", `next_actions` said "only if the user
+      accepts", and `finish_indexing`'s own docstring says "do not stop to ask". Writing a
+      record (`ask`) and resuming an interrupted index (`do`) are not the same kind of act.
+      Actions also carry `why` — the library fact that prompted the offer — and `needs`,
+      where accepting genuinely is not one step.
+      **An empty metrics row is refused.** The `add_metrics` offer prefills only
+      `campaign_id`, so accepting it with `confirm=True` stored a content-free `actual` row —
+      which then satisfied the gate that lets a performance tag be marked `verified`. One yes
+      away from the provenance this library weighs judgments by, for a row measuring nothing.
+      **And the commonest upload got nothing.** `after_upload` was handed the caller's
+      `status`, which is None when omitted, while the store defaults it to `concluded` — so a
+      deck uploaded without a status, the most ordinary case there is, was the one path that
+      offered no results prompt. Read back from the record now.
+      Also: a duplicate title warns at the moment it is created (the offer is what creates
+      them, and the product's own title lookup then reports the record as ambiguous);
+      `collapse` keys on the actions too, so two warnings differing only in which campaign
+      they repair no longer fold into one and lose an offer; and the "Add to the library"
+      label became "Review and add", because `upload_campaign` previews unless `confirm=True`
+      and the preview *is* the consent step for a write.
+      **Mutation testing found four tests that could not fail:** `trim` returning everything,
+      `MAX_ACTIONS` at 30, `after_upload` always offering, and the broken `campaign_id`
+      branch. All four now have tests that bite.
 - [ ] **5.3 (C) `gaps()`** + a standing line on every evaluation naming the single most
       valuable missing input for that judgment.
 - [ ] **5.4 (D) `diff_campaigns(a, b)`** — adopted / ignored / newly-introduced /

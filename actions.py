@@ -10,10 +10,20 @@ What to offer next (§5.2, idea B).
     prefilled_args}. The surface renders them as suggestions; the user says yes."
 
   label           what a person is being offered, in their words.
+  why             the library fact that prompted it. An offer with no reason is one nobody
+                  can refuse intelligently.
   tool            what Claude calls if they accept.
+  consent         `ask` before writing a record; `do` for recovery that needs no permission.
+                  Three rules were in play for one action before this existed: `next_step`
+                  said "act on it, never read it out", `next_actions` said "only if the user
+                  accepts", and finish_indexing's own docstring says "do not stop to ask".
+                  Writing a new record and resuming an interrupted index are not the same
+                  kind of act.
   prefilled_args  arguments this library already holds. Never a guess and never a
                   placeholder: the user says yes to the label, so anything filled in here is
                   something they agreed to without being shown it.
+  needs           what the user must still supply. Present only when accepting is not in
+                  fact one step.
 
 Two rules, and most of the tests are about them:
 
@@ -38,19 +48,35 @@ from typing import Optional
 MAX_ACTIONS = 3
 
 
-def action(label: str, tool: str, **prefilled_args) -> dict:
+def action(label: str, tool: str, *, why: str = "", consent: str = "ask",
+           needs: Optional[list] = None, **prefilled_args) -> dict:
     """One offer. Arguments whose value is unknown are dropped rather than sent empty: a
     prefilled blank is a placeholder the user cannot see and did not agree to."""
-    return {
+    assert consent in ("ask", "do"), consent
+    offer = {
         "label": label,
+        "why": why,
         "tool": tool,
+        "consent": consent,
         "prefilled_args": {k: v for k, v in prefilled_args.items()
                            if v is not None and v != ""},
     }
+    # "Accepting is one step, not a form" holds only while the prefilled arguments are
+    # enough. Where they are not, say what is still missing — otherwise the call goes out
+    # with what it was given, which is how `add_metrics(campaign_id=...)` came to store a
+    # content-free row that then satisfied the gate for a `verified` tag.
+    if needs:
+        offer["needs"] = list(needs)
+    return offer
 
 
 def trim(offers: list[dict]) -> list[dict]:
-    """Drop the empties, de-duplicate by tool, and keep the list short enough to read."""
+    """Drop the empties, drop exact repeats, and keep the list short enough to read.
+
+    Repeats are keyed on the tool AND its arguments, so two offers of the same tool with
+    different arguments both survive — the earlier docstring said "de-duplicate by tool",
+    which is not what the code does and would have been wrong if it were.
+    """
     seen: set[tuple] = set()
     kept = []
     for offer in offers:
@@ -65,34 +91,57 @@ def trim(offers: list[dict]) -> list[dict]:
     return kept[:MAX_ACTIONS]
 
 
-# ── the three the review named, after a judgment ────────────────────────────
+# ── after a judgment ────────────────────────────────────────────────────────
 
 def after_evaluation(*, subject_title: str, evaluation_id: str, verdict: str,
-                     campaign_id: Optional[str] = None,
-                     supersedes: Optional[str] = None) -> list[dict]:
+                     campaign_id: Optional[str] = None) -> list[dict]:
     """
-    `campaign_id` is set when the thing judged is already a record; `supersedes` is the
-    earlier version this one replaces, when there is one.
+    One offer, not three, and the two that were dropped were both wrong.
 
-    The offers differ by verdict on purpose. An approval of a new brief supersedes nothing,
-    and offering it anyway is how a suggestion list turns into a menu.
+    **Supersession is not offered at all.** It was prefilled from
+    `closest_precedent.campaign_id` — a similarity match, asserted by the model rather than
+    computed by the server. "Mark this as replacing the version it revises" is a claim about
+    somebody's INTENT; a similarity score is a fact about text. The user hears only the
+    label ("add this to the library") while agreeing, unseen, to hide another record from
+    every future search — and `update_campaign` cannot clear `supersedes`, so a wrong yes is
+    undoable only by deleting the campaign. The gate was also inverted: it suppressed the
+    offer on approvals and permitted it on REJECTS, so rejecting a proposal offered to file
+    it as the replacement of the concluded campaign it happened to resemble, metrics and
+    all. §6.3 revisits it on evidence the schema actually has — a non-empty `resolved`, or a
+    record that already carries `supersedes` (tracker D41).
+
+    **Reconciliation is not offered here either.** "When the results land, reconcile this"
+    was offered the instant the judgment was saved: the user says yes and the call fails,
+    because there are no actuals yet. An offer with a temporal precondition is a reminder,
+    and this product has no reminder channel. It is offered where the numbers actually
+    arrive instead — see `after_metrics`.
     """
-    offers = []
-    if not campaign_id:
-        offers.append(action(
-            f"Add “{subject_title}” to the library so later briefs can be "
-            f"compared against it",
-            "upload_campaign", title=subject_title,
-            supersedes=supersedes if verdict != "approve" or supersedes else None))
-    elif supersedes:
-        offers.append(action(
-            "Mark this as replacing the version it revises, so the older one stops being "
-            "cited as current",
-            "update_campaign", campaign_id=campaign_id, supersedes=supersedes))
-    offers.append(action(
-        "When the results land, reconcile this judgment against them",
-        "reconcile_evaluation", evaluation_id=evaluation_id))
-    return trim(offers)
+    if campaign_id:
+        return []
+    # "Review and add", not "Add": `upload_campaign` previews unless confirm=True, and the
+    # preview IS the consent step for a write. A label promising storage describes the call
+    # after the one being offered.
+    return trim([action(
+        f"Review and add \u201c{subject_title}\u201d to the library, so later briefs can "
+        f"be compared against it",
+        "upload_campaign",
+        why="This judgment was made about a brief that is not itself a record, so nothing "
+            "later can be compared against it.",
+        consent="ask", title=subject_title)])
+
+
+def after_metrics(*, campaign_id: str, open_evaluation_id: Optional[str]) -> list[dict]:
+    """Results have just been recorded. If a judgment about this campaign is still open, the
+    precondition for reconciling it is now satisfied — which is what makes this the right
+    moment for the offer, and the save-time version wrong."""
+    if not open_evaluation_id:
+        return []
+    return trim([action(
+        "Check the judgment made about this campaign against what actually happened",
+        "reconcile_evaluation",
+        why="A judgment was recorded for this campaign and has never been compared with "
+            "its results.",
+        consent="ask", evaluation_id=open_evaluation_id)])
 
 
 def after_upload(*, campaign_id: str, status: Optional[str],
@@ -113,12 +162,24 @@ def after_upload(*, campaign_id: str, status: Optional[str],
     offers = []
     if status == "concluded" and not has_metrics:
         offers.append(action(
-            "Add what this campaign actually achieved, so later judgments can weigh it",
-            "add_metrics", campaign_id=campaign_id))
+            "Record what this campaign actually achieved, so later judgments can weigh it",
+            "add_metrics",
+            why="This campaign is finished and has no results on file, so every judgment "
+                "that cites it rests on nothing measured.",
+            consent="ask", needs=["the results themselves — CTR, ROI, conversions, or "
+                                  "whatever was measured"],
+            campaign_id=campaign_id))
     return trim(offers)
 
 
 def to_finish_indexing(campaign_id: Optional[str]) -> list[dict]:
-    """The offer behind every "this is only partly searchable" warning (tracker D16)."""
+    """The offer behind every "this is only partly searchable" warning (tracker D16).
+
+    `consent: "do"` — this is recovery, not a new decision. It re-embeds rows that already
+    exist, changes nothing the user did not already ask for, and `finish_indexing`'s own
+    docstring says to keep going without stopping to ask.
+    """
     return trim([action("Finish indexing this campaign — nothing needs re-uploading",
-                        "finish_indexing", campaign_id=campaign_id)])
+                        "finish_indexing",
+                        why="Part of this upload is stored but not yet searchable.",
+                        consent="do", campaign_id=campaign_id)])

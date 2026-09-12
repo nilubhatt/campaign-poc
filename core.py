@@ -153,6 +153,17 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                 warnings += w2
                 deck_text = "\n\n".join(units)
 
+    # The store offer (§5.2) is the thing that creates duplicates, and the product's own
+    # title lookup then breaks on them — bulk_import_metrics reports the title as ambiguous
+    # and refuses the row. Warn at the moment it happens, while somebody can still say which
+    # one they meant.
+    duplicates = [c for c in store.list_campaigns(conn)
+                  if (c["title"] or "").strip().lower() == (title or "").strip().lower()]
+    if duplicates:
+        warnings.append(notices.notice(
+            "duplicate_title",
+            detail=f"{len(duplicates)} existing campaign(s) already titled {title!r}",
+            next_actions=[]))
     cid = store.insert_campaign(
         conn, title=title, record_type=record_type, status=status, tags=tags, region=region,
         market=market, markets=markets, collection=collection, supersedes=supersedes,
@@ -345,6 +356,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
     # fully embedded — in the same response whose warning says 2 of 12. That is exactly the
     # stored-versus-searchable conflation defect 05 opened with.
     store.mark_embedded(conn, cid, embedded_count == len(chunk_texts))
+    current = store.get_campaign(conn, cid)
     return {
         "campaign_id": cid, "title": title, "record_type": record_type,
         "embedded": embedded_count == len(chunk_texts),
@@ -355,8 +367,8 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         "commentary_checked": commentary_checked,
         "normalised": changed,
         "next_actions": actions.after_upload(
-            campaign_id=cid, status=status,
-            has_metrics=bool(store.get_campaign(conn, cid)["metrics"])),
+            campaign_id=cid, status=current["status"],
+            has_metrics=bool(current["metrics"])),
         "warnings": notices.collapse(warnings),
     }
 
@@ -388,7 +400,13 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
         }
     mid = store.add_metrics(conn, campaign_id, detail=detail, structured=structured,
                            metric_type=metric_type)
-    return {"metrics_id": mid, "campaign_id": campaign_id, "status": "stored"}
+    return {"metrics_id": mid, "campaign_id": campaign_id, "status": "stored",
+            # The moment the precondition for reconciling is satisfied. Offered at
+            # save_evaluation time it simply failed: there were no actuals yet (§5.2 review).
+            "next_actions": actions.after_metrics(
+                campaign_id=campaign_id,
+                open_evaluation_id=store.unreconciled_evaluation_id(conn, campaign_id)
+                if metric_type == "actual" else None)}
 
 
 # ── retrieval / evidence for Claude ──────────────────────────────────────────
@@ -730,9 +748,7 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         # a new brief supersedes nothing, and an offer that is always there stops being read.
         "next_actions": actions.after_evaluation(
             subject_title=subject_title, evaluation_id=eid, verdict=verdict,
-            campaign_id=campaign_id,
-            supersedes=(closest_precedent or {}).get("campaign_id")
-            if verdict != "approve" else None),
+            campaign_id=campaign_id),
         "note": "Give the user the verdict, the one-line summary and what has to change. "
                 "The reasoning behind any finding is in get_evaluation, not here. "
                 "`next_actions` are offers — say them in your own words and act on the one "
