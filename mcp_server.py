@@ -758,29 +758,3 @@ def save_reconciliation(evaluation_id: str, comparison: str, actual: Optional[st
         return {"reconciliation_id": rid, "status": "saved"}
     finally:
         conn.close()
-
-# Every tool this server publishes, in the order they are defined. Named explicitly so
-# health_check can report what each one actually takes (§3.2): a caller holding a schema
-# cached before a rebuild can then name the parameters it is missing instead of
-# rediscovering them by trial and error.
-TOOL_NAMES = (
-    "upload_campaign",
-    "update_campaign",
-    "delete_campaign",
-    "upload_image_asset",
-    "check_image_provenance",
-    "find_similar_images",
-    "add_metrics",
-    "bulk_import_metrics",
-    "health_check",
-    "finish_indexing",
-    "list_campaigns",
-    "get_campaign",
-    "find_similar_campaigns",
-    "prepare_evaluation",
-    "save_evaluation",
-    "get_evaluation",
-    "list_evaluations",
-    "reconcile_evaluation",
-    "save_reconciliation",
-)

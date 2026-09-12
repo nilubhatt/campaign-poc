@@ -8,6 +8,13 @@ Set-Location (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
 py -3 -m venv .venv-build
 & .\.venv-build\Scripts\python.exe -m pip install --upgrade pip
+# Stamp the build so two local builds are not indistinguishable (section 3.2, defect 10). CI
+# writes the same file; without it every locally built binary reports itself identically, and
+# calls itself a "source checkout" while being a frozen app.
+$sha = (git rev-parse --short HEAD 2>$null)
+if (-not $sha) { $sha = "local" }
+"$sha $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))" | Set-Content -Encoding ascii build_info.txt
+
 & .\.venv-build\Scripts\python.exe -m pip install -r requirements.txt pyinstaller typer
 & .\.venv-build\Scripts\pyinstaller.exe --clean --noconfirm campaign-poc.spec
 

@@ -950,13 +950,17 @@ def published_tool_parameters() -> dict[str, list[str]]:
         # report that says which component is down.
         return {}
 
+    # From the server's own registry, not a list beside it. The first version iterated a
+    # hand-typed TOOL_NAMES — the hand-maintained copy this function's docstring says it
+    # refuses to have — and a tool registered without editing that tuple was silently
+    # omitted. Review deleted a name from it and the entire suite stayed green.
     published: dict[str, list[str]] = {}
-    for name in getattr(mcp_server, "TOOL_NAMES", ()):
-        fn = getattr(mcp_server, name, None)
+    for tool in mcp_server.mcp._tool_manager.list_tools():
+        fn = getattr(tool, "fn", None) or getattr(mcp_server, tool.name, None)
         if fn is None:
             continue
-        published[name] = [p for p in inspect.signature(fn).parameters
-                           if p not in ("self", "ctx")]
+        published[tool.name] = [p for p in inspect.signature(fn).parameters
+                                if p not in ("self", "ctx")]
     return published
 
 

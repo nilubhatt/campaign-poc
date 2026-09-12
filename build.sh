@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 # Build a self-contained bundle for the CURRENT OS (Linux or macOS).
+# Stamp the build so two local builds are not indistinguishable (§3.2, defect 10). CI writes
+# the same file; without it every locally built binary reports itself identically, and calls
+# itself a "source checkout" while being a frozen app.
+git rev-parse --short HEAD > /dev/null 2>&1 \
+  && echo "$(git rev-parse --short HEAD) $(date -u +%Y-%m-%dT%H:%M:%SZ)" > build_info.txt \
+  || echo "local $(date -u +%Y-%m-%dT%H:%M:%SZ)" > build_info.txt
+
 # PyInstaller is native — run this ON the OS you want to target (a Linux binary must be
 # built on Linux). For Windows, use build.ps1 on Windows. Output: dist/campaign-intelligence/
 set -euo pipefail

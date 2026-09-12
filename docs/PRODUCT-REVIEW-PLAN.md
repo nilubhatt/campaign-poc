@@ -526,6 +526,26 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       `instructions` tell Claude to do that and then say to fully quit and reopen the app.
       The tool inventory is best-effort: an import failure costs the inventory, never the
       report that says which component is down.
+      **From review, in this item.** The first version iterated a hand-typed `TOOL_NAMES`
+      tuple — the hand-maintained copy this very item says it refuses to have. It matched on
+      the day it was written, and a tool registered without editing it would have been
+      omitted silently: defect 10 reproduced inside its own fix. The reviewer deleted a name
+      from the tuple and the entire suite stayed green, because the test guarding it compared
+      the registry against a set derived from the registry. The inventory now comes from the
+      server's own tool registry, and the test compares against what MCP actually advertises.
+      Two more version copies were wrong. `build.sh`/`build.ps1` never stamped, so two local
+      builds were indistinguishable and a frozen PyInstaller build called itself a "source
+      checkout"; both stamp now. And `AppVersion` was hard-coded in the Inno Setup script and
+      had **already drifted** — 0.2.7 against `version.py`'s 0.3.0 — so a release would have
+      shipped an installer whose Add/Remove Programs entry, uninstall display and upgrade
+      detection all disagreed with the binary inside it. CI passes it in with `/DAppVersion`.
+      **And defect 11's own bug class was still shipping.** `configure-desktop` read and
+      wrote Claude Desktop's config with no `encoding=`, so on Windows it used cp1252 against
+      a UTF-8 file: another connector pointing at `C:\Users\José` came back as
+      `C:\Users\JosÃ©` and was written back corrupted, and a byte cp1252 cannot decode
+      raised an uncaught `UnicodeDecodeError`. It runs on every Windows and Linux install.
+      Fixed there and in both uninstallers' embedded Python, which had the same hole under a
+      legacy locale.
 - [x] **3.3 Shipped scripts must be encoding-safe** (defect 11). Any `.ps1` ASCII-only or
       UTF-8 **with** BOM, asserted in CI; audit the macOS/Linux shell scripts for the
       analogous trap rather than assuming it is Windows-only.

@@ -139,9 +139,19 @@ def _configure_desktop(http_url=None):
     if cfg.exists():
         shutil.copy2(cfg, str(cfg) + ".bak")
         try:
-            data = json.loads(cfg.read_text() or "{}")
+            # encoding="utf-8" explicitly: this file is UTF-8 and Python's default is the
+            # locale codec, which on Windows is cp1252 — defect 11's own bug class, running
+            # on every Windows and Linux install. Another connector pointing at
+            # C:\Users\José came back as C:\Users\JosÃ© and was written back corrupted,
+            # and a byte cp1252 cannot decode raised UnicodeDecodeError, which nothing
+            # caught.
+            data = json.loads(cfg.read_text(encoding="utf-8") or "{}")
         except json.JSONDecodeError:
             print(f"warning: {cfg} is not valid JSON; leaving it alone.")
+            return
+        except UnicodeDecodeError as exc:
+            print(f"warning: {cfg} could not be read as UTF-8 ({exc}); leaving it alone "
+                  f"rather than rewriting it and losing whatever is in there.")
             return
 
     if http_url:
@@ -155,7 +165,9 @@ def _configure_desktop(http_url=None):
                  "args": [str(Path(__file__).resolve().parent / "stdio_server.py")]}
 
     data.setdefault("mcpServers", {})["campaign-intelligence"] = entry
-    cfg.write_text(json.dumps(data, indent=2))
+    # ensure_ascii=False keeps a non-ASCII path readable in the file rather than escaped,
+    # and the explicit encoding is what makes that safe to write.
+    cfg.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Configured Claude Desktop connector in {cfg}")
     print("Restart Claude Desktop (fully quit + reopen) to load it.")
 

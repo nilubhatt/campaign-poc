@@ -33,4 +33,17 @@ else
   [ -d "$DATA" ] && echo "Your campaign library is still at $DATA (use --purge to remove it)."
 fi
 
-echo "Claude Desktop's config still lists this server; remove the entry there, or re-install."
+CFG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+if [ -f "$CFG" ] && command -v python3 >/dev/null 2>&1; then
+  python3 - "$CFG" <<'PY' || true
+# encoding="utf-8" explicitly: Python's default is the locale codec, and under a legacy
+# LC_ALL this rewrites every other connector's non-ASCII path (the same trap as defect 11).
+import json,sys
+p=sys.argv[1]
+try: d=json.load(open(p,encoding="utf-8"))
+except Exception: sys.exit(0)
+d.get("mcpServers",{}).pop("campaign-intelligence",None)
+json.dump(d,open(p,"w",encoding="utf-8"),indent=2,ensure_ascii=False)
+PY
+  echo "Removed the Claude Desktop connector entry."
+fi

@@ -24,7 +24,10 @@ ROOT = Path(__file__).resolve().parent.parent
 UTF8_BOM = b"\xef\xbb\xbf"
 
 # Files that get shipped to, or run on, a customer machine. .venv and .git are ours.
-SKIP_DIRS = {".git", ".venv", "__pycache__", "node_modules", "build", "dist"}
+# Ours, or produced by a build. A venv's own Activate.ps1 failing this check would fail the
+# suite for a reason that has nothing to do with what we ship.
+SKIP_DIRS = {".git", ".venv", ".venv-build", "__pycache__", "node_modules", "build", "dist",
+             ".weights-cache", "_verify", "Output", "site-packages"}
 
 
 def _shipped(*suffixes):

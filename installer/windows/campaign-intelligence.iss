@@ -6,12 +6,19 @@
 ; model, wires Claude Desktop automatically (configure-desktop), and can register a background
 ; service (Task Scheduler). Uninstall removes all of it.
 
+; Supplied by the build: ISCC.exe /DAppVersion=... reads it from version.py, which is the
+; single source. It was hard-coded here and had already drifted - version.py said 0.3.0
+; while this said 0.2.7, so Add/Remove Programs, the uninstall entry and upgrade detection
+; would every one of them disagree with the binary they had just installed.
+#ifndef AppVersion
+  #define AppVersion "0.0.0-dev"
+#endif
 #define AppName "Campaign Intelligence"
 #define AppExe  "campaign-intelligence.exe"
 
 [Setup]
 AppName={#AppName}
-AppVersion=0.2.7
+AppVersion={#AppVersion}
 DefaultDirName={autopf}\CampaignIntelligence
 DefaultGroupName={#AppName}
 OutputBaseFilename=CampaignIntelligence-Setup

@@ -68,24 +68,18 @@ def test_the_server_publishes_what_its_tools_actually_take(conn):
     assert "confirm" in tools["upload_campaign"]
 
 
-def test_the_published_inventory_is_generated_from_the_tools_not_typed_out(conn):
-    """A hand-maintained list would drift from the tools the same way the client's cache
-    did, which would be the defect reproduced inside its own fix."""
+def test_every_published_parameter_really_exists_on_the_tool(conn):
+    """The earlier version of this test was tautological — it compared the registry against
+    a set derived from the registry, so it could not fail. This compares against the
+    functions themselves. (Whether the tool LIST is complete is
+    test_the_inventory_covers_every_tool_the_server_actually_advertises.)"""
+    import inspect
+
     report = core.health_check(conn)
 
-    registered = set(report["tools"])
-    actual = {name for name in dir(mcp_server)
-              if callable(getattr(mcp_server, name, None))
-              and getattr(getattr(mcp_server, name), "__doc__", None)
-              and name in registered}
-
-    assert registered == actual or registered >= {"upload_campaign", "find_similar_campaigns"}
-    # every published parameter really exists on the function
-    import inspect
     for tool, params in report["tools"].items():
         fn = getattr(mcp_server, tool, None)
-        if fn is None:
-            continue
+        assert fn is not None, f"{tool} is published but is not a function on mcp_server"
         real = set(inspect.signature(fn).parameters)
         assert set(params) <= real, f"{tool}: published {set(params) - real} which do not exist"
 
@@ -127,3 +121,114 @@ def test_the_version_is_not_hand_edited_in_two_places():
             sources.append(path.name)
 
     assert len(sources) <= 2, f"version appears to be defined in {sources}"
+
+
+# ══ review of 3.2 ════════════════════════════════════════════════════════════
+
+def test_the_inventory_covers_every_tool_the_server_actually_advertises():
+    """The first version iterated a hand-typed `TOOL_NAMES` tuple — the hand-maintained copy
+    this fix's own commit message said it refused to have. It matched on the day it was
+    written; the day somebody adds a tool without editing the tuple, health_check omits it
+    silently, which is defect 10 reproduced inside its own fix.
+
+    And the test that was supposed to catch that could not: it asserted
+    `registered == actual or registered >= {two known names}`, with `actual` derived from
+    `registered`. Deleting a name from the tuple left the whole suite green."""
+    import core
+    import mcp_server
+
+    advertised = {t.name for t in mcp_server.mcp._tool_manager.list_tools()}
+
+    assert set(core.published_tool_parameters()) == advertised
+
+
+def test_adding_a_tool_does_not_need_a_second_edit_to_be_published():
+    """The property, rather than today's count: register one and it appears."""
+    import core
+    import mcp_server
+
+    @mcp_server.mcp.tool()
+    def _probe_tool(only_here_for_the_test: str = "x") -> dict:
+        """A tool registered at test time."""
+        return {}
+
+    try:
+        published = core.published_tool_parameters()
+        assert "_probe_tool" in published
+        assert published["_probe_tool"] == ["only_here_for_the_test"]
+    finally:
+        mcp_server.mcp.remove_tool("_probe_tool")
+
+
+def test_a_locally_built_binary_is_not_indistinguishable_from_every_other():
+    """"Drift visible at a glance" fails in the one scenario the review reported: a local
+    rebuild. `build.sh` and `build.ps1` never stamped, so before and after a rebuild every
+    surface said exactly the same thing — and called a frozen PyInstaller build a "source
+    checkout", which it is not."""
+    for script in (ROOT / "build.sh", ROOT / "build.ps1"):
+        text = script.read_text(encoding="utf-8")
+        assert "build_info.txt" in text, (
+            f"{script.name} does not stamp the build, so two different local builds report "
+            f"the same version"
+        )
+        assert "rev-parse" in text, f"{script.name} stamps nothing identifying"
+
+
+def test_the_windows_installer_version_comes_from_the_one_source():
+    """AppVersion was a second hand-edited copy and had already drifted — version.py said
+    0.3.0 while the installer said 0.2.7, so Add/Remove Programs, the uninstall entry and
+    upgrade detection would all disagree with the binary they installed."""
+    iss = (ROOT / "installer" / "windows" / "campaign-intelligence.iss").read_text(
+        encoding="ascii")
+
+    version_line = next(l for l in iss.splitlines() if l.startswith("AppVersion"))
+    assert "{#" in version_line, (
+        f"the installer hard-codes a version: {version_line}. Pass it in from version.py."
+    )
+
+    workflow = (ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    assert "/DAppVersion" in workflow, "nothing supplies the version to ISCC"
+
+
+def test_the_desktop_config_is_read_and_written_as_utf8():
+    """Defect 11's own bug class, still shipped. `configure-desktop` read and wrote Claude
+    Desktop's config with the locale codec — cp1252 on a Windows machine, where the file is
+    UTF-8. Another connector pointing at C:\\Users\\José became C:\\Users\\JosÃ©, and a byte
+    the codec cannot decode raised UnicodeDecodeError, which is not caught. It runs on every
+    Windows and Linux install."""
+    import ast
+
+    tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "_configure_desktop")
+
+    calls = [n for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr in ("read_text", "write_text", "open")]
+    assert calls, "nothing reads or writes the config?"
+    for call in calls:
+        assert any(kw.arg == "encoding" for kw in call.keywords), (
+            f"{call.func.attr}() on line {call.lineno} uses the locale codec; on Windows "
+            f"that is cp1252 and the file is UTF-8"
+        )
+
+
+def test_reading_a_desktop_config_with_a_non_ascii_path_does_not_corrupt_it(tmp_path,
+                                                                           monkeypatch):
+    """Executed rather than grepped: a config naming another connector under a non-ASCII
+    path must come back byte-identical in that entry."""
+    import json
+
+    import main
+
+    cfg = tmp_path / "claude_desktop_config.json"
+    original = {"mcpServers": {"notes": {"command": "C:\\Users\\José\\notes.exe",
+                                         "args": ["--flag"]}}}
+    cfg.write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(main, "_desktop_config_path", lambda: cfg)
+
+    main._configure_desktop()
+
+    after = json.loads(cfg.read_text(encoding="utf-8"))
+    assert after["mcpServers"]["notes"]["command"] == "C:\\Users\\José\\notes.exe"
+    assert "campaign-intelligence" in after["mcpServers"]

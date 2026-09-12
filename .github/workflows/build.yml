@@ -169,7 +169,10 @@ jobs:
         shell: pwsh
         run: |
           choco install innosetup --no-progress -y
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\windows\campaign-intelligence.iss
+          # From version.py, the single source. Hard-coding it here is how the installer
+          # came to claim 0.2.7 while the binary inside it said 0.3.0.
+          $v = python -c "import version; print(version.VERSION)"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" installer\windows\campaign-intelligence.iss
           Copy-Item installer\windows\Output\CampaignIntelligence-Setup.exe .
 
       - name: Upload build artifacts
