@@ -128,7 +128,7 @@ def resolve_weights() -> WeightsResolution:
 
     if config.is_installed():
         # An installed copy ships its weights, so their absence means something removed
-        # them — a partial copy, an endpoint filter quarantining a 605MB opaque binary, an
+        # them — a partial copy, an endpoint filter quarantining a 300MB opaque binary, an
         # admin reclaiming disk. Falling back to the tag here would silently recreate the
         # original defect on the one machine that cannot reach the Hub at all, and would
         # report itself as healthy while doing it.

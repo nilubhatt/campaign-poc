@@ -23,7 +23,7 @@ UninstallDisplayName={#AppName}
 
 [Files]
 Source: "..\..\dist\campaign-intelligence\*"; DestDir: "{app}"; Excludes: "models\*"; Flags: recursesubdirs createallsubdirs
-; The CLIP checkpoint is ~605MB of near-random tensor data: LZMA2/max spends minutes on it
+; The CLIP checkpoint is ~303MB of near-random tensor data: LZMA2/max spends minutes on it
 ; for ~0% gain, and in a solid stream every install pays to decompress it in order. Kept
 ; out of the solid block and stored uncompressed.
 Source: "..\..\dist\campaign-intelligence\models\*"; DestDir: "{app}\models"; Flags: recursesubdirs createallsubdirs nocompression solidbreak

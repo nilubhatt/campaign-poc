@@ -221,7 +221,7 @@ weight.** New `clip_embed.py` — `open_clip_torch` + `torch`, model
 activation-function mismatch against plain `ViT-B-32` with `openai` weights, which would
 subtly degrade embedding quality — verified no warning with the correct name). Real
 dependency cost, measured, not guessed: `torch` alone is a **121MB** wheel (macOS arm64 CPU
-build), plus a **605MB** checkpoint (`ViT-B-32`) — shipped in the installer payload since
+build), plus a **303MB** fp16 checkpoint (`ViT-B-32`) — shipped in the installer payload since
 the 11 Sep product review (see docs/PRODUCT-REVIEW-PLAN.md 1.2), not downloaded; Linux/Windows
 CPU wheels run similarly large. `vectorstore.py` gained a `space` parameter (default
 `"campaign"`, backward compatible) so CLIP's 512-dim vectors and text's 768-dim

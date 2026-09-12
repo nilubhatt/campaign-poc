@@ -51,9 +51,15 @@ jobs:
       # machine with nothing configured. Fetched BEFORE the build so an upstream outage
       # fails in seconds rather than after a full PyInstaller run. Not cached: this
       # workflow runs on tags, and cache entries are ref-scoped and evicted after 7 days
-      # idle, so a 605MB save/restore would almost always miss and cost more than the
+      # idle, so a 303MB save/restore would almost always miss and cost more than the
       # ~20s fetch it replaces.
+      # A release must ship a KNOWN artifact. Without this, deleting the mirror release
+      # would silently fall back to upstream and ship a different (fp32, 300MB larger)
+      # model with different vectors, and nothing would go red. Local dev keeps the
+      # fallback; a tag build does not.
       - name: Fetch and verify CLIP weights
+        env:
+          CAMPAIGN_WEIGHTS_REQUIRE_MIRROR: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '0' }}
         run: python scripts/fetch_weights.py .weights-cache
 
       - name: Build bundle
@@ -66,6 +72,18 @@ jobs:
           mkdir -p dist/campaign-intelligence/models
           cp .weights-cache/open_clip_model.safetensors* dist/campaign-intelligence/models/
           python scripts/fetch_weights.py dist/campaign-intelligence/models
+          # Assert WHICH checkpoint got staged, not merely that one did.
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "scripts")
+          from pathlib import Path
+          import fetch_weights as fw
+          staged = Path("dist/campaign-intelligence/models") / fw.CHECKPOINT_NAME
+          actual = fw.sha256_of(staged)
+          known = {s.sha256: s.note for s in fw.SOURCES}
+          assert actual in known, f"staged an unrecognised checkpoint: {actual}"
+          print(f"staged checkpoint: {known[actual]} ({actual[:12]}...)")
+          PY
 
       - name: Package (Linux/macOS) — bundle + install scripts
         if: runner.os != 'Windows'

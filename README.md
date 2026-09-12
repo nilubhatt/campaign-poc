@@ -24,7 +24,7 @@ The loop it enables:
 
 No Postgres, no Docker required. CLIP (`torch` + `open_clip_torch`) IS a dependency, for
 aesthetic/regional image-similarity detection — a deliberate size tradeoff (~150-250MB of
-deps + a 605MB model checkpoint); see `docs/PRODUCTION-ROADMAP.md` §6.6.
+deps + a 303MB fp16 model checkpoint); see `docs/PRODUCTION-ROADMAP.md` §6.6.
 
 **The installers ship the checkpoint.** An installed copy finds it beside the executable
 (`<install dir>/models/`) and needs no network for it — including on a fully air-gapped

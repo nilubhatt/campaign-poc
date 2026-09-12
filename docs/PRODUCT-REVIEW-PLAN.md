@@ -68,23 +68,95 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       about packaging. `installer/linux/install.sh` verifies the sidecar after copying, so a
       truncated copy fails the install instead of surfacing later inside a tool call.
       Inno keeps the checkpoint out of the solid LZMA2 stream (`nocompression solidbreak`) —
-      605MB of near-random tensor data compresses ~0% and costs minutes.
-      Verified: bundled weights load and embed with the network hard-blocked; a truncated
-      copy fails the sidecar check; an installed copy with weights removed reports
-      `source: missing` with a reinstall remedy. Asset sizes land ~830-950MB, clear of the
+      300MB of near-random tensor data compresses ~0% and costs minutes.
+      Manually verified (no automated test yet — that is 1.3): bundled weights load and
+      embed with the network hard-blocked; a truncated copy fails the sidecar check; an
+      installed copy with weights removed reports `source: missing` with a reinstall remedy. Asset sizes land ~830-950MB, clear of the
       2GB release cap that bit v0.2.0/v0.2.1.
-- [ ] **1.2b Halve the payload, and stop depending on huggingface.co at build time.**
-      Two changes that belong together because both move the hash/pin: convert the
-      checkpoint to **fp16** (~300MB, the review's suggestion — gated on a measured check
-      that ranking similarity holds, not assumed), and **mirror it as a release asset on
-      this repo** so a release build does not depend on the Hub at all. Deferred from 1.2
-      deliberately: the air-gap requirement is met at fp32, and doing this once with the
-      mirror avoids churning the pinned hash twice. Customer-facing cost of waiting is a
-      ~780MB `Setup.exe` through a corporate proxy with AV inspection.
+- [x] **1.2b Halve the payload, and stop depending on huggingface.co at build time.**
+      The checkpoint is now **fp16, 302,588,458 bytes** (half of fp32, to within a 33KB header), mirrored as
+      a release asset on this repo (`weights-v1`) and tried *before* upstream — the premise
+      of this whole phase is that huggingface.co is blocked at the customer, so depending on
+      it to *build* the fix was a dependency worth removing too. Upstream stays as a
+      fallback, so a deleted or renamed release can't break a build; each source carries its
+      own hash and size because they are genuinely different files.
+
+      **The review's condition was "no meaningful accuracy cost for similarity ranking" —
+      measured, not assumed** (`scripts/convert_fp16.py` reports it):
+
+      Both rows below are reproducible from the checked-in script —
+      `python scripts/convert_fp16.py <fp32> <fp16> [photo_dir]` prints them, and labels the
+      probe set it used so an easy-case number can never be mistaken for a hard-case one:
+
+      | probe set | similarity band | fp16 perturbation | tightest margin | headroom | top-1 / top-5 | full order |
+      |---|---|---|---|---|---|---|
+      | 12 synthetic shapes (easy) | 0.619–0.976 | 5.4e-04 | 7.1e-03 | 13× | identical | identical |
+      | **13 real photographs (hard)** | **0.807–0.985** | 1.4e-04 | 8.3e-04 | **6.1×** | **identical** | **not identical** |
+
+      Cosine between the fp32 and fp16 embedding of the same image is ≥ 0.999999, and the
+      fp16 file loads into an **fp32 model** (`load_state_dict` upcasts — verified by
+      inspecting parameter dtypes), so inference precision is unchanged; only the stored file
+      is halved.
+
+      **Three corrections this measurement went through, all worth keeping:**
+      1. The first run used upscaled random noise and reported *ranking changed*. It does —
+         but noise images sit within ~1e-5 of each other under CLIP, so any perturbation
+         reorders near-ties. A fact about the probe set, not about fp16.
+      2. The second used distinct synthetic shapes and reported a comfortable 13× headroom,
+         which flatters the result by measuring the easy case.
+      3. The third used hand-made "near-variants of one image" — which are *near-duplicates*,
+         a case this product handles with pHash, not CLIP. Review caught that this still
+         wasn't the real hard case. Real photographs are: distinct images that are
+         nonetheless alike, which is what ranking one brand's campaign shoots actually is.
+
+      **The honest limit:** top-1 and top-5 ordering are stable, but full ordering is not —
+      on the real-photo set one adjacent pair sat inside the perturbation window. So:
+      *ordering of two candidates whose similarity differs by less than ~1.5e-4 is not
+      guaranteed identical between the two checkpoints.* That is below the 4th decimal the
+      product displays, and such ties carry no information under fp32 either — but it is a
+      behavioural difference, not "identical".
+      (An earlier draft defended this by saying sub-threshold gaps are "near-duplicates,
+      pHash's job". Both reviewers independently flagged that as a non-sequitur, and they are
+      right: the tie is between two *candidates' distances to a query*, not between the
+      candidates themselves — two images 0.82 similar to each other can still tie. Removed.)
+      Note also that the review's "0.75–0.81 band" complaint was about the **text** embedding
+      space (nomic), not CLIP; the CLIP bands above happen to overlap it, which is why the
+      comparison is still worth making, but they are not the same measurement.
+      A release build **requires** the mirror (`CAMPAIGN_WEIGHTS_REQUIRE_MIRROR=1` on tag
+      builds) and asserts which checkpoint got staged by hash — review's point that a
+      silently-missing mirror would ship a different, 300MB-larger model with different
+      vectors and nothing going red. Local dev keeps the fallback.
+      Manually verified: the mirror fetches and hash-verifies from the live release, and the
+      fp16 checkpoint loads and embeds with the network hard-blocked. Assets drop ~300MB.
+
+      **Follow-ups this raised, tracked rather than lost:**
+      - *Vector comparability.* Pre-upgrade vectors came from fp32, post-upgrade from fp16.
+        Ranking is unaffected (measured above), but ~45-55% of displayed similarities change
+        in the 4th decimal, and a customer re-running yesterday's query has no explanation.
+        Nothing records which checkpoint produced a vector. Pulled into **7.6** (stamp the
+        embedding identity) and **2.2** (`reembed` on mismatch) — fp16 is benign, but the
+        next real model change would silently mix incomparable vectors.
+      - *Attestation.* The conversion is bit-for-bit reproducible (a reviewer independently
+        re-derived `cbd90e47…` from the pinned upstream blob). Worth a CI job that rebuilds
+        it from upstream and attaches build provenance, so "why trust this mirror" has an
+        answer a customer can run themselves. Added as **1.2c**.
+- [ ] **1.2c Prove the mirror, don't ask to be trusted.** The fp16 conversion is
+      bit-for-bit reproducible — a reviewer independently re-derived `cbd90e47…` from the
+      pinned upstream blob using the checked-in script, which is the strongest possible
+      answer to "why should I trust a checkpoint hosted in someone's GitHub repo". Make CI
+      demonstrate it: a job that downloads upstream by pinned hash, converts, asserts the
+      result equals `MIRROR.sha256`, and attaches build provenance
+      (`actions/attest-build-provenance`) so a customer can run `gh attestation verify`.
+      Add a README "weights provenance" section with both hashes, the upstream commit, and
+      the one-line reproduction command.
+
 - [ ] **1.3 No Hub dependency at runtime** (defect 03). Verified, not assumed: with weights
       present locally, assert **zero** network calls (socket/hf_hub blocked in the test) and
       that path-loaded vectors match tag-loaded ones — the preprocess config is identical
-      for `ViT-B-32-quickgelu`/`openai`, but pin it rather than assume it. Set
+      for `ViT-B-32-quickgelu`/`openai`, but pin it rather than assume it. **Amended by
+      1.2b:** the bundled checkpoint is fp16 and the tag resolves fp32, so this is
+      `allclose` at ~1e-4, not equality — assert the tolerance, and assert ranking equality,
+      rather than bit-identity. Set
       `HF_HUB_OFFLINE=1` once local weights resolve, making it a property rather than only a
       test. Install fails loudly (hash-verified) if the payload is absent or corrupt —
       also the mitigation for a wrong-but-same-shape checkpoint, which `open_clip` loads

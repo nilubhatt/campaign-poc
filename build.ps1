@@ -11,7 +11,7 @@ py -3 -m venv .venv-build
 & .\.venv-build\Scripts\python.exe -m pip install -r requirements.txt pyinstaller typer
 & .\.venv-build\Scripts\pyinstaller.exe --clean --noconfirm campaign-poc.spec
 
-# The CLIP weights ship inside the bundle so an air-gapped install works untouched. ~605MB,
+# The CLIP weights ship inside the bundle so an air-gapped install works untouched. ~303MB (fp16),
 # verified by SHA-256. Fetched into .weights-cache first because PyInstaller wipes dist\ on
 # every run - fetching straight into it would re-download on every local build.
 & .\.venv-build\Scripts\python.exe scripts\fetch_weights.py .weights-cache
