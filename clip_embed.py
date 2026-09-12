@@ -11,6 +11,7 @@ slow.
 """
 from __future__ import annotations
 
+import os
 import sys
 import threading
 from dataclasses import dataclass
@@ -46,6 +47,7 @@ def _load_model():
         resolution = weights_status()
         if not resolution.ok:
             raise RuntimeError(f"{resolution.reason} {resolution.remedy}")
+        _enforce_offline(resolution)
         with _model_lock:
             if _model is None:  # re-check: another thread may have finished while we waited
                 import open_clip
@@ -143,6 +145,22 @@ def resolve_weights() -> WeightsResolution:
     # Source checkout: no bundled copy ever existed and Hub access is the normal developer
     # path. `python scripts/fetch_weights.py models` opts into the offline behaviour.
     return WeightsResolution(ok=True, source="tag", pretrained=config.CLIP_PRETRAINED)
+
+
+def _enforce_offline(resolution: WeightsResolution) -> None:
+    """Put the Hub client in offline mode when the weights came from disk.
+
+    A test asserting "we did not call the network" only covers the paths it exercises.
+    Setting HF_HUB_OFFLINE covers the ones nobody thought of — a future open_clip version
+    checking for a model-card update, a transitive import phoning home — on exactly the
+    networks where that call cannot succeed and fails as a confusing TLS error (defect 03).
+
+    Must happen BEFORE open_clip is imported: huggingface_hub reads this into a module
+    constant at import time, so setting it afterwards does nothing. An operator who set the
+    variable themselves is left alone."""
+    if resolution.source not in ("env", "bundled"):
+        return  # the tag path genuinely needs the Hub
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 
 def _find_checkpoint(candidate: Path) -> Path | None:

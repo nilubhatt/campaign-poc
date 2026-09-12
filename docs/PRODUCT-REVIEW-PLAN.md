@@ -151,17 +151,26 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       customer can run `gh attestation verify`. README gained a "weights provenance" section
       with both hashes, the upstream commit, and the one-line rebuild command.
 
-- [ ] **1.3 No Hub dependency at runtime** (defect 03). Verified, not assumed: with weights
-      present locally, assert **zero** network calls (socket/hf_hub blocked in the test) and
-      that path-loaded vectors match tag-loaded ones — the preprocess config is identical
-      for `ViT-B-32-quickgelu`/`openai`, but pin it rather than assume it. **Amended by
-      1.2b:** the bundled checkpoint is fp16 and the tag resolves fp32, so this is
-      `allclose` at ~1e-4, not equality — assert the tolerance, and assert ranking equality,
-      rather than bit-identity. Set
-      `HF_HUB_OFFLINE=1` once local weights resolve, making it a property rather than only a
-      test. Install fails loudly (hash-verified) if the payload is absent or corrupt —
-      also the mitigation for a wrong-but-same-shape checkpoint, which `open_clip` loads
-      silently (the quickgelu mismatch warning only fires on the tag path).
+- [x] **1.3 No Hub dependency at runtime** (defect 03). Made a **property**, not a claim:
+      `HF_HUB_OFFLINE=1` is now set before `open_clip` is imported whenever the weights
+      resolved locally (env or bundled). A test proving "we didn't call the network" only
+      covers the paths it exercises; the variable covers the ones nobody thought of — a
+      future library version checking for a model-card update, a transitive import phoning
+      home — on precisely the network where that call fails as a confusing TLS error. It
+      must be set before the import, since `huggingface_hub` reads it into a module constant
+      at import time; an operator who set it themselves is left alone, and the tag path (a
+      source checkout, which genuinely needs the Hub) is left online.
+      Demonstrated against the real library, not a stub: a cache-gated integration test
+      blocks `create_connection`, `getaddrinfo`, `socket.connect`, `urlopen` and
+      `hf_hub_download`, loads a real checkpoint, and embeds an image — zero attempts,
+      512-dim unit vector. Skips with an actionable reason on a machine with no checkpoint.
+      Preprocess parity is pinned rather than assumed (review's point): loading by path
+      skips the tag's preprocess metadata and falls back to model defaults, which are
+      identical for `ViT-B-32-quickgelu`/`openai` today — but if that ever diverges the
+      failure is silent, vectors keep computing and simply stop being comparable with
+      everything already in the database.
+      Install-time "fail loudly if absent or corrupt" is **4.1's** job, not this item's —
+      ownership recorded there.
 
 ## Phase 2 — P1 defects
 
