@@ -63,7 +63,9 @@ _REGISTRY: dict[str, tuple] = {
         "blocked", "machine",
         "Search is off on this machine, so nothing sent now can be found afterwards. The "
         "records themselves are saved.",
-        "Ask whoever installed this to start the local text model service.",
+        "Ask whoever installed this to re-run the installer. It starts the text model "
+        "service and installs the embedding model, and its self-test confirms both before "
+        "it reports success.",
         "Say this once, not per section. Do NOT offer finish_indexing until it is fixed — "
         "it would fail on every item for the same reason.",
     ),

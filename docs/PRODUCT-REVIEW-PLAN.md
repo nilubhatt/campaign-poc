@@ -13,10 +13,20 @@ One item at a time, in the order below. For **each** item, in this order:
 3. Verify over a real MCP protocol round-trip where the item touches the tool surface.
 4. Two **independent** adversarial/design reviewers (fresh agents, fable) on that item alone.
 5. Fix every real finding; re-review until clean.
-6. Update this file's status, commit, push onto the **same** PR; then start the next item.
+6. Record anything **not** done in [`DEFERRALS.md`](DEFERRALS.md) — deferred, decided
+   against, or an accepted limit — in the same commit that creates it.
+7. Update this file's status, commit, push onto the **same** PR; then start the next item.
 
 Isolating each item this way is deliberate: no cross-feature drift, no batch that can't be
 reasoned about. Findings from a review round belong to the item under review.
+
+Step 6 is not bookkeeping. A review round routinely concludes that something real belongs to
+a later item, and that judgment is only safe if the thing is written down at the moment it is
+made — reconstructed later it is indistinguishable from having been forgotten. The tracker
+separates *owed* work from *rejected* work from *accepted limits*, because collapsing those
+three is how a decision gets silently re-litigated or a compliance obligation quietly lost.
+`tests/test_deferral_tracker.py` fails the build if a row points at an item that does not
+exist, or is still owed to one already marked done.
 
 **Platform rule:** the review was gathered on Windows 10, but every fix must hold on
 Windows, macOS and Linux. Anything platform-specific (installer payload, script encoding,
