@@ -47,8 +47,25 @@ jobs:
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt pyinstaller typer
 
+      # The weights ship IN the payload: the product must work on a clean, air-gapped
+      # machine with nothing configured. Fetched BEFORE the build so an upstream outage
+      # fails in seconds rather than after a full PyInstaller run. Not cached: this
+      # workflow runs on tags, and cache entries are ref-scoped and evicted after 7 days
+      # idle, so a 605MB save/restore would almost always miss and cost more than the
+      # ~20s fetch it replaces.
+      - name: Fetch and verify CLIP weights
+        run: python scripts/fetch_weights.py .weights-cache
+
       - name: Build bundle
         run: pyinstaller --clean --noconfirm campaign-poc.spec
+
+      # Staged after PyInstaller, which wipes dist/ on every run.
+      - name: Stage weights into the bundle
+        shell: bash
+        run: |
+          mkdir -p dist/campaign-intelligence/models
+          cp .weights-cache/open_clip_model.safetensors* dist/campaign-intelligence/models/
+          python scripts/fetch_weights.py dist/campaign-intelligence/models
 
       - name: Package (Linux/macOS) — bundle + install scripts
         if: runner.os != 'Windows'
@@ -61,6 +78,28 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: Compress-Archive -Path dist/campaign-intelligence/* -DestinationPath "${{ matrix.asset }}"
+
+      # Proves the SHIPPED archive works, not the source tree: unpack what customers get,
+      # run the frozen binary out of it, and require that it resolves its own bundled
+      # weights. This exercises app_dir() under PyInstaller and the archive's fidelity —
+      # a packaging mistake now fails the build instead of shipping a product whose vision
+      # half is dead on arrival, which is exactly how the original defect escaped.
+      - name: Verify the packaged product finds its weights (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p _verify && tar -xzf "${{ matrix.asset }}" -C _verify
+          _verify/campaign-intelligence/campaign-intelligence check-weights | tee out.txt
+          grep -q "source: bundled" out.txt
+
+      - name: Verify the packaged product finds its weights (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Expand-Archive -Path "${{ matrix.asset }}" -DestinationPath _verify -Force
+          $out = & _verify\campaign-intelligence.exe check-weights
+          $out
+          if ($LASTEXITCODE -ne 0) { throw "packaged product cannot resolve its weights" }
+          if ($out -notcontains "source: bundled") { throw "packaged product did not use the bundled weights" }
 
       - name: Build Windows installer (Inno Setup)
         if: runner.os == 'Windows'

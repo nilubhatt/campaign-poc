@@ -1,6 +1,30 @@
 """Configuration for the campaign-POC service. All knobs are env-overridable."""
 import os
+import sys
 from pathlib import Path
+
+
+def app_dir() -> Path:
+    """The directory the application lives in — where data shipped *with* it is found.
+
+    Frozen (PyInstaller onedir) the layout is <app>/campaign-intelligence[.exe] plus
+    <app>/_internal/, so this is the install directory the installers write into Program
+    Files. Deliberately NOT sys._MEIPASS (that is _internal/, inside the bundle, where an
+    admin can neither see nor replace a file) and NOT __file__ (which in a frozen app points
+    into the bundle rather than beside the executable)."""
+    if is_installed():
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def is_installed() -> bool:
+    """True for the packaged binary a customer installed, false for a source checkout.
+
+    The distinction decides whether missing weights are an error: an installed copy ships
+    them, so their absence means something went wrong and the product must say so rather
+    than quietly reaching for a network that may be blocked. A checkout never had them and
+    resolving the tag is the normal developer path."""
+    return getattr(sys, "frozen", False)
 
 
 def _default_data_dir() -> Path:
@@ -34,20 +58,27 @@ PHASH_MATCH_THRESHOLD = int(os.getenv("CAMPAIGN_POC_PHASH_THRESHOLD", "8"))
 # ── CLIP visual embeddings (§6.6 second half) ─────────────────────────────────
 # Aesthetic/regional similarity ("looks like the APAC shoot"), not exact reuse (pHash's job).
 # 'hash' is an offline, dependency-free test provider (same role as embedding.py's `hash`
-# text provider) - real similarity needs 'openclip' (default), which needs torch + a model
-# download on first use.
+# text provider) - real similarity needs 'openclip' (default), which needs torch and the
+# checkpoint below.
 CLIP_PROVIDER = os.getenv("CAMPAIGN_POC_CLIP_PROVIDER", "openclip").lower()
 # quickgelu variant matches OpenAI's original released weights exactly (open_clip warns on
 # an activation-function mismatch otherwise, which would subtly degrade embeddings).
 CLIP_MODEL_NAME = os.getenv("CAMPAIGN_POC_CLIP_MODEL", "ViT-B-32-quickgelu")
 CLIP_PRETRAINED = os.getenv("CAMPAIGN_POC_CLIP_PRETRAINED", "openai")
-# Filesystem path to the CLIP checkpoint (a file, or a directory containing one), used
-# INSTEAD of resolving CLIP_PRETRAINED through the Hugging Face Hub. Set it and the product
-# never touches the network for weights — verified empirically, not assumed: with a local
-# path, loading makes zero network calls and produces vectors bit-identical to the tag,
-# while the tag path issues live requests even with a warm cache. This is the supported
-# answer for an air-gapped install, or one where huggingface.co is blocked by an endpoint
-# filter (both hit in the field; the fallback was hand-fabricating a HF cache entry).
+# Where the installers put the shipped checkpoint: beside the executable, so a clean
+# machine with nothing configured and no network still has working visual search — the
+# installer acceptance criterion. Used when no path is configured explicitly. A source
+# checkout has no such folder and resolves the tag instead (`python scripts/fetch_weights.py
+# models` opts a checkout into the offline behaviour too).
+BUNDLED_WEIGHTS_DIR = app_dir() / "models"
+
+# Filesystem path to a CLIP checkpoint (a file, or a directory containing one), used INSTEAD
+# of the shipped copy and instead of resolving CLIP_PRETRAINED through the Hugging Face Hub.
+# The supported answer for weights supplied out of band, and for an install where
+# huggingface.co is blocked by an endpoint filter (hit in the field; the fallback was
+# hand-fabricating a HF cache entry). Verified empirically, not assumed: with a local path,
+# loading makes zero network calls and produces vectors bit-identical to the tag, while the
+# tag path issues live requests even with a warm cache.
 # The prefixed name is authoritative, matching every other setting here; the bare name is
 # accepted because it is what an admin would guess, and no library reads it.
 _CLIP_WEIGHTS_ENV_VARS = ("CAMPAIGN_POC_CLIP_WEIGHTS_PATH", "CLIP_WEIGHTS_PATH")

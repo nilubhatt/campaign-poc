@@ -69,12 +69,9 @@ def _load_model():
 # more likely to already have. Both load from a path (verified against the real library).
 _CHECKPOINT_NAMES = ("open_clip_model.safetensors", "open_clip_pytorch_model.bin")
 
-# Deliberately does not say "reinstall to restore the bundled copy" — nothing bundles the
-# weights yet (plan item 1.2), and a remedy that cannot work is worse than none. 1.2 updates
-# this line when the claim becomes true.
 _LOCAL_WEIGHTS_REMEDY = (
-    f"Point {{var}} at a CLIP weights file ({' or '.join(_CHECKPOINT_NAMES)}), or at the "
-    f"folder holding it."
+    f"Point {{var}} at a CLIP weights file ({' or '.join(_CHECKPOINT_NAMES)}) or the folder "
+    f"holding it, or clear {{var}} and reinstall to use the copy shipped with the product."
 )
 
 
@@ -87,7 +84,7 @@ class WeightsResolution:
     none of which need CLIP. health_check (plan 2.3) reports this; only an actual attempt
     to embed an image turns a bad resolution into a raised error."""
     ok: bool
-    source: str          # "env" | "tag" | "none" (provider needs no weights)
+    source: str          # "env" | "bundled" | "tag" | "missing" | "none"
     pretrained: str = ""  # what gets handed to open_clip
     path: str = ""        # the resolved checkpoint file, when local
     reason: str = ""
@@ -105,21 +102,47 @@ def resolve_weights() -> WeightsResolution:
         return WeightsResolution(ok=True, source="none")
 
     configured = (config.CLIP_WEIGHTS_PATH or "").strip()
-    if not configured:
-        return WeightsResolution(ok=True, source="tag", pretrained=config.CLIP_PRETRAINED)
+    if configured:
+        candidate = Path(configured).expanduser()
+        checkpoint = _find_checkpoint(candidate)
+        if checkpoint is None:
+            # Deliberately not falling through to the bundled copy: that would hide the
+            # admin's typo behind something that happens to work, and they would never
+            # learn the path they set is wrong.
+            where = f"the folder {candidate}" if candidate.is_dir() else str(candidate)
+            return WeightsResolution(
+                ok=False, source="env",
+                reason=f"Visual search is off: {config.CLIP_WEIGHTS_ENV_VAR} points at "
+                       f"{where}, which has no usable CLIP weights file.",
+                remedy=_LOCAL_WEIGHTS_REMEDY.format(var=config.CLIP_WEIGHTS_ENV_VAR),
+            )
+        return WeightsResolution(ok=True, source="env", pretrained=str(checkpoint),
+                                 path=str(checkpoint))
 
-    candidate = Path(configured).expanduser()
-    checkpoint = _find_checkpoint(candidate)
-    if checkpoint is None:
-        where = f"the folder {candidate}" if candidate.is_dir() else str(candidate)
+    # Shipped with the installer, beside the executable — the path that has to work on a
+    # clean, air-gapped machine with nothing configured at all.
+    bundled = _find_checkpoint(config.BUNDLED_WEIGHTS_DIR)
+    if bundled is not None:
+        return WeightsResolution(ok=True, source="bundled", pretrained=str(bundled),
+                                 path=str(bundled))
+
+    if config.is_installed():
+        # An installed copy ships its weights, so their absence means something removed
+        # them — a partial copy, an endpoint filter quarantining a 605MB opaque binary, an
+        # admin reclaiming disk. Falling back to the tag here would silently recreate the
+        # original defect on the one machine that cannot reach the Hub at all, and would
+        # report itself as healthy while doing it.
         return WeightsResolution(
-            ok=False, source="env",
-            reason=f"Visual search is off: {config.CLIP_WEIGHTS_ENV_VAR} points at {where}, "
-                   f"which has no usable CLIP weights file.",
-            remedy=_LOCAL_WEIGHTS_REMEDY.format(var=config.CLIP_WEIGHTS_ENV_VAR),
+            ok=False, source="missing",
+            reason=f"Visual search is off: this installation has no CLIP weights at "
+                   f"{config.BUNDLED_WEIGHTS_DIR}, where they ship.",
+            remedy=f"Reinstall to restore them, or set {config.CLIP_WEIGHTS_ENV_VAR} to a "
+                   f"copy of the weights file.",
         )
-    return WeightsResolution(ok=True, source="env", pretrained=str(checkpoint),
-                             path=str(checkpoint))
+
+    # Source checkout: no bundled copy ever existed and Hub access is the normal developer
+    # path. `python scripts/fetch_weights.py models` opts into the offline behaviour.
+    return WeightsResolution(ok=True, source="tag", pretrained=config.CLIP_PRETRAINED)
 
 
 def _find_checkpoint(candidate: Path) -> Path | None:

@@ -25,6 +25,25 @@ DEST="$HOME/.local/share/campaign-intelligence"
 BIN="$HOME/.local/bin"; mkdir -p "$BIN"
 echo "Installing to $DEST ..."
 rm -rf "$DEST"; mkdir -p "$DEST"; cp -a "$BUNDLE"/. "$DEST"/
+
+# Verify the shipped CLIP weights actually survived the copy. An interrupted or disk-full
+# cp leaves a truncated file that looks "present" to the app and only fails later, inside a
+# tool call - the failure mode this whole payload exists to remove.
+weights="$DEST/models/open_clip_model.safetensors"
+if [ -f "$weights.sha256" ]; then
+  echo "Verifying CLIP weights..."
+  if command -v sha256sum >/dev/null 2>&1; then
+    ( cd "$DEST/models" && sha256sum -c open_clip_model.safetensors.sha256 ) || {
+      echo "FAILED: the CLIP weights are corrupt or incomplete. Visual search would be dead." >&2
+      echo "Re-run this installer with a complete download." >&2; exit 1; }
+  elif command -v shasum >/dev/null 2>&1; then
+    ( cd "$DEST/models" && shasum -a 256 -c open_clip_model.safetensors.sha256 ) || {
+      echo "FAILED: the CLIP weights are corrupt or incomplete. Visual search would be dead." >&2
+      echo "Re-run this installer with a complete download." >&2; exit 1; }
+  fi
+elif [ ! -f "$weights" ]; then
+  echo "WARNING: no CLIP weights in this bundle - visual similarity will be unavailable." >&2
+fi
 ln -sf "$DEST/campaign-intelligence" "$BIN/campaign-intelligence"
 
 if [ "$WITH_OLLAMA" = 1 ]; then

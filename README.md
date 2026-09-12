@@ -24,14 +24,20 @@ The loop it enables:
 
 No Postgres, no Docker required. CLIP (`torch` + `open_clip_torch`) IS a dependency, for
 aesthetic/regional image-similarity detection — a deliberate size tradeoff (~150-250MB of
-deps + a one-time ~350MB model download on first use); see `docs/PRODUCTION-ROADMAP.md` §6.6.
+deps + a 605MB model checkpoint); see `docs/PRODUCTION-ROADMAP.md` §6.6.
+
+**The installers ship the checkpoint.** An installed copy finds it beside the executable
+(`<install dir>/models/`) and needs no network for it — including on a fully air-gapped
+machine, with nothing configured. A **source checkout** has no bundled copy and resolves the
+model by tag from huggingface.co on first use; run `python scripts/fetch_weights.py models`
+once if you want the offline behaviour locally too.
 
 ### Offline / restricted networks — pointing at local CLIP weights
 
 Resolving the model by tag goes to **huggingface.co**, which plenty of corporate networks
 block outright (endpoint filters answering :443 in plaintext, so it fails as a TLS error
-rather than an obvious block). If you have the weights file already, point at it and the
-product never touches the network for it:
+rather than an obvious block). Installed copies don't do this at all. For a source checkout,
+or weights supplied out of band, point at the file and the product never touches the network:
 
 ```jsonc
 // claude_desktop_config.json — the env block is how a local server gets settings

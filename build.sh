@@ -12,6 +12,13 @@ pip install --upgrade pip
 pip install -r requirements.txt pyinstaller typer
 pyinstaller --clean --noconfirm campaign-poc.spec
 
+# The CLIP weights ship inside the bundle so an air-gapped install works untouched. ~605MB,
+# verified by SHA-256. Fetched into .weights-cache/ first because PyInstaller wipes dist/
+# on every run - fetching straight into it would re-download on every local build.
+python3 scripts/fetch_weights.py .weights-cache
+mkdir -p dist/campaign-intelligence/models
+cp .weights-cache/open_clip_model.safetensors* dist/campaign-intelligence/models/
+
 os=$(uname -s | tr '[:upper:]' '[:lower:]'); arch=$(uname -m)
 out="campaign-intelligence-${os}-${arch}.tar.gz"
 tar -C dist -czf "$out" campaign-intelligence

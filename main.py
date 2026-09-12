@@ -12,7 +12,7 @@ import argparse
 import os
 
 
-def main() -> None:
+def main() -> int:
     p = argparse.ArgumentParser(prog="campaign-intelligence")
     sub = p.add_subparsers(dest="cmd")
 
@@ -22,6 +22,8 @@ def main() -> None:
     s.add_argument("--embed", default=None, choices=["ollama", "hash", "voyage"])
 
     sub.add_parser("stdio", help="run over stdio for a local Claude Desktop connector")
+
+    sub.add_parser("check-weights", help="report whether the CLIP weights resolved (exit 1 if not)")
 
     c = sub.add_parser("configure-desktop", help="add this server to Claude Desktop's config (merges, backs up)")
     c.add_argument("--http", metavar="URL", default=None,
@@ -50,10 +52,23 @@ def main() -> None:
         # binary's own entry point did not.
         clip_embed.warm_up()
         mcp.run(transport="stdio")
+    elif cmd == "check-weights":
+        # Exists so the build can verify the PACKAGED product rather than the source tree:
+        # CI extracts the archive and runs this, which exercises app_dir() under a frozen
+        # binary and the real install layout. Also what the post-install self-test calls.
+        import clip_embed
+        status = clip_embed.weights_status()
+        print(f"source: {status.source}")
+        print(f"path:   {status.path or '(not a local file)'}")
+        print(f"ok:     {status.ok}")
+        if not status.ok:
+            print(f"{status.reason} {status.remedy}")
+            return 1
     elif cmd == "configure-desktop":
         _configure_desktop(http_url=args.http)
     else:
         p.print_help()
+    return 0
 
 
 def _desktop_config_path():
@@ -104,4 +119,4 @@ def _configure_desktop(http_url=None):
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

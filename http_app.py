@@ -97,7 +97,7 @@ def main():
     config.ensure_dirs()
     store.init_db()
     # Load the CLIP model now, not on the first tool call — a live MCP request over a
-    # tunnel is the wrong place for a ~350MB first-time download (risks the client's
+    # tunnel is the wrong place for a first-time model load (risks the client's
     # tool-call timeout; review flagged this).
     clip_embed.warm_up()
     uvicorn.run(app, host=config.HTTP_HOST, port=config.HTTP_PORT)

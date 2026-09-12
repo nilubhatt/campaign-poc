@@ -7,7 +7,8 @@
 #     resolvable at runtime, or semantic search silently drops to the pure-Python fallback.
 #   * uvicorn / mcp / starlette / anyio pull in submodules PyInstaller's static analysis misses.
 #   * torch/open_clip (§6.6 CLIP layer) — a deliberate, confirmed size tradeoff (~150-250MB
-#     of deps + a ~350MB model download on first use, see docs/PRODUCTION-ROADMAP.md §6.6).
+#     of deps + a 605MB checkpoint shipped in the installer payload, see
+#     docs/PRODUCTION-ROADMAP.md §6.6 and docs/PRODUCT-REVIEW-PLAN.md item 1.2).
 #     NOT excluded: an earlier version of this spec excluded torch to keep the bundle small,
 #     predating CLIP being an actual dependency — that would have silently broken
 #     find_similar_images/upload_image_asset's CLIP path in every packaged build (review

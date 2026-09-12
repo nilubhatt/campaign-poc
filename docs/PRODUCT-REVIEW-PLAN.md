@@ -51,14 +51,36 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       Empirically verified by the adversarial reviewer: with a local path, loading makes
       **zero** network calls and yields vectors bit-identical to the tag, while the tag path
       issues live requests even with a warm cache.
-- [ ] **1.2 Bundle the weights in the installer payload** (defect 01, ship-route A). CI
-      downloads the weights once, verifies SHA-256, ships them in the Windows/macOS/Linux
-      payloads; the app **auto-discovers** them with nothing configured (the acceptance
-      criterion is zero egress on a clean machine, so the default path must work untouched).
-      Bundle next to the executable, *outside* `_internal`, resolved via `sys.executable`
-      when frozen — not `__file__`. When neither bundled nor configured weights exist, say
-      so; never silently fall back to a network fetch. fp16 to halve size if ranking
-      accuracy holds. Rewrite README's "one-time ~350MB download on first use" here.
+- [x] **1.2 Bundle the weights in the installer payload** (defect 01, ship-route A).
+      `scripts/fetch_weights.py` fetches the checkpoint pinned to an immutable HF commit,
+      verifies SHA-256, and writes a `.sha256` sidecar; CI, `build.sh` and `build.ps1` all
+      stage it into `<bundle>/models/`. The app auto-discovers it at `config.app_dir() /
+      "models"` — beside the executable, outside `_internal`, from `sys.executable` when
+      frozen (symlink-safe, covered by a test since the Linux installer puts a symlink on
+      PATH). Resolution order is env → bundled → tag.
+      **An installed copy with no weights is now an error, not a network fallback** — both
+      reviewers independently caught that the first version contradicted this plan's own
+      rule and would have recreated defects 01/03 verbatim on the customer's machine while
+      reporting itself healthy. Source checkouts still resolve the tag.
+      CI's verification now unpacks the **shipped archive** and runs the frozen binary's new
+      `check-weights` subcommand (which item 4.1's post-install self-test also calls) — the
+      first version overrode `BUNDLED_WEIGHTS_DIR` on the source tree and proved nothing
+      about packaging. `installer/linux/install.sh` verifies the sidecar after copying, so a
+      truncated copy fails the install instead of surfacing later inside a tool call.
+      Inno keeps the checkpoint out of the solid LZMA2 stream (`nocompression solidbreak`) —
+      605MB of near-random tensor data compresses ~0% and costs minutes.
+      Verified: bundled weights load and embed with the network hard-blocked; a truncated
+      copy fails the sidecar check; an installed copy with weights removed reports
+      `source: missing` with a reinstall remedy. Asset sizes land ~830-950MB, clear of the
+      2GB release cap that bit v0.2.0/v0.2.1.
+- [ ] **1.2b Halve the payload, and stop depending on huggingface.co at build time.**
+      Two changes that belong together because both move the hash/pin: convert the
+      checkpoint to **fp16** (~300MB, the review's suggestion — gated on a measured check
+      that ranking similarity holds, not assumed), and **mirror it as a release asset on
+      this repo** so a release build does not depend on the Hub at all. Deferred from 1.2
+      deliberately: the air-gap requirement is met at fp32, and doing this once with the
+      mirror avoids churning the pinned hash twice. Customer-facing cost of waiting is a
+      ~780MB `Setup.exe` through a corporate proxy with AV inspection.
 - [ ] **1.3 No Hub dependency at runtime** (defect 03). Verified, not assumed: with weights
       present locally, assert **zero** network calls (socket/hf_hub blocked in the test) and
       that path-loaded vectors match tag-loaded ones — the preprocess config is identical
@@ -99,11 +121,25 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 - [ ] **3.3 Shipped scripts must be encoding-safe** (defect 11). Any `.ps1` ASCII-only or
       UTF-8 **with** BOM, asserted in CI; audit the macOS/Linux shell scripts for the
       analogous trap rather than assuming it is Windows-only.
+      **Already confirmed present while working item 1.2** — `run.ps1` is BOM-less and
+      contains em dashes, including **line 42 inside a double-quoted string**
+      (`Write-Host "Ollama not found — downloading..."`), which is precisely the reported
+      failure: PowerShell 5.1 decodes it as Windows-1252, the third byte becomes a closing
+      curly quote, the string terminates mid-sentence and every brace after it mismatches.
+      `installer/windows/campaign-intelligence.iss:1` also has one (in a comment, so
+      harmless, but it should not survive the CI check either). `build.ps1` is clean.
 
 ## Phase 4 — Installer acceptance criteria
 
 - [ ] **4.1 Post-install self-test runs `health_check`** and a non-green result blocks the
-      success screen, naming the failing component — all three platforms.
+      success screen, naming the failing component — all three platforms. The binary's
+      `check-weights` subcommand (added in 1.2) is the seam; Linux already verifies the
+      weights sidecar at install, so what remains is Windows/macOS parity and widening it
+      from weights to every component once 2.3 exists.
+      **Ownership note:** "install fails loudly if weights are absent or corrupt" is
+      delivered by 1.2 (CI-side + Linux installer) and completed here (all platforms,
+      blocking the success screen) — 1.3 covers the zero-egress *proof*, not the install
+      gate.
 - [ ] **4.2 Zero-egress install verified** on a host with egress disabled (actually tested,
       not "degrades gracefully").
 - [ ] **4.3 Ollama verified at install** to the same standard as the vision model — daemon

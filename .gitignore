@@ -7,3 +7,5 @@ campaign-poc-data/
 build/
 dist/
 *.spec.bak
+.weights-cache/
+/models/
