@@ -745,6 +745,42 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
 
 @mcp.tool()
 @_catch_value_errors
+def diff_campaigns(earlier: str, later: str) -> dict:
+    """What changed between two versions of the same brief — which corrections were taken.
+
+    The question a marketer has when v2 arrives, and the one thing here that was previously
+    done by hand. Computed from the two versions' EVALUATION findings, not from their decks:
+
+      `adopted`           a finding the later judgment explicitly resolved.
+      `ignored`           a finding the later judgment raised again.
+      `newly_introduced`  a problem only the later version has.
+      `no_longer_raised`  neither resolved nor repeated — read the caveat before saying
+                          anything about it. It was either fixed without being recorded or
+                          not looked at the second time, and the record cannot tell which.
+                          Do NOT report it as adopted.
+      `carried_stale`     a record the earlier judgment cited that has since been replaced.
+
+    Everything carries `basis: "computed"`, so you can say it as fact. When `comparable` is
+    false a version has never been evaluated, there is nothing to compute, and
+    `why_not_comparable` says which — do not fill the gap by reading the decks, because
+    "you ignored my correction" is an accusation and that would be a judgment presented as
+    arithmetic.
+
+    The argument order decides what "adopted" means. If supersession or creation order says
+    you have them the wrong way round it is corrected and `arguments_reordered` is true; say
+    so, rather than letting the user think they asked the question they did not.
+
+    This gets better as judgments accumulate: `resolved` entries carrying a `finding_id`
+    (see save_evaluation) are what turn "probably fixed" into `adopted`."""
+    conn = store.connect()
+    try:
+        return core.diff_campaigns(conn, earlier=earlier, later=later)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
 def gaps() -> dict:
     """What this library is missing, ranked, with what would close each one.
 

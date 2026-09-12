@@ -936,9 +936,38 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       one gap in it and an empty library is naturally silent on every later branch. Both now
       have tests that bite, and `test_every_gap_says_what_would_close_it` was reaching one
       code of three.
-- [ ] **5.4 (D) `diff_campaigns(a, b)`** — adopted / ignored / newly-introduced /
+- [x] **5.4 (D) `diff_campaigns(a, b)`** — adopted / ignored / newly-introduced /
       carried-stale, computed against the earlier version's evaluation findings. Flagged by
       the reviewer as the highest-value feature not already on the list.
+      **Done, and "computed against the earlier version's evaluation findings" is what makes
+      it a computation rather than a second judgment.** Once both versions have been
+      evaluated the comparison is between two sets of findings, and every bucket is a fact
+      about the record rather than an opinion about the decks. Everything carries
+      `basis: "computed"`, so Claude can say it as fact.
+      **A fifth bucket, because the review's four collapse a distinction that matters.**
+      `no_longer_raised` — neither resolved nor raised again — was folded into "adopted",
+      and it is not the same thing: the finding was either fixed without being recorded or
+      not looked at the second time, and the record cannot tell which. Counting it as adopted
+      would credit a brief for work nobody verified, on the one surface whose whole purpose
+      is to say whether corrections were taken. It is reported with that caveat attached.
+      **Matching is deliberately generous.** Two reviews of one defect rarely word it
+      identically, so exact-text matching would report every ignored correction as a new
+      one — the most flattering error available. Category agreement is a hint rather than a
+      gate, since the same defect gets filed differently by two reviewers.
+      **Nothing is guessed.** Where a version has never been evaluated, `comparable` is
+      false and `why_not_comparable` says which side is missing: "you ignored my correction"
+      is an accusation, and inferring it from deck text would be a judgment dressed as
+      arithmetic. The tool offers `prepare_evaluation` on the unjudged version instead.
+      **The argument order is corrected rather than trusted.** Which version is earlier
+      decides what "adopted" means, so having them the wrong way round inverts the entire
+      answer; supersession states it outright and creation order is the fallback, with
+      `arguments_reordered` returned so the user is told.
+      **It gets better as judgments accumulate.** `resolved` entries carrying a `finding_id`
+      — the mechanism §2.4 built for precisely this — are what turn "probably fixed" into
+      `adopted`. The feature 2.4 was accused of over-engineering is the one this depends on.
+      Verified end to end over the protocol on a three-version Colombia chain: 1 adopted, 1
+      ignored, 1 newly introduced, 1 no-longer-raised, and a `carried_stale` citation to a
+      Peru record that had been superseded in between.
 - [ ] **5.5 (E) Coverage view** — market × collection × stage, counts and evidence quality.
 - [ ] **5.6 (F) Guided first run** on an empty or thin library.
 

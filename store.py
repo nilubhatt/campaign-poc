@@ -1104,6 +1104,18 @@ def campaigns_with_actual_metrics(conn) -> set:
         "SELECT DISTINCT campaign_id FROM metrics WHERE metric_type = 'actual'").fetchall()}
 
 
+def latest_evaluation_for_campaign(conn, campaign_id: str):
+    """The most recent judgment of this campaign, or None.
+
+    A version can be judged more than once — that is what a revised evaluation is — and a
+    comparison against an older one reports corrections that were already dealt with (§5.4).
+    """
+    row = conn.execute(
+        "SELECT id FROM evaluations WHERE campaign_id = ? ORDER BY created_at DESC, "
+        "rowid DESC LIMIT 1", (campaign_id,)).fetchone()
+    return get_evaluation(conn, row["id"]) if row else None
+
+
 def unreconciled_evaluation_id(conn, campaign_id: str) -> Optional[str]:
     """The most recent judgment about this campaign that has never been compared with its
     results, or None. Used to decide whether recording results is worth offering to close a
