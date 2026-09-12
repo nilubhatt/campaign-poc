@@ -723,6 +723,38 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       preview *before* validating, so a marketer was shown `metric_type: "target"` as though
       it were about to be saved and the rejection arrived only after they agreed — and a
       normalised value was hidden from the one screen that exists for them to correct it.
+      **From design review.** The same defect was still in the flagship flow: `upload_campaign`
+      previewed the word the marketer typed while a different value went into the database,
+      and the default status was computed from the RAW `record_type` while the write computed
+      it from the normalised one — so `record_type="Campaign"` previewed `status: None` and
+      committed `concluded`. The user agreed to one record and got another. Both preview and
+      write now return `normalised: [{field, given, stored_as}]`, and the note tells Claude to
+      say it: silent normalisation is acceptable only if every write says what it stored,
+      because a guess nobody hears about is one nobody can correct. Shape changes are lossless
+      and stay silent — "recording this as in flight" said to somebody who typed `in_flight`
+      is the noise that stops the real ones being read.
+      `bulk_import_metrics` was the one path still using the old strict check — the same
+      vocabulary with two behaviours depending on how many rows you sent, on the path where a
+      spreadsheet column headed "Results" or "Target" is most likely to arrive.
+      Two synonyms were guessing meaning rather than shape and are gone: `past → concluded`
+      is temporal, not lifecycle (a cancelled campaign is also past, and filing it as
+      concluded counts it in every later "what worked" question), and `confirmed → verified`
+      collided with the hard definition `verified` carries here — backed by a real `actual`
+      metric row. "The client confirmed it worked" is a *stated* claim; the write path would
+      have caught it, but the filter path has no such guard, so a query for "confirmed" would
+      have silently narrowed to measured evidence.
+      `cancelled` was getting *"Did you mean 'concluded'?"* — difflib measures string
+      similarity, not meaning, and that suggestion would file an abandoned campaign as a
+      finished one. It, `paused`, `on hold` and `killed` now get an explanation instead.
+      **And the shared prompt was teaching the word the server refuses:** `add_metrics`'s
+      docstring said "'predicted' (a forecast/**target** set before launch)", so Claude would
+      map "our target is 2% CTR" to `predicted` on that authority and never reach the teaching
+      error at all.
+      **The forgiving/strict split is now written down** rather than left looking like where
+      the work stopped: vocabularies a *marketer* authors are forgiving; vocabularies the
+      *model* authors (verdict, severity, kind, basis, layer) stay strict, because §2.4's
+      lesson was that an easy exit in an error message gets taken, and auto-mapping "minor"
+      to `note` would hand the model a severity downgrade path.
 - [ ] **5.2 (B) `next_actions`** on every result — `{label, tool, prefilled_args}`.
 - [ ] **5.3 (C) `gaps()`** + a standing line on every evaluation naming the single most
       valuable missing input for that judgment.

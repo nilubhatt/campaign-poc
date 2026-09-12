@@ -45,6 +45,26 @@ def canonical_shape(value: str) -> str:
     return _SHAPE.sub("_", value.strip().lower()).strip("_")
 
 
+# ── what is forgiving, and what is not ─────────────────────────────────────
+#
+# Only the vocabularies a MARKETER authors are forgiving: record_type, status, tag source,
+# metric_type. Those words arrive from a person in conversation, or from a spreadsheet column
+# header, and rejecting "live" because the column is called `in_flight` is the defect this
+# item exists to fix.
+#
+# The vocabularies the MODEL authors stay strict: verdict, severity, finding kind, basis,
+# precedent layer. A `Literal` retry costs the model nothing, and §2.4's lesson was that any
+# easy exit offered in an error message gets taken — auto-mapping "minor" to `note` would be
+# handing it a severity downgrade path, which is precisely what the golden set in §7.7 exists
+# to detect.
+#
+# The tables below are hard-coded today. §12.1/12.2 move `STATUS_SYNONYMS` into the bundled
+# rulebook with a customer overlay, because a stage name is customer vocabulary. The others
+# stay product-owned: `verified`/`stated` and `actual`/`predicted` are this library's
+# epistemics, and a customer redefining "confirmed" as measured would corrupt every judgment
+# that weighs verified evidence more heavily. `normalise()` already takes `synonyms=` as a
+# parameter, so that change touches store.py's two wrappers and nothing else.
+
 # ── vocabulary. Explicit, so a person can read and disagree with it ─────────
 
 TAG_SOURCE_SYNONYMS = {
@@ -58,11 +78,15 @@ TAG_SOURCE_SYNONYMS = {
     "anecdotal": "stated",
     "impression": "stated",
     # The other side: a claim with measurement behind it.
+    # Measurement words only. `verified` has a hard definition in this library — backed by
+    # a metric_type='actual' row, enforced on write — so "confirmed" does NOT belong here:
+    # "the client confirmed it worked" is a stated claim. The write side would catch that
+    # when no metrics exist; the filter side has no such guard, so a query for "confirmed"
+    # would have silently narrowed to measured evidence.
     "measured": "verified",
     "from_metrics": "verified",
     "backed_by_data": "verified",
     "data_backed": "verified",
-    "confirmed": "verified",
 }
 
 STATUS_SYNONYMS = {
@@ -83,7 +107,8 @@ STATUS_SYNONYMS = {
     "complete": "concluded",
     "completed": "concluded",
     "ended": "concluded",
-    "past": "concluded",
+    # NOT "past": temporal, not lifecycle. A cancelled campaign is also past, and filing it
+    # as concluded puts it into every later "what worked" query as though it had run.
 }
 
 RECORD_TYPE_SYNONYMS = {
@@ -113,11 +138,32 @@ _EXPLAIN = {
         "A target is what you want to happen; 'predicted' is what this library expects to "
         "happen, and reconciliation later compares predictions against actuals. Recording a "
         "target as a prediction would score the library against somebody's ambition. If it "
-        "is a goal, put it in the campaign's detail; if it is a forecast, use 'predicted'."
+        "is genuinely a forecast, use 'predicted'. If it is a goal, it belongs in the "
+        "campaign's detail via update_campaign — which REPLACES detail, so read the current "
+        "one first and send it back with the target added."
     ),
     ("metric_type", "goal"): (
         "A goal is what you want to happen; 'predicted' is what this library expects to "
-        "happen. Put the goal in the campaign's detail rather than in a metric."
+        "happen. A goal belongs in the campaign's detail via update_campaign — which "
+        "REPLACES detail, so read the current one first and send it back with the goal "
+        "added."
+    ),
+    ("status", "cancelled"): (
+        "This library has no status for a campaign that was called off. 'concluded' means it "
+        "ran to the end, so filing a cancelled campaign there would count it in every later "
+        "'what worked' question. Leave the status unset and say so in the campaign's detail."
+    ),
+    ("status", "killed"): (
+        "This library has no status for a campaign that was called off. Leave the status "
+        "unset and say so in the campaign's detail."
+    ),
+    ("status", "paused"): (
+        "This library has no status for a paused campaign. 'in_flight' is the closest true "
+        "statement if it is expected to resume; if it is not, leave the status unset."
+    ),
+    ("status", "on_hold"): (
+        "This library has no status for a paused campaign. 'in_flight' is the closest true "
+        "statement if it is expected to resume; if it is not, leave the status unset."
     ),
     ("metric_type", "benchmark"): (
         "A benchmark is somebody else's number. This field records this campaign's own "

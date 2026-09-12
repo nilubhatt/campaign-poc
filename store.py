@@ -953,10 +953,18 @@ def bulk_import_metrics(conn, rows: list[dict]) -> dict:
                 errors.append({"row": i, "reason": f"row must be an object, got {type(row).__name__}"})
                 continue
 
-            metric_type = str(row.get("metric_type", "actual")).strip().lower()
-            if metric_type not in _VALID_METRIC_TYPES:
-                errors.append({"row": i, "reason": f"invalid metric_type {metric_type!r}, "
-                                                    f"must be one of {sorted(_VALID_METRIC_TYPES)}"})
+            # The same normaliser as a single write (§5.1). A spreadsheet column headed
+            # "Results" or "Target" is the single most likely place these words arrive, and
+            # this was the one path still using the old strict check — the same vocabulary
+            # with two behaviours depending on how many rows you sent.
+            try:
+                metric_type = enums.normalise(row.get("metric_type", "actual"),
+                                              field="metric_type",
+                                              valid=VALID_METRIC_TYPES,
+                                              synonyms=enums.METRIC_TYPE_SYNONYMS,
+                                              allow_none=False)
+            except ValueError as exc:
+                errors.append({"row": i, "reason": str(exc)})
                 continue
 
             cid = row.get("campaign_id")

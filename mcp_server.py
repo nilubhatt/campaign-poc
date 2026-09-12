@@ -397,9 +397,13 @@ def add_metrics(campaign_id: str, detail: Optional[str] = None,
 
     detail is freeform (CTR, ROI, conversions, qualitative learnings, or just what the user
     said); structured is an optional machine-readable object for numbers you extracted.
-    metric_type is 'actual' (post-conclusion results, the default) or 'predicted' (a
-    forecast/target set before launch) — reconcile_evaluation only pulls 'actual' metrics
-    automatically."""
+    metric_type is 'actual' (post-conclusion results, the default) or 'predicted' (this
+    library's own forecast, which reconciliation later scores against the actuals) —
+    reconcile_evaluation only pulls 'actual' metrics automatically.
+
+    A TARGET is neither, and is rejected on purpose: a target is what somebody wants to
+    happen, and recording it as a prediction would score this library against their ambition.
+    A goal belongs in the campaign's `detail`."""
     conn = store.connect()
     try:
         return core.add_metrics(conn, campaign_id, detail=detail, structured=structured,

@@ -65,6 +65,24 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
     once they've reviewed/edited it. Default is True (write immediately) for backward
     compatibility with direct/programmatic callers that already know what they want stored.
     """
+    # Normalise BEFORE the preview is built. The preview is the correction screen — the only
+    # moment a marketer can catch a synonym that guessed wrong — and it was showing the word
+    # they typed while a different value went into the database. Worse, the default status
+    # below was computed from the RAW record_type while store computed it from the normalised
+    # one, so record_type="Campaign" previewed `status: None` and committed `concluded`.
+    given_record_type, given_status = record_type, status
+    record_type = store._normalise_record_type(record_type)
+    status = store._normalise_status(status)
+    # Shape changes are lossless and not worth saying; a SYNONYM is a guess, and a guess
+    # nobody hears about is one nobody can correct.
+    changed = [
+        {"field": field, "given": given, "stored_as": stored}
+        for field, given, stored in (("record_type", given_record_type, record_type),
+                                     ("status", given_status, status))
+        if given is not None and stored is not None
+        and enums.canonical_shape(str(given)) != enums.canonical_shape(str(stored))
+    ]
+
     if not confirm:
         # Normalize (and validate — raise the same errors confirm=True would) so the
         # preview shows what would ACTUALLY be stored, not the raw input. Reviewed: an
@@ -80,8 +98,12 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
             "tags": normalized_tags, "region": region, "market": market,
             "markets": normalized_markets,
             "collection": collection, "supersedes": supersedes, "detail": detail,
+            "normalised": changed,
             "note": "Nothing has been stored yet. Show this to the user for confirmation or "
-                    "edits, then call upload_campaign again with confirm=True to save it.",
+                    "edits, then call upload_campaign again with confirm=True to save it."
+                    + (" Say what was interpreted: " + "; ".join(
+                        f"{c['field']} {c['given']!r} recorded as {c['stored_as']!r}"
+                        for c in changed) if changed else ""),
         }
 
     warnings: list[dict] = []
@@ -332,6 +354,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         "images_total": len(image_assets), "images_embedded": images_embedded,
         "commentary_found": len(commentary),
         "commentary_checked": commentary_checked,
+        "normalised": changed,
         "warnings": notices.collapse(warnings),
     }
 

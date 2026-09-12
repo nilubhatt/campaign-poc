@@ -202,3 +202,136 @@ def test_a_preview_shows_the_value_it_would_actually_store(conn):
 
 
 import core  # noqa: E402  (used by the two tests above)
+
+
+# ══ design review of 5.1 ═════════════════════════════════════════════════════
+
+def test_the_preview_shows_what_will_actually_be_stored(conn):
+    """The preview IS the correction screen — it is the only moment a marketer can catch a
+    synonym that guessed wrong. It was showing the value they typed, so "live" looked like
+    what would be recorded and `in_flight` went in silently. The same defect was fixed for
+    add_metrics in this item and left in the flagship flow."""
+    preview = core.ingest_campaign(conn, title="Colombia", detail="d",
+                                   record_type="Campaign", status="live", confirm=False)
+
+    assert preview["record_type"] == "campaign"
+    assert preview["status"] == "in_flight"
+
+
+def test_the_preview_applies_the_same_default_as_the_write(conn):
+    """Worse than a cosmetic mismatch: the default status was computed against the RAW
+    record_type while the write computed it against the normalised one, so
+    record_type="Campaign" previewed `status: None` and committed `concluded`. The user
+    agreed to one record and got another."""
+    preview = core.ingest_campaign(conn, title="Colombia", detail="d",
+                                   record_type="Campaign", confirm=False)
+    stored = store.get_campaign(conn, core.ingest_campaign(
+        conn, title="Colombia", detail="d", record_type="Campaign",
+        confirm=True)["campaign_id"])
+
+    assert preview["status"] == stored["status"]
+
+
+def test_a_write_says_when_it_changed_what_you_gave_it(conn):
+    """Silent normalisation is only acceptable if every write says what it stored. Shape
+    changes are lossless and not worth mentioning; a SYNONYM is a guess, and a guess the
+    marketer never hears about is one they can never correct."""
+    result = core.ingest_campaign(conn, title="Colombia", detail="d", status="live",
+                                  confirm=True)
+
+    changed = {n["field"]: n for n in result["normalised"]}
+    assert changed["status"]["given"] == "live"
+    assert changed["status"]["stored_as"] == "in_flight"
+
+
+def test_a_write_does_not_announce_a_change_it_did_not_make(conn):
+    """"Recording this as in flight" said about somebody who typed `in_flight` is noise, and
+    noise is how the real ones stop being read."""
+    result = core.ingest_campaign(conn, title="Colombia", detail="d", status="in_flight",
+                                  confirm=True)
+
+    assert result.get("normalised") == []
+
+
+def test_bulk_import_is_as_forgiving_as_a_single_write(conn):
+    """A spreadsheet column headed "Results" is the single most likely place these words
+    arrive, and it was the one path still using the old strict check — the same vocabulary
+    with two behaviours."""
+    cid = store.insert_campaign(conn, title="Colombia")
+
+    result = store.bulk_import_metrics(conn, [
+        {"campaign_id": cid, "metric_type": "Results", "detail": "CTR 1.2%"}])
+
+    assert result["imported"] == 1
+    assert store.get_campaign(conn, cid)["metrics"][0]["metric_type"] == "actual"
+
+
+def test_bulk_import_teaches_the_same_way_too(conn):
+    cid = store.insert_campaign(conn, title="Colombia")
+
+    result = store.bulk_import_metrics(conn, [
+        {"campaign_id": cid, "metric_type": "target", "detail": "CTR 2%"}])
+
+    assert result["imported"] == 0
+    assert "predicted" in result["errors"][0]["reason"]
+
+
+def test_past_is_not_treated_as_concluded():
+    """Temporal, not lifecycle: a cancelled campaign is also "past". This was the wrong-guess
+    case the echo above exists to catch, baked into the table as a certainty."""
+    with pytest.raises(ValueError):
+        enums.normalise("past", field="status", valid=store.VALID_STATUSES,
+                        synonyms=enums.STATUS_SYNONYMS)
+
+
+def test_confirmed_is_not_treated_as_verified():
+    """`verified` has a hard definition here — backed by a metric_type='actual' row, enforced
+    on write. "The client confirmed it worked" is a stated claim. The write side would have
+    caught it when no metrics existed; the FILTER side has no such guard, so a query for
+    "confirmed" silently narrowed to measured evidence."""
+    with pytest.raises(ValueError):
+        enums.normalise("confirmed", field="tag 'source'", valid=store.VALID_TAG_SOURCES,
+                        synonyms=enums.TAG_SOURCE_SYNONYMS)
+
+
+def test_a_status_the_library_has_no_home_for_is_not_guessed_at():
+    """difflib measures string similarity, not meaning: "cancelled" is three edits from
+    "concluded" and the opposite of it. Suggesting it would file an abandoned campaign as a
+    finished one, and every later "what worked" query would count it."""
+    with pytest.raises(ValueError) as exc:
+        enums.normalise("cancelled", field="status", valid=store.VALID_STATUSES,
+                        synonyms=enums.STATUS_SYNONYMS)
+
+    message = str(exc.value)
+    assert "Did you mean 'concluded'" not in message
+    assert "cancel" in message.lower()
+
+
+def test_the_target_error_names_a_tool_and_says_what_it_does(conn):
+    """"Put it in the campaign's detail" is a destination Claude cannot act on without
+    knowing which tool, and update_campaign REPLACES detail rather than appending — so the
+    obvious reading of that advice deletes the brief."""
+    with pytest.raises(ValueError) as exc:
+        enums.normalise("target", field="metric_type", valid=store.VALID_METRIC_TYPES,
+                        synonyms=enums.METRIC_TYPE_SYNONYMS)
+
+    message = str(exc.value)
+    assert "update_campaign" in message
+    assert "replace" in message.lower()
+
+
+def test_the_docstring_does_not_teach_the_word_the_server_refuses():
+    """The shared prompt said "'predicted' (a forecast/target set before launch)". Claude
+    would map "our target is 2% CTR" to `predicted` on that authority and never reach the
+    teaching error — the string-literal drift pattern, where the prose outlives the rule it
+    described."""
+    import re
+    from pathlib import Path
+
+    source = Path("mcp_server.py").read_text(encoding="utf-8")
+    body = source[source.index("def add_metrics"):]
+    docstring = body[:body.index('"""', body.index('"""') + 3)]
+
+    assert not re.search(r"forecast/target|target set before", docstring), (
+        "the docstring still equates a target with a prediction"
+    )
