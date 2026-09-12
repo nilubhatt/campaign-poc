@@ -466,6 +466,38 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       working model is this record's problem (`image_not_embedded`). Telling a marketer to
       "ask IT to run setup" over a single corrupt image would be the same mistake pointing
       the other way.
+      **From review, in this item.** The first version put three readers' text into one
+      `remedy`, so a marketer was read Claude's own stage directions — "Tell the user that,
+      and offer to..." — because the docstring said to say the remedy verbatim. One field per
+      reader now: `affects` (what the user loses), `remedy` (what a person does), `next_step`
+      (what Claude does, never read aloud), `detail` (support). `scope` was added alongside
+      severity, because the marketer's real question is not how bad it is but whether it is
+      theirs to fix, IT's, or already handled — and severity alone had put a blank title in
+      the same class as a missing model.
+      `collapse` folded on the code alone, which lost information twice: two
+      `indexing_incomplete` entries — one about images, one about the deck's sections —
+      became the image one with a count of 2, on a response whose own counts said no section
+      was indexed; and four chunks failing for two reasons reported one reason and a count of
+      four. It now folds on the whole user-facing message and appends distinct causes, and
+      sorts worst-first so ordering is a property of the response rather than an instruction
+      in one tool's docstring.
+      Three remedies made claims the response contradicted. "Reuse checks will miss this
+      one" was said while flagging a reuse at hamming distance 0 — perceptual hashing does
+      not touch the vision model (`health_check` was making the same false claim, found
+      transitively, and is fixed too). "Ask IT to run setup" named a gesture that exists
+      nowhere: there is no setup script, and nothing in `run.sh` or `run.ps1` fetches the
+      weights — `WeightsResolution` already computes the right remedy per cause and the
+      registry was discarding it. And a PNG sent alongside `deck_text` was told "nothing in
+      it is searchable", on a fully searchable record, with advice to convert a PNG to PDF.
+      A dead text embedder was reported once per chunk, each line advising `finish_indexing`
+      — which then fails every item and says calling again will not help. `embedding` now
+      raises a distinguishable `Unavailable` for transport failures (a type, not a message
+      match, because rewording a message must not be a breaking change), and the text path
+      makes the same outage-vs-item split the image path already had.
+      `find_similar_images` and `finish_indexing` were still handing raw exception text to a
+      marketer — the sibling tools of the one defect 09 was reported against. Both now speak
+      the shape. The contract itself moved from `upload_campaign`'s docstring to the server
+      `instructions`, so it reaches every tool rather than only the one somebody read first.
       **Verified on a simulation of the reviewer's own machine** — weights path invalid,
       Hugging Face cache empty, `HF_HUB_OFFLINE=1` — the upload now returns "Visual search
       is offline, so image similarity and reuse checks will miss this one. Ask IT to run

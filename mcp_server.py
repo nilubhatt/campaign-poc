@@ -26,6 +26,21 @@ INSTRUCTIONS = f"""Campaign Intelligence {config.VERSION_FULL} — a marketing t
 campaign library: past campaigns, what they achieved, and judgments about new proposals
 weighed against that record.
 
+WARNINGS. Several tools return `warnings`, and each entry has one field per reader:
+  `affects`   what the user loses. Say this.
+  `remedy`    what a PERSON does about it. Say this verbatim when it is not "nothing".
+  `next_step` what YOU do about it. Act on it; never read it out.
+  `scope`     who has to act: `machine` (an administrator, once, for everyone), `record`
+              (the person who sent this), `call` (nobody — you finish it). On `machine`, the
+              remedy is addressed to whoever installed this and may name a setting or a
+              file — pass it on as something for them to hand to that person, rather than
+              as an instruction to the marketer in front of you.
+  `severity`  `blocked`, `degraded`, `note`. The list is ordered worst first, so lead with
+              the first entry.
+  `detail`    engineering text. Only for when they ask why, or need to send it to support.
+  `count`     how many items it happened to, when more than one.
+Never paraphrase `detail` at a user. It is the field defect 09 was about.
+
 If a parameter documented in a tool's description is missing from the schema you hold, the
 host has cached an older one: call health_check, compare its `tools` list against your
 schema, and tell the user to fully QUIT and reopen the app — closing the window leaves this
@@ -231,13 +246,8 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
     chunks_total/chunks_embedded (partial embedding failures are reported in warnings, not
     silently), and images_checked/image_assets (see above).
 
-    Every warning is `{code, severity, remedy, detail}`. Say the REMEDY — it is written for
-    the person you are talking to and says what to do. `detail` is the engineering text, for
-    when they ask why or need to send it to IT; reading it out is how "Failed to download
-    weights for tag openai" reaches a marketer. `severity` orders them: `blocked` means a
-    capability is off until somebody acts and leads whatever you say; `degraded` means this
-    record is incomplete but the product works; `note` is worth one mention. If several
-    share a `code` they arrive folded into one entry with a `count`."""
+    `warnings` follows the shape set out in this server's instructions: say `affects` and
+    `remedy`, act on `next_step`, never read `detail` aloud."""
     conn = store.connect()
     try:
         return core.ingest_campaign(conn, title=title, detail=detail, deck_text=deck_text,

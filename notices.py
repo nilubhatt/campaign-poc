@@ -1,5 +1,5 @@
 """
-Warnings with a shape, for three audiences at once (§3.1, defect 09).
+Warnings with a shape, one field per reader (§3.1, defect 09).
 
 The reviewer was generous about the engineering and exact about the gap: "The
 download-failure warning was precise enough to diagnose from — genuinely good engineering
@@ -8,16 +8,21 @@ openai' carries no action at all." The asked-for fix was a stable `code`, a one-
 `remedy`, and the raw `detail` — "so the surface can say 'Visual search is offline — ask IT
 to run setup' while the detail stays available for support."
 
-So every warning now serves all three readers without any of them reading the others' text:
+The first version of this file put three readers' text into one `remedy`, which review
+caught: a marketer was being read Claude's own stage directions ("Tell the user that, and
+offer to..."). One field per reader:
 
-  code      a stable identifier. The part that must survive a reworded message, because
-            support tooling and the installer's own checks key off it.
-  remedy    one line, written for somebody who does not know what a weight is, and phrased
-            as what to do rather than what happened.
-  detail    the original engineering text, kept rather than replaced.
-  severity  whether anybody has to act. "Visual search is offline" and "one image out of
-            forty was skipped" are not the same news, and a flat list of strings made every
-            surface treat them identically.
+  code       a stable identifier. The part that must survive a reworded message, because
+             support tooling and the installer's checks key off it.
+  scope      WHO has to act — `machine` (an administrator, once, for everyone), `record`
+             (the person who sent this), `call` (nobody; Claude finishes it). This is the
+             marketer's actual question, and it is not the same axis as how bad it is.
+  severity   how much it costs: `blocked`, `degraded`, `note`.
+  affects    the consequence, in the user's terms. What they lose.
+  remedy     what a PERSON does about it. Said out loud, verbatim.
+  next_step  what CLAUDE does about it. Never read aloud. (§5.2 turns this into
+             {tool, prefilled_args}; the string is the draft of that.)
+  detail     the original engineering text, unchanged, for support.
 
 Named `notices` rather than `warnings` because the latter is a standard library module, and
 shadowing it from the project root would break any import of the real one.
@@ -26,171 +31,251 @@ from __future__ import annotations
 
 from typing import Optional
 
-# Whether the user has to do something. `blocked` means a whole capability is unavailable
-# until somebody acts; `degraded` means this record is incomplete but the product works;
-# `note` is worth saying once.
+# How much it costs. Ordered worst-first, and `collapse` sorts by it, so a surface reading
+# the list in order leads with the right one — ordering as a property of the response rather
+# than an instruction in a docstring that only one tool carried.
 SEVERITIES = ("blocked", "degraded", "note")
 
-# code -> (severity, remedy). The remedy names the consequence in the user's terms and then
-# the action — "X is off, ask IT to do Y" — never the mechanism.
-_REGISTRY: dict[str, tuple[str, str]] = {
+# Who has to act. The marketer's real question is not "how bad is this" but "is this mine to
+# fix, is it IT's, or is it already handled" — and the first version answered it only by
+# accident, through severity, which put a blank title in the same class as a missing model.
+SCOPES = ("machine", "record", "call")
+
+# code -> (severity, scope, affects, remedy, next_step)
+_REGISTRY: dict[str, tuple] = {
     # ── the review's own example ──
+    # The registry supplies no remedy text for the vision model: clip_embed.WeightsResolution
+    # already works out the right one per cause (bundled copy absent, configured path wrong,
+    # load failed), and the first version discarded that and substituted "ask IT to run
+    # setup" — naming a gesture that does not exist, since there is no setup script and
+    # nothing in run.sh or run.ps1 fetches the vision weights. The caller passes the
+    # computed one in.
     "visual_search_offline": (
-        "blocked",
-        "Visual search is offline, so image similarity and reuse checks will miss this "
-        "one. Ask IT to run setup on this machine — everything else works normally.",
+        "blocked", "machine",
+        "Visual search is off on this machine, so 'find me something that looks like this' "
+        "comes back empty. Exact-reuse detection is unaffected and still running, as is "
+        "everything to do with text.",
+        "Ask whoever installed this to restore the vision model.",
+        "Say this once, not per image. Offer finish_indexing after it is fixed — the images "
+        "are saved and do not need uploading again.",
     ),
     "text_search_offline": (
-        "blocked",
-        "Search is offline because the text model is not responding, so nothing uploaded "
-        "now will be findable. Ask IT to check that Ollama is running, then re-run "
-        "finish_indexing — no re-upload needed.",
+        "blocked", "machine",
+        "Search is off on this machine, so nothing sent now can be found afterwards. The "
+        "records themselves are saved.",
+        "Ask whoever installed this to start the local text model service.",
+        "Say this once, not per section. Do NOT offer finish_indexing until it is fixed — "
+        "it would fail on every item for the same reason.",
     ),
     # ── partial work, recoverable without re-uploading ──
     "indexing_incomplete": (
-        "degraded",
-        # Always overridden per call: this one has to name the campaign and the counts to be
-        # usable as written, and a generic version would be the "call again" advice that
-        # sent a user round an infinite loop once already.
-        "Part of this upload is not searchable yet. Run finish_indexing on the campaign to "
-        "complete it; no re-upload needed.",
+        "degraded", "call",
+        "",     # always supplied per call: it has to carry the counts to mean anything
+        "Nothing — this finishes without you.",
+        "",     # supplied per call, so it can name the campaign
     ),
     "chunk_not_embedded": (
-        "degraded",
-        "Part of this deck will not come back in searches. Run finish_indexing on the "
-        "campaign to complete it; no re-upload needed.",
+        "degraded", "call",
+        "Part of this deck will not come back in searches.",
+        "Nothing — this finishes without you.",
+        "Offer finish_indexing on the campaign; no re-upload needed.",
     ),
     "image_not_fingerprinted": (
-        "degraded",
-        "Reuse detection will miss these images, so 'have we used this before?' may answer "
-        "no when the answer is yes. Re-upload the deck if that matters for this campaign.",
+        "degraded", "record",
+        "These images are not in exact-reuse detection, so 'have we used this before?' may "
+        "answer no when the answer is yes.",
+        "If reuse matters for this campaign, send the image again — fingerprinting happens "
+        "on the way in.",
+        "",
     ),
     "image_not_embedded": (
-        "degraded",
-        "These images will not come back in visual similarity searches. If visual search is "
-        "also reported offline, fixing that and re-uploading resolves both.",
+        "degraded", "call",
+        "These images will not come back in 'looks like this' searches.",
+        "Nothing — this finishes without you.",
+        "Offer finish_indexing; the images are saved and do not need uploading again.",
     ),
     "image_not_stored": (
-        "degraded",
+        "degraded", "record",
         "An image in the deck could not be saved, so it is not searchable and not "
         "reuse-checked. The rest of the deck is unaffected.",
+        "Nothing, unless that particular image matters — in which case send it on its own.",
+        "",
     ),
     "reuse_check_failed": (
-        "degraded",
-        "This image was stored but not compared against what is already in the library, so "
-        "a reuse of it would not have been flagged. Ask for a provenance check on it "
-        "directly if that matters.",
+        "degraded", "record",
+        "This image was stored but never compared against the library, so a reuse of it "
+        "would not have been flagged.",
+        "Nothing required.",
+        "Offer check_image_provenance on it if reuse matters for this campaign.",
     ),
     "images_unreadable": (
-        "degraded",
+        "degraded", "record",
         "The images in this deck could not be read, so none of them are searchable or "
-        "reuse-checked. The deck's text is unaffected. Re-saving the file from PowerPoint "
-        "or re-exporting the PDF usually fixes it.",
+        "reuse-checked. The deck's text is unaffected.",
+        "Re-saving the file from PowerPoint, or re-exporting the PDF, usually fixes it.",
+        "",
     ),
     "commentary_unreadable": (
-        "degraded",
+        "degraded", "record",
         "Comments and speaker notes in this file could not be read, so they are not "
         "searchable. The deck itself was stored normally.",
-    ),
-    "results_may_be_incomplete": (
-        "note",
-        # Overridden per call to carry the counts, but never blank: a code with an empty
-        # remedy is one that quietly reverted to being engineer-only, which is the defect.
-        "Some records are only partly indexed, so these results may be incomplete. Offer to "
-        "run finish_indexing.",
+        "Nothing required; re-saving the file from PowerPoint usually fixes it.",
+        "",
     ),
     # ── caps: the product did what it was asked, up to a limit ──
     "images_capped": (
-        "note",
-        "This deck has more images than are checked automatically. The rest were stored "
-        "but not compared for reuse — ask for a provenance check on any specific one.",
+        # `degraded`, not a note: for a product whose job is reuse detection, "images 21 and
+        # after were never checked" is a gap in this record, not a remark.
+        "degraded", "record",
+        "This deck has more images than are checked automatically, so the later ones were "
+        "stored but never compared for reuse.",
+        "Nothing required.",
+        "Offer check_image_provenance on any specific image that matters.",
     ),
     "commentary_capped": (
-        "note",
-        "This file carries more comments than are indexed automatically; the later ones "
+        "degraded", "record",
+        "This file carries more comments than are indexed automatically, so the later ones "
         "are not searchable.",
+        "Nothing required.",
+        "",
     ),
     # ── the upload itself had nothing in it ──
     "nothing_to_embed": (
-        "blocked",
-        "There was nothing to index — no description and no readable text in the file. The "
-        "record is saved but will not come back in any search. Add a description, or upload "
-        "a file the text can be read from.",
+        # NOT `blocked`. The product is working and the record saved; the gap is in what was
+        # supplied. Ranking this above everything but a real outage had Claude leading with
+        # an IT-flavoured alarm over a typo.
+        "degraded", "record",
+        "There was nothing to index — no description, and no readable text in the file — so "
+        "the record is saved but will not come back in any search.",
+        "Add a description, or send a file the text can be read from.",
+        "Offer update_campaign with a description the user dictates.",
+    ),
+    "images_not_extractable": (
+        # Distinct from unsupported_file_type on purpose: a PNG sent alongside deck_text is
+        # a perfectly good upload whose TEXT is searchable, and the first version told that
+        # user "nothing in it is searchable" and advised converting a PNG to PDF.
+        "note", "call",
+        "This file is not a deck, so it was not searched for embedded images.",
+        "Nothing required.",
+        "",
     ),
     "unsupported_file_type": (
-        "degraded",
-        "This file type cannot be read, so nothing in it is searchable. PDF and PPTX both "
-        "work; converting it and re-uploading will fix it.",
+        "degraded", "record",
+        "The text in this file could not be read, so nothing in the file itself is "
+        "searchable.",
+        "PDF and PowerPoint both work — converting it and sending it again will fix it.",
+        "",
     ),
     "legacy_ppt": (
-        "degraded",
-        "Old .ppt files cannot be read. The file is stored, but nothing in it is "
-        "searchable — re-save it as .pptx in PowerPoint and upload that.",
+        "degraded", "record",
+        "Old .ppt files cannot be read, so the file is stored but nothing in it is "
+        "searchable.",
+        "Open it in PowerPoint, save it as .pptx, and send that instead.",
+        "",
+    ),
+    "results_may_be_incomplete": (
+        "note", "call",
+        "",     # always supplied per call: it has to carry the counts
+        "Nothing — this finishes without you.",
+        "Mention it if the answer looks thin, and offer finish_indexing.",
     ),
 }
 
 CODES = tuple(_REGISTRY)
+_FIELDS = ("severity", "scope", "affects", "remedy", "next_step")
+
+
+def _entry(code: str) -> tuple:
+    if code not in _REGISTRY:
+        raise KeyError(f"unknown warning code {code!r}; add it to notices._REGISTRY with "
+                       f"text written for somebody who does not read tracebacks")
+    return _REGISTRY[code]
 
 
 def remedy_for(code: str) -> str:
-    """The registered remedy. Raises for an unknown code on purpose: a warning with a blank
-    remedy is one that quietly reverted to being engineer-only, which is the defect."""
-    if code not in _REGISTRY:
-        raise KeyError(f"unknown warning code {code!r}; add it to notices._REGISTRY with a "
-                       f"remedy written for somebody who does not read tracebacks")
-    return _REGISTRY[code][1]
+    """The registered remedy. Raises for an unknown code on purpose: a warning with no text
+    is one that quietly reverted to being engineer-only, which is the defect."""
+    return _entry(code)[_FIELDS.index("remedy")]
 
 
-def notice(code: str, *, detail: str, remedy: Optional[str] = None,
+def notice(code: str, *, detail: str, affects: Optional[str] = None,
+           remedy: Optional[str] = None, next_step: Optional[str] = None,
            count: int = 1, **extra) -> dict:
-    """One warning. `remedy` overrides the registered line for the few that have to name a
-    specific campaign or file to be usable as written."""
-    severity, registered = _REGISTRY[code] if code in _REGISTRY else _unknown(code)
+    """One warning.
+
+    `affects`, `remedy` and `next_step` can be supplied per call — for the entries that have
+    to carry counts or name a campaign to mean anything, and for `visual_search_offline`,
+    where the component that failed already knows the right remedy and the registry does not.
+    """
+    severity, scope, reg_affects, reg_remedy, reg_next = _entry(code)
     entry = {
         "code": code,
         "severity": severity,
-        "remedy": remedy or registered,
+        "scope": scope,
+        "affects": affects or reg_affects,
+        "remedy": remedy or reg_remedy,
         "detail": detail,
     }
+    step = next_step if next_step is not None else reg_next
+    if step:
+        entry["next_step"] = step
     if count != 1:
         entry["count"] = count
     entry.update(extra)
     return entry
 
 
-def _unknown(code: str):
-    raise KeyError(f"unknown warning code {code!r}; add it to notices._REGISTRY with a "
-                   f"remedy written for somebody who does not read tracebacks")
-
-
 def collapse(entries: list[dict]) -> list[dict]:
-    """Fold repeats of the same code into one line carrying the count.
+    """Fold identical warnings, keep distinct ones, put the worst first.
 
     A deck with twenty unreadable images produced twenty near-identical lines, which is how
-    a genuinely important warning ends up scrolled past. The first occurrence's detail is
-    kept — it is the one somebody will actually read — and the count says how far it went.
+    the one warning that mattered got scrolled past. But folding on the code alone lost real
+    information twice over, both found in review: two `indexing_incomplete` entries with
+    different text — one about the images, one about the deck's sections — became the image
+    one with a count of 2, on a response whose own counts said no section had been indexed;
+    and four chunks failing for two different reasons reported one reason and a count of
+    four, so the other cause was invisible to the reader `detail` exists for.
+
+    So the fold key is the whole user-facing message, and distinct causes are appended rather
+    than dropped. `finish_indexing` already collapsed by reason; this is that trade, made
+    once, in one place.
     """
-    folded: dict[str, dict] = {}
-    order: list[str] = []
+    folded: dict[tuple, dict] = {}
+    order: list[tuple] = []
     for entry in entries:
-        code = entry["code"]
-        if code not in folded:
-            folded[code] = dict(entry)
-            folded[code].setdefault("count", 0)
-            order.append(code)
-        folded[code]["count"] += entry.get("count", 1)
+        key = (entry["code"], entry.get("affects"), entry.get("remedy"),
+               entry.get("next_step"))
+        if key not in folded:
+            kept = dict(entry)
+            kept["count"] = entry.get("count", 1)
+            kept["_reasons"] = [entry["detail"]]
+            folded[key] = kept
+            order.append(key)
+            continue
+        kept = folded[key]
+        kept["count"] += entry.get("count", 1)
+        if entry["detail"] not in kept["_reasons"]:
+            kept["_reasons"].append(entry["detail"])
+
     result = []
-    for code in order:
-        entry = folded[code]
+    for key in order:
+        entry = folded[key]
+        reasons = entry.pop("_reasons")
+        if len(reasons) > 1:
+            entry["detail"] = "; ".join(reasons[:5])
+            if len(reasons) > 5:
+                entry["detail"] += f"; and {len(reasons) - 5} more"
         if entry["count"] == 1:
             entry.pop("count")
         result.append(entry)
+
+    # Worst first. Ordering belongs to the response: the first version left it to emission
+    # order and told Claude, in one tool's docstring, to sort it out mentally.
+    result.sort(key=lambda e: SEVERITIES.index(e.get("severity", "note")))
     return result
 
 
 def leading(entries: list[dict]) -> Optional[dict]:
-    """The one to say out loud. With several warnings a surface needs to know which leads,
-    or it reads them all out — which is the version a marketer ignores."""
-    if not entries:
-        return None
-    return min(entries, key=lambda e: SEVERITIES.index(e.get("severity", "note")))
+    """The one to say out loud. `collapse` already sorts, so this is the first — kept as a
+    named call so callers do not have to know that."""
+    return entries[0] if entries else None

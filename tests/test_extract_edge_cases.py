@@ -18,7 +18,7 @@ def test_legacy_ppt_returns_no_units_with_warning():
     assert units == []
     assert warnings[0]["code"] == "legacy_ppt"
     assert "legacy .ppt" in warnings[0]["detail"]
-    assert ".pptx" in warnings[0]["remedy"], "tell them what to actually do about it"
+    assert warnings[0]["scope"] == "record", "the user has to re-save it; nobody else can"
 
 
 def test_unsupported_mime_returns_no_units_with_warning():

@@ -104,8 +104,10 @@ def test_the_budget_warning_keeps_its_instruction(tmp_path, conn, monkeypatch):
     result = core.ingest_campaign(conn, title="Cut short", deck_text=deck, confirm=True)
 
     warning = next(w for w in result["warnings"] if w["code"] == "indexing_incomplete")
-    assert "finish_indexing" in warning["remedy"]
-    assert result["campaign_id"] in warning["remedy"], "the call has to be usable as written"
+    # The call belongs in next_step now: it is an instruction to Claude, not a sentence to
+    # read out to somebody who cannot call a tool.
+    assert "finish_indexing" in warning["next_step"]
+    assert result["campaign_id"] in warning["next_step"], "usable as written"
 
 
 def test_an_extraction_warning_is_structured_too(tmp_path):
@@ -179,3 +181,239 @@ def _deck_with_images(tmp_path, n):
     deck = tmp_path / "deck.pptx"
     prs.save(str(deck))
     return deck
+
+
+# ══ adversarial + design review of 3.1 ═══════════════════════════════════════
+
+def test_two_different_remedies_are_never_folded_into_one(tmp_path, conn, monkeypatch):
+    """Both reviewers, independently. When the budget runs out on a deck with images AND
+    text, both loops raise `indexing_incomplete` with different overrides — and folding on
+    the code alone kept the image sentence and threw away the one saying the deck's TEXT is
+    unsearchable, on a response whose counts said 0 of 3 sections embedded."""
+    deck = _deck_with_images(tmp_path, 3)
+    monkeypatch.setattr(config, "TOOL_TIME_BUDGET_SECONDS", 0.0)
+
+    result = core.ingest_campaign(conn, title="Both loops", deck_text="a" * 4000,
+                                  asset_ref={"path": str(deck)}, confirm=True)
+
+    incomplete = [w for w in result["warnings"] if w["code"] == "indexing_incomplete"]
+    assert len(incomplete) == 2, "one per thing that was cut short"
+    assert any("section" in w["affects"] for w in incomplete), (
+        "the text half has to survive: it is what makes the deck unfindable"
+    )
+
+
+def test_folding_keeps_every_distinct_reason(tmp_path, conn, monkeypatch):
+    """Four chunks failing for two different reasons reported one reason and a count of
+    four, so the other cause was invisible to the person the detail exists for.
+    `finish_indexing` already collapses by reason; this is the same trade made once."""
+    reasons = iter(["connection refused", "connection refused", "timeout after 30s",
+                    "timeout after 30s"])
+
+    def flaky(text, timeout=None):
+        raise RuntimeError(next(reasons, "timeout after 30s"))
+
+    monkeypatch.setattr(core.embedding, "embed", flaky)
+    result = core.ingest_campaign(conn, title="Flaky", deck_text="\n\n".join(
+        f"section {i} " + "word " * 200 for i in range(4)), confirm=True)
+
+    failures = [w for w in result["warnings"] if w["code"] == "chunk_not_embedded"]
+    details = " ".join(w["detail"] for w in failures)
+    assert "connection refused" in details and "timeout" in details
+
+
+def test_a_remedy_never_claims_something_the_response_contradicts(tmp_path, conn, monkeypatch):
+    """"Visual search is offline, so image similarity and reuse checks will miss this one" —
+    said in a response that had just flagged a reuse at hamming distance 0. Perceptual
+    hashing does not need the vision model, and telling a marketer their reuse check failed
+    while showing them the match it found is the defect pointing the other way."""
+    image = tmp_path / "hero.png"
+    _write_png(image)
+    cid = _campaign(conn)
+    core.ingest_image_asset(conn, campaign_id=cid, asset_ref={"path": str(image)})
+
+    monkeypatch.setattr(clip_embed, "weights_status", lambda: clip_embed.WeightsResolution(
+        ok=False, source="missing", reason="no checkpoint", remedy="Reinstall to restore it."))
+    monkeypatch.setattr(clip_embed, "embed_image",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no weights")))
+
+    second = core.ingest_image_asset(conn, campaign_id=_campaign(conn),
+                                     asset_ref={"path": str(image)})
+
+    assert second["fingerprinted"] is True, "precondition: pHash does not need CLIP"
+    warning = next(w for w in second["warnings"] if w["code"] == "visual_search_offline")
+    assert "reuse" not in warning["remedy"].lower(), (
+        "reuse detection is pHash and is working — do not report it as broken"
+    )
+
+
+def test_the_remedy_for_a_missing_model_is_the_one_the_component_computed(tmp_path, conn,
+                                                                         monkeypatch):
+    """"Ask IT to run setup" named a gesture that does not exist — there is no setup script,
+    and nothing in run.sh or run.ps1 fetches the vision weights. `WeightsResolution` already
+    works out the right remedy for each cause (missing bundled copy, bad configured path,
+    load failure), and the registry was replacing it with a wrong static line."""
+    image = tmp_path / "hero.png"
+    _write_png(image)
+    monkeypatch.setattr(clip_embed, "weights_status", lambda: clip_embed.WeightsResolution(
+        ok=False, source="missing", reason="the shipped copy is not there",
+        remedy="Reinstall Campaign Intelligence to restore the vision model."))
+    monkeypatch.setattr(clip_embed, "embed_image",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no weights")))
+
+    result = core.ingest_image_asset(conn, campaign_id=_campaign(conn),
+                                     asset_ref={"path": str(image)})
+
+    warning = next(w for w in result["warnings"] if w["code"] == "visual_search_offline")
+    assert "Reinstall" in warning["remedy"], warning["remedy"]
+    assert "run setup" not in warning["remedy"].lower()
+
+
+def test_the_text_embedder_being_down_is_reported_as_an_outage(conn, monkeypatch):
+    """The image path splits "the model is missing" from "this one item failed"; the text
+    path did not, so a dead Ollama produced per-chunk advice to run finish_indexing — which
+    then fails every item and says "calling again will not help". `text_search_offline` was
+    written for this and was never emitted from anywhere."""
+    import embedding
+
+    monkeypatch.setattr(core.embedding, "embed",
+                        lambda *a, **k: (_ for _ in ()).throw(embedding.Unavailable(
+                            "could not reach the ollama embedder at http://localhost:11434")))
+
+    result = core.ingest_campaign(conn, title="No embedder", deck_text="a brief", confirm=True)
+
+    codes = {w["code"] for w in result["warnings"]}
+    assert "text_search_offline" in codes, codes
+    assert "chunk_not_embedded" not in codes, (
+        "one outage, said once — not one line per chunk that could never have worked"
+    )
+
+
+def test_a_remedy_does_not_claim_the_record_is_unsearchable_when_it_is_not(tmp_path, conn):
+    """A PNG passed as asset_ref alongside deck_text produced "This file type cannot be read,
+    so nothing in it is searchable" on a record that was fully searchable — and advised
+    converting a PNG to PDF. The old engineering string was accurate; the remedy was a
+    regression to a wrong and alarming claim."""
+    image = tmp_path / "hero.png"
+    _write_png(image)
+
+    result = core.ingest_campaign(conn, title="With a picture", deck_text="a real brief",
+                                  asset_ref={"path": str(image)}, confirm=True)
+
+    assert result["embedded"] is True, "precondition: the text made it in"
+    for warning in result["warnings"]:
+        assert "nothing in it is searchable" not in warning["remedy"], warning
+
+
+def test_instructions_to_claude_are_not_read_out_to_the_user(tmp_path, conn, monkeypatch):
+    """"Tell the user that, and offer to finish it now" is stage direction. The docstring
+    says to say the remedy verbatim, so a marketer heard Claude's own instructions read
+    back at them. One reader per field."""
+    monkeypatch.setattr(config, "TOOL_TIME_BUDGET_SECONDS", 0.0)
+    result = core.ingest_campaign(conn, title="Cut short", deck_text="\n\n".join(
+        f"section {i} " + "word " * 200 for i in range(4)), confirm=True)
+
+    warning = next(w for w in result["warnings"] if w["code"] == "indexing_incomplete")
+
+    assert "tell the user" not in warning["remedy"].lower()
+    assert warning["next_step"], "what Claude should do goes in its own field"
+    assert "finish_indexing" in warning["next_step"]
+
+
+def test_the_response_names_the_warning_to_lead_with(tmp_path, conn, monkeypatch):
+    """Ordering was an instruction in one tool's docstring rather than a property of the
+    response, and the blocked one arrived second. health_check already solved this with a
+    headline."""
+    image = tmp_path / "hero.png"
+    _write_png(image)
+    monkeypatch.setattr(clip_embed, "weights_status", lambda: clip_embed.WeightsResolution(
+        ok=False, source="missing", reason="gone", remedy="Reinstall."))
+    monkeypatch.setattr(clip_embed, "embed_image",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no weights")))
+    monkeypatch.setattr(core.images, "phash",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bad image")))
+
+    deck = _deck_with_images(tmp_path, 2)
+    result = core.ingest_campaign(conn, title="Several problems",
+                                  asset_ref={"path": str(deck)}, confirm=True)
+
+    assert result["warnings"][0]["severity"] == "blocked", (
+        "most severe first, so a surface that reads the list in order leads correctly"
+    )
+
+
+def test_a_blank_upload_is_not_the_same_class_as_a_missing_model(conn):
+    """`blocked` means a capability is off on this machine until somebody acts.
+    An empty record is neither: the product works and the fix is the user's own input.
+    Ranking it above everything but a real outage would have Claude lead with an
+    IT-flavoured alarm over a typo."""
+    result = core.ingest_campaign(conn, title="   ", confirm=True)
+
+    warning = result["warnings"][0]
+    assert warning["code"] == "nothing_to_embed"
+    assert warning["severity"] != "blocked"
+    assert warning["scope"] == "record", "who has to act, and about what"
+
+
+def test_every_registered_code_is_actually_reachable():
+    """The registry test passed against an empty registry, because an empty loop body is a
+    passing test. And a code nobody emits is a remedy nobody proof-read."""
+    import re
+
+    assert len(notices.CODES) >= 10, "the loop below has to actually run"
+    sources = "".join((Path(p).read_text(encoding="utf-8"))
+                      for p in ("core.py", "extract.py", "clip_embed.py", "store.py"))
+    for code in notices.CODES:
+        assert re.search(rf'["\']{re.escape(code)}["\']', sources), (
+            f"{code} is registered but emitted from nowhere"
+        )
+
+
+def test_rewording_a_remedy_is_not_a_breaking_change():
+    """The whole point of a stable code. Any test that asserts a remedy's exact wording
+    makes improving it a breaking change, which is the thing the code exists to prevent."""
+    import re
+
+    suite = "".join(Path(p).read_text(encoding="utf-8") for p in Path("tests").glob("*.py"))
+    # Only POSITIVE substring assertions couple to wording. "x not in remedy" is the
+    # opposite: it forbids a class of mistake and stays true however the line is rewritten,
+    # which is exactly what this file wants more of.
+    # Scoped to notice remedies (the dict form). WeightsResolution carries its own `remedy`
+    # with no code behind it, and asserting on that one is a different bargain.
+    positive = [line for line in suite.splitlines()
+                if re.search(r'assert\s+(?!not\b)["\'][^"\']+["\']\s+in\s+[^\s]*\["remedy"\]',
+                             line)]
+
+    assert len(positive) <= 3, (
+        f"{len(positive)} tests assert exact remedy wording: {positive}. Assert the code, or "
+        f"assert what the line must NOT say."
+    )
+
+
+from pathlib import Path  # noqa: E402  (used by the two tests above)
+
+
+def test_an_unreachable_embedder_is_a_different_exception_from_a_rejected_chunk(monkeypatch):
+    """The distinction core relies on, made where it is actually known. Reported as a type
+    rather than matched on the message, because a reworded message must not be a breaking
+    change — which is the whole premise of the stable code."""
+    import httpx
+
+    import embedding
+
+    monkeypatch.setattr(config, "EMBED_PROVIDER", "ollama")
+
+    monkeypatch.setattr(httpx, "post",
+                        lambda *a, **k: (_ for _ in ()).throw(httpx.ConnectError("refused")))
+    with pytest.raises(embedding.Unavailable):
+        embedding.embed("anything")
+
+    response = httpx.Response(400, request=httpx.Request("POST", "http://x"))
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: (_ for _ in ()).throw(
+        httpx.HTTPStatusError("too long", request=response.request, response=response)))
+    with pytest.raises(ValueError) as exc:
+        embedding.embed("anything")
+    assert not isinstance(exc.value, embedding.Unavailable), (
+        "the model rejecting one input is not the service being down — the rest of the "
+        "deck should still be attempted"
+    )

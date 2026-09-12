@@ -39,10 +39,37 @@ def embed(text: str, timeout: Optional[float] = None) -> list[float]:
         if config.EMBED_PROVIDER == "voyage":
             return _embed_voyage(text, timeout)
     except Exception as exc:
-        raise ValueError(_explain(exc)) from exc
+        raise (Unavailable if _is_transport_failure(exc) else ValueError)(
+            _explain(exc)) from exc
     if config.EMBED_PROVIDER == "hash":
         return _embed_hash(text)
     raise ValueError(f"unknown embed provider {config.EMBED_PROVIDER!r}")
+
+
+class Unavailable(ValueError):
+    """The embedder itself is down, as opposed to this one piece of text failing.
+
+    A ValueError subclass so the tool layer still converts it into a message the caller can
+    read — anything else becomes a generic "Error executing tool X" with the detail
+    discarded. But a distinguishable one, so a caller can tell "the service is not there"
+    from "this chunk was too long": the first is one outage to report once, and the second
+    is per item. Reported as a type rather than matched on the message, because a reworded
+    message is not supposed to be a breaking change (§3.1)."""
+
+
+def _is_transport_failure(exc: Exception) -> bool:
+    """The service is unreachable or not answering, as opposed to rejecting one request. An
+    HTTP status is the model's answer about that input — usually the context limit — and
+    retrying the rest of the deck is exactly right."""
+    import httpx
+
+    return isinstance(exc, (httpx.TimeoutException, httpx.ConnectError,
+                            httpx.NetworkError, httpx.RemoteProtocolError))
+
+
+def is_unreachable(exc: Exception) -> bool:
+    """True when the embedder is down. The caller-facing name for `Unavailable`."""
+    return isinstance(exc, Unavailable)
 
 
 def _explain(exc: Exception) -> str:

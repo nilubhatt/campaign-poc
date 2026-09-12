@@ -13,7 +13,7 @@ def guess_mime(filename: str) -> str:
     return mime or "application/octet-stream"
 
 
-def extract_units(path: Path, mime: str | None = None) -> tuple[list[str], list[str]]:
+def extract_units(path: Path, mime: str | None = None) -> tuple[list[str], list[dict]]:
     """
     Return (units, warnings) — one text unit per PDF page / PPTX slide, the natural chunk
     boundaries chunking.pack() uses for search (§6.1). Legacy .ppt is accepted upstream but
@@ -34,7 +34,7 @@ def extract_units(path: Path, mime: str | None = None) -> tuple[list[str], list[
         detail=f"unsupported type {mime}; POC accepts PDF and PPTX")]
 
 
-def extract_images(path: Path, mime: str | None = None) -> tuple[list[tuple[bytes, str, int]], list[str]]:
+def extract_images(path: Path, mime: str | None = None) -> tuple[list[tuple[bytes, str, int]], list[dict]]:
     """
     Return ([(image_bytes, extension, slide_or_page_number), ...], warnings) — images embedded
     in a PDF/PPTX. slide_or_page_number is 1-based (which slide/page a flagged image came
@@ -52,12 +52,16 @@ def extract_images(path: Path, mime: str | None = None) -> tuple[list[tuple[byte
         return _read_pdf_images(path)
     if mime == config.PPTX_MIME:
         return _read_pptx_images(path)
+    # NOT unsupported_file_type: a PNG sent alongside deck_text is a perfectly good upload
+    # whose text is searchable, and saying "nothing in it is searchable" about it — then
+    # advising the user to convert a PNG to PDF — was a regression the old engineering
+    # string did not have.
     return [], [notices.notice(
-        "unsupported_file_type", detail=f"image extraction not supported for {mime}")]
+        "images_not_extractable", detail=f"image extraction not supported for {mime}")]
 
 
 def _dedup_and_cap(
-    raw: list[tuple[bytes, str, int]], warnings: list[str]
+    raw: list[tuple[bytes, str, int]], warnings: list[dict]
 ) -> list[tuple[bytes, str, int]]:
     import hashlib
 
@@ -79,10 +83,10 @@ def _dedup_and_cap(
     return unique[: config.MAX_EXTRACTED_IMAGES_PER_DECK]
 
 
-def _read_pdf_images(path: Path) -> tuple[list[tuple[bytes, str, int]], list[str]]:
+def _read_pdf_images(path: Path) -> tuple[list[tuple[bytes, str, int]], list[dict]]:
     from pypdf import PdfReader
     reader = PdfReader(str(path))
-    warnings: list[str] = []
+    warnings: list[dict] = []
     raw: list[tuple[bytes, str, int]] = []
     for i, page in enumerate(reader.pages):
         if i >= config.MAX_PDF_PAGES:
@@ -108,12 +112,12 @@ def _read_pdf_images(path: Path) -> tuple[list[tuple[bytes, str, int]], list[str
     return _dedup_and_cap(raw, warnings), warnings
 
 
-def _read_pptx_images(path: Path) -> tuple[list[tuple[bytes, str, int]], list[str]]:
+def _read_pptx_images(path: Path) -> tuple[list[tuple[bytes, str, int]], list[dict]]:
     from pptx import Presentation
     from pptx.enum.shapes import MSO_SHAPE_TYPE
     from pptx.shapes.picture import Picture
     prs = Presentation(str(path))
-    warnings: list[str] = []
+    warnings: list[dict] = []
     raw: list[tuple[bytes, str, int]] = []
 
     def walk(shapes, slide_num: int) -> None:
@@ -187,14 +191,14 @@ _COMMENT_SUBTYPES = {"/Text", "/FreeText", "/Highlight", "/StrikeOut", "/Underli
                      "/Square", "/Caret", "/Ink"}
 
 
-def extract_commentary(path: Path, mime: str | None = None) -> tuple[list[dict], list[str]]:
+def extract_commentary(path: Path, mime: str | None = None) -> tuple[list[dict], list[dict]]:
     """Return ([{kind, text, author, date, page|slide, anchor}, ...], warnings).
 
     Never raises: commentary is the bonus layer, and a malformed comments part must not cost
     the user the deck they actually uploaded.
     """
     mime = mime or guess_mime(path.name)
-    warnings: list[str] = []
+    warnings: list[dict] = []
     try:
         if mime == "application/pdf":
             items = _read_pdf_commentary(path, warnings)
@@ -249,7 +253,7 @@ def _pdf_date(raw) -> str | None:
     return stamp
 
 
-def _read_pdf_commentary(path: Path, warnings: list[str]) -> list[dict]:
+def _read_pdf_commentary(path: Path, warnings: list[dict]) -> list[dict]:
     from pypdf import PdfReader
 
     reader = PdfReader(str(path))
@@ -290,13 +294,13 @@ def _read_pdf_commentary(path: Path, warnings: list[str]) -> list[dict]:
     return items
 
 
-def _read_pptx_commentary(path: Path, warnings: list[str]) -> list[dict]:
+def _read_pptx_commentary(path: Path, warnings: list[dict]) -> list[dict]:
     items = _read_pptx_notes(path, warnings)
     items.extend(_read_pptx_comments(path, warnings))
     return items
 
 
-def _read_pptx_notes(path: Path, warnings: list[str]) -> list[dict]:
+def _read_pptx_notes(path: Path, warnings: list[dict]) -> list[dict]:
     from pptx import Presentation
 
     prs = Presentation(str(path))
@@ -329,7 +333,7 @@ def _read_pptx_notes(path: Path, warnings: list[str]) -> list[dict]:
     return items
 
 
-def _read_pptx_comments(path: Path, warnings: list[str]) -> list[dict]:
+def _read_pptx_comments(path: Path, warnings: list[dict]) -> list[dict]:
     """Reviewer comments, read straight out of the package: python-pptx has no API for them.
 
     Two formats, because PowerPoint changed it. `ppt/comments/` is the classic one, keyed to
@@ -409,7 +413,7 @@ def _own_text(node) -> str:
     return " ".join(parts).strip()
 
 
-def _pptx_authors(z, names: set[str], warnings: list[str]) -> dict[str, str]:
+def _pptx_authors(z, names: set[str], warnings: list[dict]) -> dict[str, str]:
     import xml.etree.ElementTree as ET
 
     authors: dict[str, str] = {}

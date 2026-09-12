@@ -83,7 +83,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                     "edits, then call upload_campaign again with confirm=True to save it.",
         }
 
-    warnings: list[str] = []
+    warnings: list[dict] = []
     stored_path = None
     units: list[str] = []  # natural per-page/slide units, when extraction ran
     commentary: list[dict] = []  # comments, annotations and speaker notes (§2.5)
@@ -216,10 +216,11 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
             if time.monotonic() >= deadline:
                 warnings.append(notices.notice(
                     "indexing_incomplete",
-                    remedy=f"{images_embedded} of {len(image_assets)} images in this deck "
-                           f"are in visual search so far; all of them were still stored and "
-                           f"checked for reuse. Finish the rest with "
-                           f"finish_indexing(campaign_id='{cid}') — no re-upload needed.",
+                    affects=f"{images_embedded} of {len(image_assets)} images in this deck "
+                            f"are in visual search so far. All of them were stored and "
+                            f"checked for reuse, so nothing is lost.",
+                    next_step=f"Offer to finish it now — "
+                              f"finish_indexing(campaign_id='{cid}'); no re-upload needed.",
                     detail=f"visually embedded {images_embedded} of {len(image_assets)} "
                            f"deck images before the "
                            f"{config.TOOL_TIME_BUDGET_SECONDS:g}s time budget ran out"))
@@ -231,10 +232,8 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                 entry["visually_embedded"] = True
                 images_embedded += 1
             except Exception as exc:
-                warnings.append(notices.notice(
-                    "visual_search_offline" if not clip_embed.weights_status().ok
-                    else "image_not_embedded",
-                    detail=f"deck image {entry['asset_id']} not visually embedded: {exc}"))
+                warnings.append(_vision_notice(
+                    f"deck image {entry['asset_id']} not visually embedded: {exc}"))
 
         for entry in image_assets:
             entry.pop("_path", None)
@@ -292,10 +291,10 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         if remaining <= 0:
             warnings.append(notices.notice(
                 "indexing_incomplete",
-                remedy=f"The campaign is saved and {embedded_count} of {len(chunk_texts)} "
-                       f"sections are searchable so far. Tell the user that, and offer to "
-                       f"finish it now — call finish_indexing(campaign_id='{cid}'); no "
-                       f"re-upload needed.",
+                affects=f"The campaign is saved and {embedded_count} of "
+                        f"{len(chunk_texts)} sections are searchable so far.",
+                next_step=f"Say that, and offer to finish it now — "
+                          f"finish_indexing(campaign_id='{cid}'); no re-upload needed.",
                 detail=f"embedded {embedded_count} of {len(chunk_texts)} sections before "
                        f"the {config.TOOL_TIME_BUDGET_SECONDS:g}s time budget ran out"))
             break
@@ -307,6 +306,14 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
             store.set_chunk_embedded(conn, chunk_id)
             embedded_count += 1
         except Exception as exc:
+            # The image path splits "the model is missing from this machine" from "this one
+            # item failed"; the text path did not, so a dead Ollama produced one line per
+            # chunk, each advising finish_indexing — which then fails every item and says
+            # calling again will not help. One outage, said once.
+            if embedding.is_unreachable(exc):
+                warnings.append(notices.notice("text_search_offline", detail=str(exc),
+                                               cause="embedder_unreachable"))
+                break
             warnings.append(notices.notice(
                 "chunk_not_embedded",
                 detail=f"chunk {chunk_id} not embedded (search will miss it): {exc}"))
@@ -352,6 +359,29 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
 
 
 # ── retrieval / evidence for Claude ──────────────────────────────────────────
+
+def _vision_notice(detail: str) -> dict:
+    """An image failed to embed — say whether the model is missing from this machine or this
+    one image failed on a working model, and carry the remedy the component itself worked
+    out.
+
+    `WeightsResolution` already knows the right instruction for each cause: the bundled copy
+    is absent (reinstall), the configured path is wrong (fix the variable), the checkpoint
+    would not load (same). The first version of the registry threw that away and substituted
+    "ask IT to run setup", naming a gesture that exists nowhere — there is no setup script,
+    and nothing in run.sh or run.ps1 fetches the vision weights.
+    """
+    status = clip_embed.weights_status()
+    if status.ok:
+        return notices.notice("image_not_embedded", detail=detail)
+    # `cause` carries health_check's code for the same condition. The two vocabularies are
+    # on different axes on purpose — a notice code names what the USER loses, a health code
+    # names what is WRONG — but without the link, support reading an upload warning and an
+    # installer gating on health_check had no way to know they were looking at one problem.
+    return notices.notice("visual_search_offline", detail=detail,
+                          cause=f"clip_weights_{status.source or 'unknown'}",
+                          remedy=status.remedy or notices.remedy_for("visual_search_offline"))
+
 
 class _WrongDimension(RuntimeError):
     """The embedder answered, but with vectors this library cannot store."""
@@ -839,14 +869,19 @@ def health_check(conn, *, probe: bool = True) -> dict:
             if weights.ok else
             {"ok": False, "code": f"clip_weights_{weights.source or 'unknown'}",
              "detail": weights.reason,
-             "affects": "Finding visually similar creative, and flagging reused images.",
+             # Not "and flagging reused images": exact-reuse detection is perceptual
+             # hashing and does not touch the vision model. Review caught the same false
+             # claim in the upload warning; it was here too.
+             "affects": "Finding visually similar creative. Exact-reuse detection is "
+                        "unaffected.",
              "remedy": weights.remedy}
         )
     except Exception as exc:
         components["visual_search"] = {
             "ok": False, "code": "clip_load_failed",
             "detail": f"could not determine the vision model's state: {exc}",
-            "affects": "Finding visually similar creative, and flagging reused images.",
+            "affects": "Finding visually similar creative. Exact-reuse detection is "
+                       "unaffected.",
             "remedy": "Reinstall to restore the shipped weights.",
         }
 
@@ -981,6 +1016,23 @@ def finish_indexing(conn, *, campaign_id: Optional[str] = None) -> dict:
         failures[str(exc)] = failures.get(str(exc), 0) + 1
         return isinstance(exc, FileNotFoundError)
 
+    def as_notice(reason: str, count: int) -> dict:
+        """A failure reason as a §3.1 notice, so this surface speaks the same language as
+        every other. These were raw `str(exc)` until review pointed out that the sibling of
+        the tool defect 09 was reported against was still handing a marketer
+        `HTTPConnectionPool(host='localhost', port=11434)`."""
+        lowered = reason.lower()
+        if "vision" in lowered or "weights" in lowered or "clip" in lowered:
+            return notices.notice("visual_search_offline", detail=reason, count=count,
+                                  remedy=vision.remedy or
+                                  notices.remedy_for("visual_search_offline"))
+        if "embedder" in lowered or "could not reach" in lowered or "timed out" in lowered:
+            return notices.notice("text_search_offline", detail=reason, count=count,
+                                  cause="embedder_unreachable")
+        if "no such file" in lowered or "not found" in lowered:
+            return notices.notice("image_not_stored", detail=reason, count=count)
+        return notices.notice("chunk_not_embedded", detail=reason, count=count)
+
     for chunk in store.get_unembedded_chunks(conn, campaign_id):
         remaining_time = deadline - time.monotonic()
         if remaining_time <= 0:
@@ -1038,6 +1090,10 @@ def finish_indexing(conn, *, campaign_id: Optional[str] = None) -> dict:
     remaining = max(0, left["chunks"] + left["assets"] - unfixable)
     errors = [{"reason": reason, "count": count}
               for reason, count in sorted(failures.items(), key=lambda kv: -kv[1])]
+    # The same failures in the shape every other surface uses (§3.1). `errors` keeps the raw
+    # reasons for support and for the tests that read them.
+    warnings = notices.collapse([as_notice(reason, count)
+                                 for reason, count in failures.items()])
 
     indexed = sections_indexed + images_indexed
     result = {
@@ -1048,6 +1104,7 @@ def finish_indexing(conn, *, campaign_id: Optional[str] = None) -> dict:
         "failed": unfixable,
         "complete": remaining == 0,
         "errors": errors,
+        "warnings": warnings,
         "outstanding": store.outstanding_by_campaign(conn, campaign_id)[:5],
     }
 
@@ -1058,10 +1115,14 @@ def finish_indexing(conn, *, campaign_id: Optional[str] = None) -> dict:
             f"unless the user is waiting on something else; report once at the end."
         )
     elif remaining and not indexed:
-        cause = errors[0]["reason"] if errors else "the indexer did not respond"
+        # The remedy, not the traceback: this line used to interpolate str(exc) and hand a
+        # marketer an HTTPConnectionPool repr.
+        cause = (warnings[0]["affects"] if warnings
+                 else "the indexer did not respond")
         result["note"] = (
-            f"nothing could be indexed: {cause} Calling again will not help until that is "
-            f"fixed — tell the user what is wrong instead of retrying."
+            f"nothing could be indexed. {cause} Calling again will not help until that is "
+            f"fixed — say what is wrong, and what would fix it (see warnings), instead of "
+            f"retrying."
         )
     elif remaining:
         result["note"] = (
@@ -1093,9 +1154,8 @@ def find_similar_with_context(conn, **kwargs) -> dict:
         records = len(store.outstanding_by_campaign(conn))
         warnings.append(notices.notice(
             "results_may_be_incomplete",
-            remedy=f"{records} record(s) are only partly searchable ({outstanding} items "
-                   f"still to index), so these results may be incomplete. Mention this if "
-                   f"the answer looks thin, and offer to run finish_indexing.",
+            affects=f"{records} record(s) are only partly searchable ({outstanding} items "
+                    f"still to index), so these results may be incomplete.",
             detail=f"{outstanding} unembedded items across {records} campaigns"))
     return {"matches": matches, "warnings": warnings}
 
@@ -1436,7 +1496,7 @@ def _store_and_fingerprint_image(conn, campaign_id: str, stored_name: str) -> di
     loop, which this helper doesn't do, so it re-implements the fingerprint/CLIP-embed steps
     rather than call this and bolt reuse-checking on after."""
     full_path = config.ASSET_DIR / stored_name
-    warnings: list[str] = []
+    warnings: list[dict] = []
     aid = store.insert_asset(conn, campaign_id, file_path=stored_name)
 
     fingerprinted = False
@@ -1457,17 +1517,14 @@ def _store_and_fingerprint_image(conn, campaign_id: str, stored_name: str) -> di
         store.mark_asset_embedded(conn, aid)
         visually_embedded = True
     except Exception as exc:
-        warnings.append(notices.notice(
-            # Which warning this is depends on WHY: the model being absent from the machine
-            # is the operator's problem to fix once, while one image failing to embed on a
-            # working model is this record's problem. The review's example is the first, and
-            # telling a marketer to "ask IT to run setup" over a single bad PNG would be the
-            # same mistake in the other direction.
-            "visual_search_offline" if not clip_embed.weights_status().ok
-            else "image_not_embedded",
-            detail=f"asset stored but not visually embedded (aesthetic similarity will "
-                   f"miss it): {exc}. Run finish_indexing to complete it — the image is "
-                   f"saved, so it does not need uploading again."))
+        # Which warning this is depends on WHY: the model being absent from the machine is
+        # the operator's problem to fix once, while one image failing on a working model is
+        # this record's problem. Telling a marketer to go and find an administrator over a
+        # single corrupt PNG would be the same mistake in the other direction.
+        warnings.append(_vision_notice(
+            f"asset stored but not visually embedded (aesthetic similarity will miss it): "
+            f"{exc}. Run finish_indexing to complete it — the image is saved, so it does "
+            f"not need uploading again."))
 
     return {"asset_id": aid, "campaign_id": campaign_id, "fingerprinted": fingerprinted,
             "visually_embedded": visually_embedded,
@@ -1548,7 +1605,12 @@ def find_similar_images(conn, *, asset_ref: dict, campaign_id: Optional[str] = N
     try:
         qvec = clip_embed.embed_image(path)
     except Exception as exc:
-        return {"error": f"could not process image: {exc}"}
+        # A capability outage is not the caller's input mistake, and `error` is the shape
+        # reserved for the latter. This path was returning the review's own quoted string —
+        # "Failed to download weights for tag 'openai'" — straight to a marketer, on a
+        # sibling tool of the one defect 09 was reported against.
+        notice = _vision_notice(f"visual search could not process the image: {exc}")
+        return {"error": notice["affects"], "warnings": [notice], "matches": []}
 
     if region:
         # filter_campaign_ids already excludes superseded campaigns.

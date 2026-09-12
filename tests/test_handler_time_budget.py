@@ -73,18 +73,20 @@ def test_running_out_of_budget_says_what_happened_and_how_to_finish(conn, monkey
 
     budget_warnings = [w for w in result["warnings"] if w["code"] == "indexing_incomplete"]
     assert budget_warnings, f"no warning explained the early stop: {result['warnings']}"
-    # 3.1 split the one string into three readers: the remedy is what the marketer is told,
-    # the detail is what support gets. The counts and the recovery call belong to the remedy,
-    # because they are what somebody has to act on.
-    remedy = budget_warnings[0]["remedy"]
-    assert str(result["chunks_embedded"]) in remedy and str(result["chunks_total"]) in remedy
-    assert "saved" in remedy.lower(), "must say the upload itself survived"
+    # 3.1 split the one string by reader: `affects` is the consequence the marketer hears,
+    # `next_step` is what Claude does about it, `detail` is what support gets. The counts
+    # belong to the first and the recovery call to the second — reading "call
+    # finish_indexing(...)" out loud to somebody who cannot call a tool was the mistake.
+    warning = budget_warnings[0]
+    affects = warning["affects"]
+    assert str(result["chunks_embedded"]) in affects and str(result["chunks_total"]) in affects
+    assert "saved" in affects.lower(), "must say the upload itself survived"
     # 2.1 deliberately left this open: naming a recovery tool that did not exist yet would
     # have sent a marketer after something Claude could not find. 2.2 built it, so the
     # sentence can now be closed - this is that promise being kept.
-    assert "finish_indexing" in remedy, "must name the tool that finishes the job"
-    assert "no re-upload" in remedy.lower()
-    assert "time budget" in budget_warnings[0]["detail"], "the mechanism stays, for support"
+    assert "finish_indexing" in warning["next_step"], "must name the tool that finishes it"
+    assert "no re-upload" in warning["next_step"].lower()
+    assert "time budget" in warning["detail"], "the mechanism stays, for support"
 
 
 def test_a_fast_embedder_still_completes_everything(conn):
