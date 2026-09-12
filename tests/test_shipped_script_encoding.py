@@ -138,3 +138,17 @@ def test_a_shipped_powershell_script_does_not_rely_on_the_line_ending(script):
     raw = script.read_bytes()
     mixed = b"\r\n" in raw and raw.replace(b"\r\n", b"").count(b"\n")
     assert not mixed, f"{script.relative_to(ROOT)} mixes CRLF and LF line endings"
+
+
+@pytest.mark.parametrize("script", list(_shipped(".sh")), ids=lambda p: p.name)
+def test_a_shipped_shell_script_actually_parses(script):
+    """`bash -n` on everything we ship. Written after a stray quote left an installer
+    unparseable and the whole suite stayed green: every other test here reads the file as
+    text, and text that does not parse still contains the right words."""
+    import subprocess
+
+    result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+
+    assert result.returncode == 0, (
+        f"{script.relative_to(ROOT)} does not parse:\n{result.stderr}"
+    )

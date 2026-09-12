@@ -617,16 +617,36 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       they just tried to upload). Found while writing it: CI was copying the **Linux**
       installer into the macOS archive, so a Mac user got systemd units and
       `~/.local/share` paths.
-      *Windows* verified nothing. The gate cannot live in `[Run]` — Inno ignores a run
-      entry's exit code — nor in `ssPostInstall` as it stood, because that step precedes
-      `[Run]`, so a self-test there would check a machine before the installer had finished
-      installing Ollama. So Ollama, Claude Desktop wiring and the self-test all moved into
-      `[Code]`, in that order, and a failure raises — which is what Inno actually treats as
-      "setup did not complete". A message box would be dismissed and the success page shown
-      anyway, which is the behaviour being fixed.
+      *Windows* verified nothing. Ollama, the Claude Desktop wiring and the self-test moved
+      into `[Code]` so the gate could run before the wiring — a `[Run]` entry's exit code is
+      ignored by Inno, so nothing there can gate anything.
+      **Two claims in the first version of this entry were wrong, and the review corrected
+      both from Inno Setup's own source.** `[Run]` entries do *not* execute after
+      `ssPostInstall` — `Setup.MainForm.pas` calls `ProcessRunEntries` (line 234) before
+      `SetStep(ssPostInstall)` (line 241) — so ordering alone never required the move. And
+      `RaiseException` at `ssPostInstall` does **not** abort setup: that step is invoked with
+      `HandleExceptions = True`, which logs the exception and calls
+      `Application.HandleException`, swallowing it. Execution continues to the Finished page
+      with exit code 0 — precisely the "message dismissed, success page shown anyway"
+      behaviour the gate was supposed to replace. Only `ssInstall` re-raises, and an
+      exception there rolls the files back, contradicting the advice to fix the problem and
+      re-run against what was just installed.
+      What is achievable, and is what a marketer actually needs, is done instead: the failure
+      is recorded, Claude Desktop is **not** connected, and the Finished page is rewritten to
+      *"Installed, but not working"* naming the component. See **L5** in
+      [`DEFERRALS.md`](DEFERRALS.md) — Inno has no seam for "keep the files, fail the run",
+      and claiming one would be the overstatement this whole exercise is about.
+      Also fixed: `RunAndCapture`'s `cmd /C` quoting closed the outer quote before the
+      redirect, so `>` sat inside quotes, the exe received one argument, exited 2, and no log
+      was written — after which `LoadStringsFromFile` returned False without raising and the
+      dialog named nothing at all. And every step ran elevated under
+      `PrivilegesRequired=admin`, so in the case this product is built for — IT installing for
+      a marketer — the model was pulled into the *admin's* Ollama, the *admin's* Claude
+      Desktop was wired, and the self-test passed against an environment the marketer would
+      never see. The install is now per-user, like the rest of the product.
 - [x] **4.2 Zero-egress install verified** on a host with egress disabled (actually tested,
       not "degrades gracefully").
-      **Done, and the first attempt at it was worthless.** Injecting a socket guard through
+      **Done, and the first two attempts at it were worthless.** Injecting a socket guard through
       `sitecustomize`/`PYTHONPATH` does nothing to a frozen binary — PyInstaller controls
       `sys.path`, so the guard never loads and the test passes by doing nothing. CI now uses
       real blocks against the packaged product: an empty network namespace (`unshare -rn`)
@@ -634,6 +654,26 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       proof runs in the suite too, blocking `socket.connect` and then LOADING the vision
       model — not merely resolving its path, which is the weaker check that passes in
       milliseconds without touching the network either way.
+      The *second* worthless version was the CI half. It ran `check-weights`, which only
+      stats a path, so it would have passed offline whether or not the product worked; the
+      macOS step also set `HF_HUB_OFFLINE=1`, which tells the client not to try, making the
+      proxy block prove nothing. And `unshare -rn` fails outright on `ubuntu-latest` (24.04
+      restricts unprivileged user namespaces via AppArmor and the runner images do not relax
+      it). All three platforms now run the packaged binary's full `health-check --json`,
+      which loads the vision model, and assert on `visual_search`; Linux uses `sudo unshare
+      -n`, and Windows — the platform the review was written against, on a network that
+      blocks huggingface.co — had no offline check at all and now has one.
+- [ ] **4.4 macOS: sign, notarize, staple - and ship a `.pkg`** (raised by the Phase 4
+      design review; not in the original review, and owed). Today the macOS archive is an
+      unsigned binary whose quarantine flag the installer strips. That strip is a legitimate
+      stopgap *inside an installer the user chose to run*, on the product's own directory —
+      but it ships "we are not signed" as the plan of record, and on macOS 15+ an unsigned
+      quarantined binary launched by Claude Desktop is blocked outright rather than offering
+      "open anyway". The marketer never gets that far in any case: the tarball needs Terminal
+      to extract, `install.sh` is itself quarantined, and Finder opens a `.sh` in a text
+      editor. What is owed: Developer ID signing + notarization + stapling in CI, and a
+      `.pkg` whose postinstall runs the same gate — after which the quarantine strip can go.
+
 - [x] **4.3 Ollama verified at install** to the same standard as the vision model — daemon
       reachable and `nomic-embed-text` present.
       **Done:** `health_check` already separates "not reachable" from "the model is not
@@ -643,6 +683,13 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       the install carried on. The pull may still fail; what has changed is that the
       self-test runs afterwards and turns it into a refused install. Pinned by a test that
       asserts the ordering, since a gate placed before the thing it gates is decoration.
+      **From review:** the gate got exactly one shot at a daemon started three seconds
+      earlier. A cold model load measured 0.7s here and has never been measured on the
+      Windows laptop this review came from, with antivirus scanning a freshly written 274MB
+      file — and refusing an install because a service was slow to warm up is a refusal
+      nobody can act on. `health-check --wait 60` retries, but only while the *only* thing
+      wrong is transient: a missing checkpoint does not appear by waiting for it, and taking
+      a minute to say so again is worse than saying it at once.
 
 ## Phase 5 — Making it intuitive (ideas A–F)
 

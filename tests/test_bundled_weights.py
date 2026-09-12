@@ -177,8 +177,12 @@ def test_windows_installer_copies_subdirectories():
 
 
 def test_linux_installer_copies_the_whole_bundle():
+    """`-a` and the trailing `/.` are both load-bearing: without them the models directory
+    is dropped and the installer still reports success. The destination is the STAGING
+    directory since Phase 4's review — the live one is only replaced once the self-test has
+    passed, so a failed upgrade leaves the working copy intact."""
     sh = (_repo_root() / "installer/linux/install.sh").read_text()
-    assert 'cp -a "$BUNDLE"/. "$DEST"/' in sh, "install.sh must copy the bundle recursively"
+    assert 'cp -a "$BUNDLE"/. "$STAGE"/' in sh, "install.sh must copy the bundle recursively"
 
 
 def test_every_build_path_stages_the_weights():

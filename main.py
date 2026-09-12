@@ -33,13 +33,21 @@ def main() -> int:
     sub.add_parser("stdio", help="run over stdio for a local Claude Desktop connector")
 
     sub.add_parser("check-weights", help="report whether the CLIP weights resolved (exit 1 if not)")
+    sub.add_parser("init", help="create the data directory and database (idempotent); "
+                                "run by the installers before the self-test")
+
     h = sub.add_parser("health-check", help="check every component and the library's coverage "
                                             "(exit 1 if anything is wrong)")
     # An installer parsing prose is an installer that breaks when the prose improves (§4.1).
     h.add_argument("--json", action="store_true",
                    help="emit the report as JSON for a script to read")
+    h.add_argument("--wait", type=float, default=0.0, metavar="SECONDS",
+                   help="retry while the only failure is a service still starting up "
+                        "(used by the installers, which start Ollama moments earlier)")
 
     c = sub.add_parser("configure-desktop", help="add this server to Claude Desktop's config (merges, backs up)")
+    sub.add_parser("unconfigure-desktop",
+                   help="remove this server from Claude Desktop's config (used by uninstall)")
     c.add_argument("--http", metavar="URL", default=None,
                    help="wire via mcp-remote to a running HTTP server (e.g. http://localhost:8086/mcp)")
 
@@ -68,6 +76,23 @@ def main() -> int:
         clip_embed.warm_up()
         embedding.warm_up()
         mcp.run(transport="stdio")
+    elif cmd == "init":
+        # The installers' final self-test opens the database READ-ONLY on purpose (§2.3: a
+        # diagnostic must not repair what it is diagnosing), so on a machine where the
+        # server has never run there was nothing to open and every fresh install failed its
+        # own gate with "FAIL database". Creating it is an install step, not a diagnostic's
+        # side effect.
+        #
+        # It also answers a question worth asking at install time rather than at first use:
+        # whether the data location is writable by whoever the installer is running as. On
+        # Windows an administrator may be installing for somebody else entirely.
+        import config
+        import store
+        config.ensure_dirs()
+        store.init_db()
+        print(f"Data directory: {config.DATA_DIR}")
+        print(f"Database:       {config.DB_PATH}")
+
     elif cmd == "check-weights":
         # Exists so the build can verify the PACKAGED product rather than the source tree:
         # CI extracts the archive and runs this, which exercises app_dir() under a frozen
@@ -90,7 +115,10 @@ def main() -> int:
         # and a corrupt checkpoint passed the resolved-only check — precisely the case the
         # post-install self-test exists to catch (item 4.1).
         clip_embed.warm_up()
-        report = core.health_check_cli()
+        wait = getattr(args, "wait", 0.0)
+        if wait:
+            print(f"Waiting up to {wait:g}s for everything to come up...")
+        report = core.wait_until_ready(timeout=wait) if wait else core.health_check_cli()
         if getattr(args, "json", False):
             import json
             print(json.dumps(report, indent=2))
@@ -106,11 +134,42 @@ def main() -> int:
         if report.get("backlog_remedy"):
             print(f"      -> {report['backlog_remedy']}")
         return 0 if report["ok"] else 1
+    elif cmd == "unconfigure-desktop":
+        _unconfigure_desktop()
+
     elif cmd == "configure-desktop":
         _configure_desktop(http_url=args.http)
     else:
         p.print_help()
     return 0
+
+
+def _unconfigure_desktop():
+    """Remove only our own entry from Claude Desktop's config.
+
+    Both Unix uninstallers did this; Windows did not, so an uninstall left Claude Desktop
+    pointing at a binary that no longer exists — and the installer's own header claimed
+    "uninstall removes all of it". Never fails: an uninstaller that stops because the thing
+    it was removing had already gone leaves a half-removed product behind.
+    """
+    import json
+
+    cfg = _desktop_config_path()
+    if not cfg.exists():
+        return
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8") or "{}")
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+        print(f"warning: could not read {cfg} ({exc}); left it alone.")
+        return
+    servers = data.get("mcpServers") or {}
+    if servers.pop("campaign-intelligence", None) is None:
+        return
+    try:
+        cfg.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"Removed the Claude Desktop connector entry from {cfg}")
+    except OSError as exc:
+        print(f"warning: could not update {cfg} ({exc}).")
 
 
 def _desktop_config_path():

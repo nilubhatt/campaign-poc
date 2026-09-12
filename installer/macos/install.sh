@@ -26,9 +26,18 @@ done
 [ -n "${BUNDLE:-}" ] || { echo "Could not find the campaign-intelligence bundle."; exit 1; }
 
 DEST="$HOME/Library/Application Support/CampaignIntelligence"
-BIN="$HOME/.local/bin"; mkdir -p "$BIN"
+# No symlink into ~/.local/bin: that is a Linux convention and is not on a default macOS
+# PATH, so "ensure it's on your PATH" was advice a marketer could not act on. Claude Desktop
+# launches the binary by absolute path (see configure-desktop), so nothing needs it - and the
+# absolute command is printed at the end for anyone who wants a terminal.
+# Staged, not swapped in place. `rm -rf "$DEST"` ran before anything had been checked, so
+# a failed UPGRADE left the machine with no working version at all - and the failure
+# message's "fix it and run this installer again" was advice about a copy the gate had
+# just condemned. Everything below happens in $STAGE; the live directory is only
+# replaced once the self-test has passed.
+STAGE="$DEST.incoming"
 echo "Installing to $DEST ..."
-rm -rf "$DEST"; mkdir -p "$DEST"; cp -a "$BUNDLE"/. "$DEST"/
+rm -rf "$STAGE"; mkdir -p "$STAGE"; cp -a "$BUNDLE"/. "$STAGE"/
 
 # Gatekeeper quarantines anything that arrived through a browser, and the quarantine flag
 # travels with every file inside the archive. Left in place, the first launch is a dialog
@@ -39,16 +48,16 @@ xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
 # Verify the shipped CLIP weights actually survived the copy. An interrupted or disk-full cp
 # leaves a truncated file that looks present to the app and only fails later, inside a tool
 # call - the failure mode this payload exists to remove.
-weights="$DEST/models/open_clip_model.safetensors"
+weights="$STAGE/models/open_clip_model.safetensors"
 if [ -f "$weights.sha256" ]; then
   echo "Verifying CLIP weights..."
-  ( cd "$DEST/models" && shasum -a 256 -c open_clip_model.safetensors.sha256 ) || {
+  ( cd "$STAGE/models" && shasum -a 256 -c open_clip_model.safetensors.sha256 ) || {
     echo "FAILED: the CLIP weights are corrupt or incomplete. Visual search would be dead." >&2
     echo "Re-run this installer with a complete download." >&2; exit 1; }
 elif [ ! -f "$weights" ]; then
   echo "WARNING: no CLIP weights in this bundle - visual similarity will be unavailable." >&2
 fi
-ln -sf "$DEST/campaign-intelligence" "$BIN/campaign-intelligence"
+
 
 if [ "$WITH_OLLAMA" = 1 ]; then
   if command -v ollama >/dev/null 2>&1; then echo "Ollama present."; else
@@ -59,22 +68,40 @@ if [ "$WITH_OLLAMA" = 1 ]; then
   ollama pull nomic-embed-text || echo "Could not pull nomic-embed-text; the self-test will say so." >&2
 fi
 
-echo "Wiring Claude Desktop..."; "$DEST/campaign-intelligence" configure-desktop || true
 
-# The gate. Everything above can succeed while the product is unusable - that is exactly what
-# happened in the field, where visual search was dead on an installed copy and the only way to
-# find out was a 60-second timeout inside a tool call. A non-zero exit here fails the install.
+# Create the data directory and database before the gate: the self-test opens the database
+# read-only by design, so without this every fresh install failed its own check with
+# "FAIL database" and told the marketer to go and start a server.
+echo "Preparing the data directory..."
+"$STAGE/campaign-intelligence" init || {
+  echo "FAILED: could not create the data directory. Check permissions and disk space." >&2
+  exit 1; }
+
+# The gate (item 4.1). Everything above can succeed while the product is unusable - which is
+# exactly what happened in the field, where visual search was dead on an installed copy and
+# the only way to find out was a 60-second timeout inside a tool call.
+#
+# It runs BEFORE Claude Desktop is wired, deliberately. Wiring first meant a refused install
+# still left the marketer's next session pointing at the server the installer had just
+# condemned - the review's own defect, with the installer's signature on it.
 echo
 echo "Running post-install self-test..."
-if ! "$DEST/campaign-intelligence" health-check; then
+if ! "$STAGE/campaign-intelligence" health-check --wait 60; then
   echo >&2
   echo "INSTALL FAILED: the self-test above names the component that is not working." >&2
-  echo "The files are in $DEST; fix what it names and re-run:" >&2
-  echo "  \"$DEST/campaign-intelligence\" health-check" >&2
+  echo "Claude Desktop has NOT been connected, so nothing will try to use this yet." >&2
+  echo "Your previous install, if any, is untouched and still working." >&2
+  echo "The new files are in $STAGE. Fix what is named above and run this installer again." >&2
   exit 1
 fi
 
+# Only now is the live directory replaced: everything above ran against the staged copy.
+rm -rf "$DEST"; mv "$STAGE" "$DEST"
+
+echo "Connecting Claude Desktop..."; "$DEST/campaign-intelligence" configure-desktop || true
+
 echo
-echo "Installed. 'campaign-intelligence' is in ~/.local/bin (ensure it's on your PATH)."
+echo "Installed."
+echo "To run it from a terminal: \"$DEST/campaign-intelligence\""
 echo "Claude Desktop is wired; fully quit and reopen it - closing the window is not enough."
 echo "Uninstall: ./uninstall.sh"

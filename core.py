@@ -925,6 +925,35 @@ def health_check(conn, *, probe: bool = True) -> dict:
     return report
 
 
+# Component failures that a bounded wait can plausibly clear: a daemon started seconds ago
+# and still warming up. Everything else is settled — a missing checkpoint does not appear by
+# waiting for it, and waiting 60 seconds to repeat that is worse than saying it at once.
+_TRANSIENT_CODES = ("embedder_unreachable", "embedder_slow")
+
+
+def wait_until_ready(timeout: float = 60.0, interval: float = 3.0) -> dict:
+    """Run the self-test, retrying while the only thing wrong is something still starting.
+
+    The installers start Ollama and sleep 3, then gate on it. That is one shot at a daemon
+    three seconds old: a cold model load measured 0.7s here, and nobody has measured it on
+    the Windows laptop the review was written against, with antivirus scanning a freshly
+    written 274MB file. Refusing an install because a service was slow to warm up is a
+    refusal the user can do nothing useful with — but only for the codes where waiting is
+    the answer.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        report = health_check_cli()
+        if report["ok"]:
+            return report
+        failing = [c for c in report["components"].values() if not c.get("ok")]
+        if any(c.get("code") not in _TRANSIENT_CODES for c in failing):
+            return report
+        if time.monotonic() + interval >= deadline:
+            return report
+        time.sleep(interval)
+
+
 def published_tool_parameters() -> dict[str, list[str]]:
     """What each tool actually takes, right now, read off the functions themselves (§3.2).
 

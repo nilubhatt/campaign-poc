@@ -151,24 +151,46 @@ jobs:
       - name: Verify the packaged product needs no network (Linux)
         if: runner.os == 'Linux'
         run: |
-          # An empty network namespace: there is no route to block or unblock, and nothing
-          # about the app's own configuration can opt out of it.
-          unshare -rn _verify/campaign-intelligence/campaign-intelligence check-weights \
-            | tee offline.txt
-          grep -q "source: bundled" offline.txt
+          # `sudo unshare -n`, not `unshare -rn`: Ubuntu 24.04 restricts unprivileged user
+          # namespaces via AppArmor (kernel.apparmor_restrict_unprivileged_userns=1) and the
+          # runner images do not relax it, so the -r form fails with "write failed
+          # /proc/self/uid_map: Operation not permitted". Root needs no user namespace.
+          #
+          # And health-check, not check-weights: the weaker command only stats a path, which
+          # would pass without a network whether or not the product could actually work
+          # offline. This LOADS the vision model, which is where open_clip reaches for the
+          # Hub. Exit code is not the assertion - a runner has no Ollama, so text_search is
+          # legitimately down; visual_search is what this step is about.
+          sudo unshare -n _verify/campaign-intelligence/campaign-intelligence \
+            health-check --json | tee offline.json > /dev/null || true
+          python - <<'PY'
+          import json
+          report = json.load(open("offline.json"))
+          vision = report["components"]["visual_search"]
+          assert vision["ok"], f"the packaged product cannot load its vision model offline: {vision}"
+          print("visual_search ok with no network:", vision["detail"])
+          PY
 
       - name: Verify the packaged product needs no network (macOS)
         if: runner.os == 'macOS'
         env:
-          # No user namespaces on macOS runners, so block at the layer the Hub client
-          # actually uses: every HTTP(S) request is routed to a closed port on loopback.
+          # No user namespaces on macOS runners, so block at the layer the Hub client uses:
+          # every HTTP(S) request routed to a closed port on loopback. Deliberately WITHOUT
+          # HF_HUB_OFFLINE - setting it tells the client not to try, which would make the
+          # proxy block prove nothing at all.
           HTTP_PROXY: http://127.0.0.1:9
           HTTPS_PROXY: http://127.0.0.1:9
           ALL_PROXY: http://127.0.0.1:9
-          HF_HUB_OFFLINE: '1'
         run: |
-          _verify/campaign-intelligence/campaign-intelligence check-weights | tee offline.txt
-          grep -q "source: bundled" offline.txt
+          _verify/campaign-intelligence/campaign-intelligence health-check --json \
+            > offline.json || true
+          python - <<'PY'
+          import json
+          report = json.load(open("offline.json"))
+          vision = report["components"]["visual_search"]
+          assert vision["ok"], f"the packaged product cannot load its vision model offline: {vision}"
+          print("visual_search ok with every request proxied to a closed port:", vision["detail"])
+          PY
 
       - name: Verify the packaged product finds its weights (Windows)
         if: runner.os == 'Windows'
@@ -190,6 +212,24 @@ jobs:
           $v = python -c "import version; print(version.VERSION)"
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" installer\windows\campaign-intelligence.iss
           Copy-Item installer\windows\Output\CampaignIntelligence-Setup.exe .
+
+      - name: Verify the packaged product needs no network (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
+        run: |
+          # Windows had no offline check at all, while being the platform the product review
+          # was written against - on a network that blocks huggingface.co.
+          & _verify\campaign-intelligence\campaign-intelligence.exe health-check --json `
+            > offline.json
+          $report = Get-Content offline.json | ConvertFrom-Json
+          if (-not $report.components.visual_search.ok) {
+            throw "the packaged product cannot load its vision model offline: $($report.components.visual_search.detail)"
+          }
+          Write-Host "visual_search ok with every request proxied to a closed port"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

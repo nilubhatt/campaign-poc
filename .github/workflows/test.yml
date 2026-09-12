@@ -29,3 +29,27 @@ jobs:
         env:
           CAMPAIGN_POC_TEST_WEIGHTS: .weights-cache/open_clip_model.safetensors
         run: python -m pytest tests/ -v
+
+  # The Windows installer's [Code] section is Pascal Script, and nothing in the Python suite
+  # can tell whether it compiles. A reviewer proved the gap by mutation: the text-matching
+  # tests pass against a [Code] block that does not compile at all. ISCC is the only thing
+  # that knows.
+  installer-compiles:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Compile the installer against a stub bundle
+        shell: pwsh
+        run: |
+          # ISCC needs the payload to exist to resolve [Files]; the point here is the script,
+          # not the bundle.
+          New-Item -ItemType Directory -Force -Path dist\campaign-intelligence\models | Out-Null
+          Set-Content dist\campaign-intelligence\campaign-intelligence.exe 'stub'
+          Set-Content dist\campaign-intelligence\models\open_clip_model.safetensors 'stub'
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=0.0.0-test `
+            installer\windows\campaign-intelligence.iss
+          if ($LASTEXITCODE -ne 0) { throw "the Windows installer script does not compile" }

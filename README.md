@@ -176,11 +176,19 @@ Run from source, or ship a self-contained bundle (no Python on the target):
 ### Installing a bundle
 
 Each archive carries the installer for its own platform: `installer/linux/install.sh`,
-`installer/macos/install.sh`, and the Inno Setup `.exe` for Windows. All three verify the
-shipped CLIP weights against a checksum, ensure Ollama and the embedding model, wire Claude
-Desktop, and then **run a post-install self-test that blocks success if anything is wrong** —
-naming the component rather than leaving it to be discovered later by a tool call that times
-out. To re-run that check at any time:
+`installer/macos/install.sh`, and the Inno Setup `.exe` for Windows. All three ensure Ollama
+and the embedding model, create the data directory, and then **run a post-install self-test**
+that names the failing component and refuses to connect Claude Desktop if anything is wrong —
+rather than leaving it to be discovered later by a tool call that times out. The Unix
+installers additionally verify the shipped CLIP weights against a `.sha256` sidecar before
+anything else; on Windows, Inno Setup's own per-file integrity check covers the same ground.
+
+On Unix the new copy is staged and only swapped in once the self-test passes, so a failed
+upgrade leaves the working install untouched. On Windows the files are installed first (Inno
+has no seam for "keep the files but fail the run"), so a failed self-test shows a *"Installed,
+but not working"* finish page naming the component, with Claude Desktop left unconnected.
+
+To re-run that check at any time:
 
 ```
 campaign-intelligence health-check          # human-readable; exit 1 if anything is wrong
@@ -188,9 +196,11 @@ campaign-intelligence health-check --json   # the same report, for a script
 ```
 
 The install needs no network for the product itself: the weights ship in the archive, and CI
-proves it by running the packaged binary inside an empty network namespace on Linux, and with
-every HTTP request routed to a closed port on macOS. Ollama's own installer does need
-internet; `--no-ollama` skips it if the machine already has it.
+proves it on all three platforms by running the packaged binary's full health check — which
+loads the vision model, the step that would reach for the Hub — inside an empty network
+namespace on Linux, and with every HTTP request routed to a closed port on macOS and Windows.
+Ollama's own installer does need internet; `--no-ollama` skips it if the machine already
+has it.
 
 Both **Claude Web** (custom connector → `<tunnel-url>/mcp`) and **Claude Desktop** (stdio, or
 `mcp-remote` to the local HTTP server) are supported.

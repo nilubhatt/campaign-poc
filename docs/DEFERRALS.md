@@ -45,6 +45,12 @@ three times (the Windows installer version, `TOOL_NAMES`, and the plan's own cou
 | D20 | Fold persisted `blocked`/`degraded` notices into the feedback queue — a notice addressed to a person is by definition "needs something from a human" | 3.1 | 10.1 / 10.6 | Depends on D17 |
 | D21 | `scope: machine` says "ask whoever installed this"; when the current user *is* the administrator that is the wrong sentence | 3.1 | 11.1 / 11.4 | Needs the role attribution those items introduce |
 | D22 | `detail` interpolates exception text and asset paths, which on Windows embed `C:\Users\<name>\` — and `detail` is explicitly "send this to support" text | 3.1 | 11.7 | Disclosure surface; 11.7 owns the position |
+| D25 | Run the Windows installer end to end in CI — silently against a good bundle and a deliberately broken one — rather than only compiling it | 4.1 | 4.4 | The `[Code]` path has still never been executed anywhere; compiling it is new but is not the same thing |
+| D26 | The install is a defined moment with a screen on all three platforms; the personal-data disclosure belongs there (a wizard page *before* install on Windows) | 4.1 | 11.7 | No disclosure text exists yet |
+| D27 | `health_check` should gain a `rulebook` component, and the install gate should name it — the bundled rulebook is a shipped payload like the weights | 4.1 | 12.1 | No rulebook exists yet |
+| D28 | The customer overlay must live in `DATA_DIR`, not the app directory: both Unix installers delete and replace the app directory on every run, and `--purge` must name it | 4.1 | 12.2 | Same |
+| D29 | Pin the Ollama model by digest rather than by name — CLIP is hash-pinned, but any 768-dimension model currently satisfies the text check | 4.3 | 7.6 | Embedding identity is 7.6's subject |
+| D30 | `.bak` of `claude_desktop_config.json` is a second copy of other connectors' environment (possibly tokens), rewritten on every run, with no retention position | 3.2 | 11.7 | Disclosure and retention are 11.7's |
 | D23 | The customer overlay should name *who IT is here* (a support contact), so a remedy can say "contact X" rather than the generic "ask whoever installed this" | 3.1 | 12.2 | No overlay file yet |
 
 ## Open — decided against
@@ -63,6 +69,8 @@ three times (the Windows installer version, `TOOL_NAMES`, and the plan's own cou
 | L1 | Commentary and embedded images can only be read when the actual file reaches the server (`asset_ref`) | The `deck_text`-only path never gives us bytes. Inherent, not a bug — surfaced as `commentary_checked: false` so it is never mistaken for "there were none" |
 | L2 | A PPTX reviewer comment anchors to `"deck"`, not a slide | The number in `commentN.xml` is the comment part's ordinal, not the slide's. Resolving it needs the package relationships; an anchor that is sometimes silently wrong is worse than one that admits it does not know |
 | L3 | Legacy `.ppt` is stored but never text-extracted | No reliable pure-Python extractor. Reported as `legacy_ppt` with the instruction to re-save as `.pptx` |
+| L5 | A failed Windows self-test cannot abort setup or set a non-zero exit code | Inno invokes `ssPostInstall` with `HandleExceptions = True`, which logs and swallows any exception, so execution reaches the Finished page regardless; only `ssInstall` re-raises, and an exception there rolls the files back — contradicting the advice to fix the problem and re-run against what was just installed. What is achievable is done: Claude Desktop is left unconnected and the Finished page says *"Installed, but not working"*. Claiming an abort would be the overstatement this exercise is about |
+| L6 | Installing on someone else's behalf on Windows still configures the installing account | With a per-user install there is no UAC prompt to run steps under a different identity, and with an elevated one every step acts on the administrator's profile. No installer can fix this from the other side; the honest answer is to run it signed in as the person who will use it, which the script now says |
 | L4 | Caps are `len()` on code points, so emoji and combining characters count oddly against the 120/240 limits | The caps exist to stop prose, not to measure typography |
 
 ---
@@ -77,4 +85,8 @@ three times (the Windows installer version, `TOOL_NAMES`, and the plan's own cou
 | C4 | Folded warnings read as singular (`count` stored, never spoken) | Same pass — `{count_phrase}` filled by the fold |
 | C5 | A legacy `.ppt` emitted two warnings for one condition | Same pass |
 | C6 | `version.py` and the Windows installer's `AppVersion` could disagree at release | CI fails a tagged build whose tag does not match `version.py` |
+| C8 | Every fresh install failed its own gate — `health_check_cli` opens the database read-only by design, and nothing created it | Phase 4 review round: `campaign-intelligence init` is an install step, which also proves the data location is writable by whoever is running the installer |
+| C9 | A refused install still left Claude Desktop wired to the product it had just condemned | Same round: the gate runs before the wiring on all three platforms, and the failure message says so |
+| C10 | A failed upgrade destroyed the working copy before verifying the new one | Same round: the Unix installers stage and swap only after the self-test passes |
+| C11 | The Windows uninstaller never removed the Claude Desktop connector entry, while both Unix ones did | Same round: `unconfigure-desktop` |
 | C7 | `text_search_offline` said "start the local text model service", which names no gesture anyone performs | Caught by the tracker's own staleness test on its first run: it was owed to 4.3, and 4.3 had shipped. The remedy now names re-running the installer, which starts the service, installs the model, and self-tests both |
