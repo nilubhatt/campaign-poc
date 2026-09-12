@@ -82,7 +82,10 @@ _REGISTRY: dict[str, tuple] = {
     ),
     "image_not_fingerprinted": (
         "degraded", "record",
-        "These images are not in exact-reuse detection, so 'have we used this before?' may "
+        # {count} is filled in when several folded together and dropped when it is one:
+        # "1 images" is how a count that is always interpolated reads, and "An image" said
+        # about six of them is how one that never is reads.
+        "{count_phrase} not in exact-reuse detection, so 'have we used this before?' may "
         "answer no when the answer is yes.",
         "If reuse matters for this campaign, send the image again — fingerprinting happens "
         "on the way in.",
@@ -90,14 +93,14 @@ _REGISTRY: dict[str, tuple] = {
     ),
     "image_not_embedded": (
         "degraded", "call",
-        "These images will not come back in 'looks like this' searches.",
+        "{count_phrase} will not come back in 'looks like this' searches.",
         "Nothing — this finishes without you.",
         "Offer finish_indexing; the images are saved and do not need uploading again.",
     ),
     "image_not_stored": (
         "degraded", "record",
-        "An image in the deck could not be saved, so it is not searchable and not "
-        "reuse-checked. The rest of the deck is unaffected.",
+        "{count_phrase} could not be saved, so not searchable and not reuse-checked. The "
+        "rest of the deck is unaffected.",
         "Nothing, unless that particular image matters — in which case send it on its own.",
         "",
     ),
@@ -261,6 +264,7 @@ def collapse(entries: list[dict]) -> list[dict]:
     for key in order:
         entry = folded[key]
         reasons = entry.pop("_reasons")
+        entry["affects"] = _phrase(entry.get("affects", ""), entry["count"])
         if len(reasons) > 1:
             entry["detail"] = "; ".join(reasons[:5])
             if len(reasons) > 5:
@@ -273,6 +277,19 @@ def collapse(entries: list[dict]) -> list[dict]:
     # order and told Claude, in one tool's docstring, to sort it out mentally.
     result.sort(key=lambda e: SEVERITIES.index(e.get("severity", "note")))
     return result
+
+
+def _phrase(affects: str, count: int) -> str:
+    """Fill `{count_phrase}` once the fold knows how many there were.
+
+    A count that is stored and never spoken makes a folded warning read as though it were
+    about one thing — "An image in the deck could not be saved", said about six of them. A
+    count that is always spoken reads as "1 images". So the phrase is chosen by the number.
+    """
+    if "{count_phrase}" not in affects:
+        return affects
+    phrase = "An image in the deck" if count == 1 else f"{count} images in the deck"
+    return affects.replace("{count_phrase}", phrase)
 
 
 def leading(entries: list[dict]) -> Optional[dict]:

@@ -1151,17 +1151,7 @@ def find_similar_with_context(conn, **kwargs) -> dict:
     still waiting to be indexed. An absent result cannot announce itself, so the search has
     to."""
     matches = find_similar(conn, **kwargs)
-    warnings: list[dict] = []
-    left = store.count_unembedded(conn)
-    outstanding = left["chunks"] + left["assets"]
-    if outstanding:
-        records = len(store.outstanding_by_campaign(conn))
-        warnings.append(notices.notice(
-            "results_may_be_incomplete",
-            affects=f"{records} record(s) are only partly searchable ({outstanding} items "
-                    f"still to index), so these results may be incomplete.",
-            detail=f"{outstanding} unembedded items across {records} campaigns"))
-    return {"matches": matches, "warnings": warnings}
+    return {"matches": matches, "warnings": _incompleteness_warnings(conn)}
 
 
 # The three ways somebody's words end up attached to a deck. `speaker_note` is what the
@@ -1372,6 +1362,22 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
     return evidence
 
 
+def _incompleteness_warnings(conn) -> list[dict]:
+    """"Some of the library is not searchable yet", as a warning, for any surface that needs
+    to say so. Shared by find_similar_with_context and prepare_evaluation rather than written
+    twice, since the two disagreeing about the same library is its own defect."""
+    left = store.count_unembedded(conn)
+    outstanding = left["chunks"] + left["assets"]
+    if not outstanding:
+        return []
+    records = len(store.outstanding_by_campaign(conn))
+    return [notices.notice(
+        "results_may_be_incomplete",
+        affects=f"{records} record(s) are only partly searchable ({outstanding} items "
+                f"still to index), so these results may be incomplete.",
+        detail=f"{outstanding} unembedded items across {records} campaigns")]
+
+
 def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: int = 5,
                        record_type: Optional[str] = None, status: Optional[str] = None,
                        tags: Optional[Union[str, dict, list]] = None, match_all_tags: bool = False,
@@ -1388,6 +1394,8 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
     Pass a {"value": ..., "source": "verified"} tag to weigh only precedent whose matching
     performance claim is backed by real metric data, not a stated impression.
     """
+    # find_similar, not find_similar_with_context, so the "your library is only partly
+    # indexed" warning is added explicitly below rather than inherited — see the note there.
     evidence = find_similar(conn, text=proposal_text, top_k=top_k, record_type=record_type,
                             status=status, tags=tags, match_all_tags=match_all_tags,
                             region=region, market=market, markets=markets,
@@ -1409,6 +1417,11 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
             "most."
         ),
         "campaigns_with_outcomes": [e["campaign_id"] for e in concluded],
+        # The one surface where a half-indexed library matters most was the one that said
+        # nothing about it: find_similar_campaigns warns, and this — a verdict about to be
+        # saved against this evidence — did not. "How many precedents did this rest on" is
+        # the wrong number when records are missing from the search entirely (§6.6).
+        "warnings": _incompleteness_warnings(conn),
     }
 
 

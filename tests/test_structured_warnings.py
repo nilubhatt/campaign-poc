@@ -417,3 +417,70 @@ def test_an_unreachable_embedder_is_a_different_exception_from_a_rejected_chunk(
         "the model rejecting one input is not the service being down — the rest of the "
         "deck should still be attempted"
     )
+
+
+def test_a_folded_warning_reads_as_plural_when_it_is_plural(tmp_path, conn, monkeypatch):
+    """`count` was stored and no text ever consumed it, so six unreadable images said "An
+    image in the deck could not be saved" — singular, about one of six. The count is the
+    only part of a folded warning that says how big the problem is."""
+    deck = _deck_with_images(tmp_path, 4)
+    monkeypatch.setattr(core.images, "phash",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bad image")))
+
+    result = core.ingest_campaign(conn, title="Broken", asset_ref={"path": str(deck)},
+                                  confirm=True)
+
+    warning = next(w for w in result["warnings"] if w["code"] == "image_not_fingerprinted")
+    assert warning["count"] == 4
+    assert "4" in warning["affects"], (
+        f"the user is told how many: {warning['affects']}"
+    )
+
+
+def test_a_single_occurrence_does_not_say_a_number(tmp_path, conn, monkeypatch):
+    """The other half: "1 images" is how a count that is always interpolated reads."""
+    image = tmp_path / "hero.png"
+    _write_png(image)
+    monkeypatch.setattr(core.images, "phash",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bad image")))
+
+    result = core.ingest_image_asset(conn, campaign_id=_campaign(conn),
+                                     asset_ref={"path": str(image)})
+
+    warning = next(w for w in result["warnings"] if w["code"] == "image_not_fingerprinted")
+    assert "count" not in warning
+    assert "1 " not in warning["affects"]
+
+
+def test_a_judgment_is_told_when_the_library_is_only_half_indexed(conn, monkeypatch):
+    """`find_similar_campaigns` warns that results may be incomplete; `prepare_evaluation`
+    calls the unwrapped `find_similar` and says nothing — so the one surface where it matters
+    most, a verdict about to be saved against this evidence, was the one surface that stayed
+    silent about the evidence being partial."""
+    core.ingest_campaign(conn, title="Indexed", detail="a concluded campaign", confirm=True)
+    unindexed = core.ingest_campaign(conn, title="Not indexed", detail="another campaign",
+                                     confirm=True)
+    conn.execute("UPDATE campaign_chunks SET embedded = 0 WHERE campaign_id = ?",
+                 (unindexed["campaign_id"],))
+    conn.commit()
+
+    packaged = core.prepare_evaluation(conn, subject_title="New brief",
+                                       proposal_text="a campaign like the others")
+
+    assert any(w["code"] == "results_may_be_incomplete" for w in packaged["warnings"]), (
+        packaged.get("warnings")
+    )
+
+
+def test_one_condition_produces_one_warning(tmp_path, conn):
+    """A legacy .ppt reported both `legacy_ppt` and `unsupported_file_type` — two entries,
+    slightly different advice, one problem. Which of the two a surface leads with is then
+    arbitrary."""
+    deck = tmp_path / "old.ppt"
+    deck.write_bytes(b"\xd0\xcf\x11\xe0" + b"\x00" * 64)   # OLE2 magic
+
+    result = core.ingest_campaign(conn, title="Old deck", asset_ref={"path": str(deck)},
+                                  confirm=True)
+
+    codes = [w["code"] for w in result["warnings"]]
+    assert codes.count("legacy_ppt") + codes.count("unsupported_file_type") <= 1, codes

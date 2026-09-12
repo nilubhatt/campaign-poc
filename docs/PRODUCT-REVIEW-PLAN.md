@@ -458,6 +458,13 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       off until somebody acts), `degraded` (this record is incomplete, the product works),
       `note`. "Visual search is offline" and "one image of forty was skipped" are not the
       same news, and a flat list of strings made every surface treat them identically.
+      Three smaller review findings were carried for one round and closed here: a folded
+      warning now reads as plural when it is plural (`count` was stored and no text ever
+      consumed it, so six unreadable images said "An image in the deck could not be saved");
+      `prepare_evaluation` now carries `results_may_be_incomplete`, since the one surface
+      where a half-indexed library matters most — a verdict about to be saved against that
+      evidence — was the only one staying silent about it; and a legacy `.ppt` no longer
+      emits two warnings with slightly different advice for one condition.
       `notices.collapse()` folds repeats of one code into a single entry with a `count`,
       because a deck with twenty unreadable images produced twenty near-identical lines,
       which is how the one warning that mattered got scrolled past.

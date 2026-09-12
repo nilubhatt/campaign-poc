@@ -31,6 +31,22 @@ jobs:
         with:
           python-version: '3.12'
 
+      # A tag is the only place the version is stated twice, and the two have already
+      # disagreed once (the Windows installer said 0.2.7 while version.py said 0.3.0). Fail
+      # the build rather than publish a release whose assets contradict its own tag.
+      - name: Tag must match version.py
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          declared=$(python -c 'import version; print(version.VERSION)')
+          tagged="${GITHUB_REF_NAME#v}"
+          if [ "$declared" != "$tagged" ]; then
+            echo "tag $GITHUB_REF_NAME does not match version.py ($declared)" >&2
+            echo "Bump VERSION in version.py, or retag." >&2
+            exit 1
+          fi
+          echo "version $declared matches tag $GITHUB_REF_NAME"
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
