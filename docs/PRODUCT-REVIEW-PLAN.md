@@ -14,7 +14,13 @@ One item at a time, in the order below. For **each** item, in this order:
 4. Two **independent** adversarial/design reviewers (fresh agents, fable) on that item alone.
 5. Fix every real finding; re-review until clean.
 6. Record anything **not** done in [`DEFERRALS.md`](DEFERRALS.md) — deferred, decided
-   against, or an accepted limit — in the same commit that creates it.
+   against, or an accepted limit — in the same commit that creates it. **Every review
+   finding gets exactly one of three fates: fixed, a tracker row, or a decided-against row
+   with the reason.** No fourth option. This was added after two findings marked "worth
+   noting" in a review were neither fixed nor recorded and surfaced only because somebody
+   asked whether anything was outstanding — one of them was the first-run guidance
+   disappearing before the user had done any of the three things it was telling them to do.
+   A finding's severity decides how urgently it is handled, never whether it is tracked.
 7. Update this file's status, commit, push onto the **same** PR; then start the next item.
 
 Isolating each item this way is deliberate: no cross-feature drift, no batch that can't be
