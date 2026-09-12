@@ -1242,6 +1242,37 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       refuse the call at its own boundary, so the caller got "Field required" instead of this
       project's sentence about what an uncited assertion is — the exact failure `_enum`'s
       comment describes. Required in core, `NotRequired` in the type.
+      **From the re-review of those fixes — three of them had moved the problem rather than
+      closed it, which is the reason a fix round gets reviewed too.**
+      *The elision bound was per hop.* Ten legal 130-character hops chained across a thirty-
+      slide deck, because each one passed on its own; and a character budget alone never
+      catches a SHORT deck, where four slides assemble into a sentence nobody wrote while
+      leaving out barely fifty characters. Bounded now by the TOTAL elided (200) and by the
+      NUMBER of gaps (2). A quotation has one gap, occasionally two; four is a composition.
+      *The hyphen fold was asymmetric.* Deleting every `-\s+` deleted a spaced dash and left
+      an unspaced one, so "3 - 28 March" and the quote "3-28 March" folded to different
+      strings and a faithful quote came back as "do not paraphrase". The hyphenation join is
+      now anchored to an actual line break, and dash spacing is collapsed on both sides.
+      *Metric detail was not quotable* — the product's most common real citation. "CTR was
+      3.2 percent, well above the benchmark" is what `find_similar` shows the model as
+      evidence, and a metrics-only record was told it had "nothing but a title" while the
+      numbers' own words were exactly what was being quoted. And the *title* was quotable
+      whenever the record had any detail, so the same quote was evidence or not depending on
+      whether a brief happened to exist. Title out, results in.
+      *`closest_precedent` was echoed back raw* once it was validated at all: a model could
+      assert its own `verified` beside a 5,000-character junk field, one field above where
+      those keys are refused. It is rebuilt from known keys now — and its `layer` went into
+      `on_file[layer]` unvalidated, coming back as a `KeyError`, which `_catch_value_errors`
+      does not catch, so the caller got "Error executing tool" with the message discarded.
+      *Two unattributed comments were joined* into one quotable block, because `None == None`
+      — two strangers' remarks stitched into a single quotation, which is the misattribution
+      the layer rule exists to stop, one level down. The comparison was also on JSON text, so
+      key order decided whether one person's comment was one comment.
+      *And `basis` was the wrong word after all.* The first fix replaced `verified: true` with
+      `basis: "computed"`, which collides: a finding's `basis` says who produced the FINDING,
+      so the same key one level down claims the server wrote the citation. It did not — the
+      model wrote the quote and the id, and only the check is the server's. `checked` alone,
+      which says that and no more.
 - [ ] **6.2 (H) Guardrail breach vs departure from precedent** — two classes, different
       vocabulary, only one is debatable. *2.4 defined `kind` and the rule that a guardrail
       breach cannot be a note; what remains is making `kind` required, requiring a `rule_id`

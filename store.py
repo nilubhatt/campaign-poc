@@ -100,7 +100,7 @@ CREATE TABLE IF NOT EXISTS evaluations (
     summary       TEXT,            -- one line a person can act on (<= 240 chars)
     findings      TEXT,            -- JSON array: severity/category/finding/detail/precedent/fix
     resolved      TEXT,            -- JSON array of {was, now} - what a later version fixed
-    closest_precedent TEXT,        -- JSON {id, similarity}
+    closest_precedent TEXT,        -- JSON {campaign_id, layer, quote?, similarity?}
     approve_if    TEXT,            -- the testable change that would flip revise -> approve (§6.5)
     evidence      TEXT,            -- JSON: how much precedent this rests on (§6.6)
     provenance    TEXT,            -- JSON: rulebook/model/server versions behind it (§7.6)
@@ -763,16 +763,30 @@ def text_on_file(conn, campaign_id: str) -> Optional[dict]:
     could not be satisfied by re-copying more carefully. They are also STALE: `update_campaign`
     rewrites `title`/`detail` without re-chunking, so chunk 0 keeps the old wording and a
     citation of what the record no longer says verified against it. Both were found in review.
-    `title`/`detail`/`deck_text` are current by definition and contiguous by construction, and
-    every body chunk derives from them (`ingest_campaign` sets `deck_text` from the extracted
-    units when the caller did not supply it), so nothing quotable is lost.
+    `detail`/`deck_text` are current by definition and contiguous by construction, and every
+    body chunk derives from them (`ingest_campaign` sets `deck_text` from the extracted units
+    when the caller did not supply it), so nothing quotable is lost.
+
+    **The title is not in it.** A title is text, but it is not evidence: "the record says
+    'Always-on Lima Creator Programme 2026'" supports no finding about anything. The first
+    version included it and enforced that judgment only for stubs, which meant the same quote
+    was evidence or not depending on whether the record happened to have a brief.
+
+    **Metric detail is in it.** "CTR was 3.2 percent, well above the benchmark" is the
+    product's most common real citation, `find_similar` shows it to the model as evidence, and
+    the first version refused every quote of it — a metrics-only record was told it had
+    "title and numbers and nothing else" when the numbers' own words were exactly what was
+    being quoted. It is body rather than commentary because it is the record speaking about
+    itself, not somebody's remark about it.
 
     Commentary has no column — the chunks ARE the storage — so it stays chunk-based, with one
     concession: consecutive pieces carrying the SAME attribution are joined, because a comment
     longer than a chunk is split into pieces that all keep the same author, and a quote across
-    that split is one person's sentence. Pieces with different attributions are never joined:
-    stitching two people's remarks into one quotation is the misattribution the layer rule
-    exists to stop.
+    that split is one person's sentence. Pieces are joined only when the attribution is
+    present and equal: an unattributed run used to collapse into one quotable block because
+    `None == None`, which let two strangers' remarks be stitched into a single quotation — the
+    misattribution the layer rule exists to stop, one level down. Compared as parsed objects,
+    not as JSON text, so key order cannot decide it either way.
     """
     # Named columns are not safe to assume here. A database that predates a release is
     # missing whatever that release added, which is the whole reason `_migrate_schema`
@@ -784,8 +798,12 @@ def text_on_file(conn, campaign_id: str) -> Optional[dict]:
     row = conn.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
     if not row:
         return None
-    body = [row[field] for field in ("title", "detail", "deck_text")
+    body = [row[field] for field in ("detail", "deck_text")
             if field in columns and row[field]]
+    if _columns(conn, "metrics"):
+        body += [r["detail"] for r in conn.execute(
+            "SELECT detail FROM metrics WHERE campaign_id = ? ORDER BY created_at",
+            (campaign_id,)).fetchall() if r["detail"]]
 
     commentary: list[str] = []
     chunk_columns = _columns(conn, "campaign_chunks")
@@ -793,23 +811,23 @@ def text_on_file(conn, campaign_id: str) -> Optional[dict]:
     # so an empty list is the right answer, not a reason to skip the query and lose the body
     # (the body no longer comes from here anyway).
     if "kind" in chunk_columns:
-        last_source = object()
+        last = None
         for chunk in conn.execute(
-                "SELECT text, source, kind FROM campaign_chunks WHERE campaign_id = ? AND "
+                "SELECT text, source FROM campaign_chunks WHERE campaign_id = ? AND "
                 "kind = 'commentary' ORDER BY chunk_index", (campaign_id,)).fetchall():
-            if chunk["source"] == last_source and commentary:
+            source = json.loads(chunk["source"]) if chunk["source"] else None
+            if source is not None and source == last and commentary:
                 commentary[-1] += " " + chunk["text"]
             else:
                 commentary.append(chunk["text"])
-            last_source = chunk["source"]
+            last = source
 
-    # A title is text, but it is not a brief, and a record that has nothing else cannot
-    # support a citation — "the record says 'Imported KPI row Q3 Jakarta'" is evidence of
-    # nothing. The caller needs the difference to refuse it as the right thing ("there is
-    # nothing here to quote") rather than the wrong one ("your quote is not in it"), which
-    # would send a model off to reword a quote in a loop with no exit.
-    has_brief = bool(commentary) or any(text != row["title"] for text in body)
-    return {"body": body, "commentary": commentary, "brief": has_brief}
+    return {"body": body, "commentary": commentary,
+            # Whether there is anything here to quote at all. The caller needs the difference
+            # to refuse a stub as the right thing ("there is nothing here to quote") rather
+            # than the wrong one ("your quote is not in it"), which would send a model off to
+            # reword a quote in a loop with no exit.
+            "brief": bool(body or commentary)}
 
 
 def set_chunk_embedded(conn, chunk_id: str) -> None:

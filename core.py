@@ -525,19 +525,28 @@ _QUOTE_EQUIVALENTS = {
     "\u2018": "'", "\u2019": "'", "\u201b": "'",
     "\u201c": '"', "\u201d": '"', "\u201f": '"',
     "\u2010": "-", "\u2011": "-", "\u2013": "-", "\u2014": "-", "\u2212": "-",
+    # NFKC turns "\u2153" into "1\u20443" with a FRACTION SLASH, which is not the "/" anybody types.
+    "\u2044": "/",
 }
 # Characters that carry no word and no space: a soft hyphen marks where a word MAY break, a
 # zero-width space marks where a line may. Both are invisible, and a model retyping what it
 # read never reproduces them.
 _QUOTE_INVISIBLES = dict.fromkeys(
     "\u00ad\u200b\u200c\u200d\u2060\ufeff", "")
-# Hyphenation at a line break: "sched-\nule" is one word the layout split, not two. Applied
-# to both sides, so the only thing it can do is join a word that was split; it cannot make a
-# quote match text with a different word in it.
-_LINE_HYPHEN_RE = re.compile(r"-\s+")
+# Hyphenation at a LINE BREAK: "sched-\nule" is one word the layout split, not two. Anchored
+# to an actual line break, not to any whitespace — the first version deleted every "- " and
+# so deleted a spaced dash while leaving an unspaced one, which made the fold asymmetric:
+# "3 - 28 March" folded to "3 28" while the quote "3-28 March" folded to "3-28", and a
+# faithful quote was refused as paraphrase.
+_LINE_HYPHEN_RE = re.compile(r"(?<=\w)-[^\S\r\n]*[\r\n\v\f]\s*(?=\w)")
+# Everything else spelled with a dash reads the same however it was spaced, so a dash and the
+# space around it both collapse to one separator on both sides. "3-28", "3 - 28" and
+# "3 \u2013 28" are one date range written three ways, and refusing two of them would only teach
+# the model to stop quoting.
+_DASH_SPACING_RE = re.compile(r"\s*-\s*")
 # What a model writes when it leaves the middle out. Treated as "and then, further on in the
 # same stored unit" — never as "and somewhere else in the record".
-_ELISION_RE = re.compile(r"\s*(?:\u2026|\.\.\.)\s*")
+_ELISION_RE = re.compile(r"\s*(?:\[\s*(?:\u2026|\.\s*\.\s*\.)\s*\]|\u2026|\.\s*\.\s*\.)\s*")
 # `find_similar` marks a trimmed brief with this. A model quoting the tail of what it was
 # shown includes the marker; refusing that would be refusing our own punctuation.
 _TRUNCATION_MARKER = "[truncated]"
@@ -546,12 +555,23 @@ _TRUNCATION_MARKER = "[truncated]"
 # the word "verified" beside it is then a claim the check cannot support.
 _MIN_QUOTE = 12
 _MIN_QUOTE_SEGMENT = 8
-# How far an elision may reach. Unbounded, "Budget \u2026 cannot \u2026 post before the embargo"
-# stitched three unrelated slides into one sentence the deck never contained and the meaning
-# inverted — review reproduced exactly that. The per-unit rule alone does not stop it, because
-# `chunking.pack` merges slides up to 1800 characters, so a short deck is ONE unit. Leaving
-# out more than this is not an elision; it is two quotes, and they belong to two findings.
-_MAX_ELISION_GAP = 200
+# How much a quote may leave out IN TOTAL, across all of its elisions. Unbounded,
+# "Budget \u2026 cannot \u2026 post before the embargo" stitched three unrelated slides into one
+# sentence the deck never contained and the meaning inverted. The per-unit rule alone does not
+# stop it: `chunking.pack` merges slides up to 1800 characters, and body text is now read from
+# the row's columns, so a whole deck is one unit.
+#
+# Bounded PER HOP it did not stop it either — review chained ten 130-character hops across a
+# thirty-slide deck and the check passed every one of them, because each hop was legal on its
+# own. A total makes the arithmetic impossible to walk around: leave out more than this and it
+# is not an elision, it is two quotes, and they belong to two findings.
+_MAX_ELIDED = 200
+# And how many times. A character budget alone does not catch a SHORT deck: four ordinary
+# slides assembled into "Budget is fixed \u2026 Creators are briefed \u2026 Nobody may exceed \u2026
+# Nothing goes live" leaves out barely fifty characters, and it is still a sentence nobody
+# wrote. A quotation has one gap in it, occasionally two. Four is not a quotation with
+# elisions; it is a composition, and what it composes is deniable.
+_MAX_ELISIONS = 2
 
 
 def _fold_for_quote_match(text: str) -> str:
@@ -561,6 +581,7 @@ def _fold_for_quote_match(text: str) -> str:
     for raw, plain in {**_QUOTE_INVISIBLES, **_QUOTE_EQUIVALENTS}.items():
         text = text.replace(raw, plain)
     text = _LINE_HYPHEN_RE.sub("", text)
+    text = _DASH_SPACING_RE.sub(" ", text)
     return " ".join(text.split()).casefold()
 
 
@@ -582,6 +603,11 @@ def _quote_segments(quote: str, where: str) -> list:
             f"minimum, excluding anything elided). A word or two appears in almost any "
             f"record, so matching it certifies nothing — quote the phrase that makes the "
             f"point.")
+    if len(segments) > _MAX_ELISIONS + 1:
+        raise ValueError(
+            f"{where}precedent.quote leaves out {len(segments) - 1} separate passages. That "
+            f"is an assembly rather than a quotation — pick the one passage the finding "
+            f"rests on, or make it two findings.")
     short = [s for s in segments if len(s) < _MIN_QUOTE_SEGMENT]
     if short:
         raise ValueError(
@@ -600,12 +626,18 @@ def _quote_is_in(segments: list, texts: list) -> bool:
     `chunking.pack` merges slides up to 1800 characters — so "one unit" can be a whole short
     deck, and an unbounded elision inside it can stitch two unrelated slides together.
     """
+    quoted = sum(len(s) for s in segments)
     for unit in texts:
         haystack = _fold_for_quote_match(unit)
-        at = 0
-        for n, segment in enumerate(segments):
+        at, start, elided = 0, None, 0
+        for segment in segments:
             found = haystack.find(segment, at)
-            if found < 0 or (n and found - at > _MAX_ELISION_GAP):
+            if found < 0:
+                break
+            if start is None:
+                start = found
+            elided = (found + len(segment) - start) - quoted
+            if elided > _MAX_ELIDED:
                 break
             at = found + len(segment)
         else:
@@ -653,16 +685,15 @@ def _verify_quote(conn, cited: str, segments: list, layer: str, where: str, *,
                 f"support a breach finding at all — say what you can support instead of "
                 f"anchoring a rule to a campaign.")
     if not on_file["brief"]:
-        # Before the match, not after. The first version checked it afterwards so that a
-        # record whose only text is its title would still verify a quote OF that title — but
-        # a title is not evidence, and "the record says 'Imported KPI row Q3 Jakarta'"
-        # supports no finding about anything. Checking first also keeps the message honest:
-        # telling a model to reword a quote against a record that has nothing to quote is a
-        # loop with no exit. A stub from a KPI workbook is the common case.
+        # Before the match, not after, so the message is the right one: telling a model to
+        # reword a quote against a record that has nothing to quote is a loop with no exit.
+        # A stub from a KPI workbook with no metric detail is the common case — and the
+        # title is deliberately not counted, because "the record says 'Imported KPI row Q3
+        # Jakarta'" supports no finding about anything.
         raise ValueError(
-            f"{where}precedent cites {cited!r}, which has no brief on file to quote — it is "
-            f"a stub or a metrics-only record, title and numbers and nothing else. Cite a "
-            f"record with a brief in it, {instead}.")
+            f"{where}precedent cites {cited!r}, which has nothing on file to quote — no "
+            f"brief, no recorded results, no comments: a title and nothing else. Cite a "
+            f"record with words in it, {instead}.")
     if _quote_is_in(segments, on_file[layer]):
         return
     other = "commentary" if layer == "body" else "body"
@@ -744,15 +775,15 @@ def _clean_precedent(conn, value, where: str, *, kind=None) -> Optional[dict]:
     segments = _quote_segments(quote, where)
     _verify_quote(conn, rule_id or campaign_id, segments, layer, where,
                   is_rule=bool(rule_id), kind=kind)
-    # `basis: computed`, not `verified: true`. Two reasons, and the second is the one that
-    # matters. "Verified" already means something specific in this product — a performance
-    # claim backed by real metric data — and a marketer reading it on a finding whose cited
-    # campaign is tagged `stated` sees one word meaning two things on one screen, with the
-    # wrong reading (the FINDING is verified) the nearer one. And a bare boolean cannot grow:
-    # `checked` names what was actually established, so 7.6 can add "window" without a
-    # schema change and without a reader having to guess what the tick covered.
-    cleaned = {"quote": quote, "layer": layer,
-               "basis": "computed", "checked": ["record", "layer"]}
+    # `checked`, and nothing else. Not `verified: true`: "verified" already means something
+    # exact in this product — a performance claim backed by real metric data — and on a
+    # finding the nearer reading is that the FINDING is verified, which is not what was
+    # established. Not `basis: "computed"` either, which the first fix used: a finding's
+    # `basis` says who produced the FINDING, and the same key one level down would say the
+    # citation was computed by the server. It was not. The model wrote the quote and the id;
+    # only the CHECK is the server's, and `checked` says exactly that and no more. It is also
+    # the shape that can grow — 7.6 adds "window" to the list without a schema change.
+    cleaned = {"quote": quote, "layer": layer, "checked": ["record", "layer"]}
     if campaign_id:
         cleaned["campaign_id"] = campaign_id
     if rule_id:
@@ -772,15 +803,23 @@ def _clean_closest_precedent(conn, value) -> Optional[dict]:
 
     Review stored `{"campaign_id": "camp_nonexistent", "quote": "made up"}` here verbatim —
     an invented citation at the top of the judgment, where a summary is most likely to read
-    it aloud. The id has to resolve, and a quote has to be real, for the same reason it does
-    one field down. It is still MODEL-asserted rather than computed: D8 owns making the
-    server pick it, which needs 7.2's server-owned retrieval.
+    it aloud. It then echoed the raw dict back into the database, so a model could assert its
+    own `verified`/`checked` beside a 5,000-character junk field, one level up from the
+    finding where exactly those keys are refused.
+
+    So it is rebuilt rather than passed through, from known keys only. It is still
+    MODEL-asserted rather than computed: D8 owns making the server pick it, which needs 7.2's
+    server-owned retrieval.
     """
     if value is None:
         return None
     if not isinstance(value, dict):
         raise ValueError(f"closest_precedent must be an object with a campaign_id, got "
                          f"{type(value).__name__}")
+    where = "closest_precedent: "
+    asserted = [key for key in ("basis", "checked", "verified") if key in value]
+    if asserted:
+        raise ValueError(f"{where}{asserted[0]} is set by the server, not by you.")
     cited = value.get("campaign_id") or value.get("id")
     if not cited:
         raise ValueError("closest_precedent must name the campaign it points at "
@@ -789,11 +828,27 @@ def _clean_closest_precedent(conn, value) -> Optional[dict]:
         raise ValueError(f"closest_precedent names {cited!r}, which is not a record in this "
                          f"library. It is the id a summary quotes first — an invented one "
                          f"there is the most visible wrong citation the product can make.")
-    quote = _bounded(value.get("quote"), "closest_precedent.quote", _MAX_QUOTE)
+    # Validated, not passed through: an unknown layer reached `on_file[layer]` and came back
+    # as a KeyError, which `_catch_value_errors` does not catch, so the caller got "Error
+    # executing tool" with the message discarded — the very failure that decorator exists
+    # for. The finding-level precedent had validated this all along.
+    layer = value.get("layer") or "body"
+    if layer not in _LAYERS:
+        raise ValueError(f"{where}layer must be one of {list(_LAYERS)}, got {layer!r}")
+    cleaned = {"campaign_id": cited, "layer": layer}
+    quote = _bounded(value.get("quote"), "closest_precedent.quote", _MAX_QUOTE, where=where)
     if quote:
-        _verify_quote(conn, cited, _quote_segments(quote, "closest_precedent: "),
-                      value.get("layer") or "body", "closest_precedent: ", is_rule=False)
-    return value
+        _verify_quote(conn, cited, _quote_segments(quote, where), layer, where,
+                      is_rule=False)
+        cleaned["quote"] = quote
+        cleaned["checked"] = ["record", "layer"]
+    similarity = value.get("similarity")
+    if similarity is not None:
+        try:
+            cleaned["similarity"] = float(similarity)
+        except (TypeError, ValueError):
+            raise ValueError(f"{where}similarity must be a number, got {similarity!r}")
+    return cleaned
 
 
 def _clean_resolved(value, conn=None) -> list:

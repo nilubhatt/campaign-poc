@@ -164,8 +164,8 @@ class Precedent(TypedDict):
     matter; words do. Leave a short gap out with … and both halves are still checked, in
     order. Paraphrase is not quotation.
 
-    `basis` and `checked` come BACK on a stored precedent — they are the server's record of
-    what it established about your citation, never something you send."""
+    `checked` comes BACK on a stored precedent — it is the server's record of what it
+    established about your citation, never something you send."""
     # Required in every sense that matters, and deliberately NOT `quote: str`. Typed as
     # required, pydantic refuses the call at its own boundary and the caller gets "Field
     # required" instead of the sentence this project wrote — the exact failure the comment
@@ -724,6 +724,10 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
 
     Anchor findings to evidence, and the server checks it: a `precedent` must carry a
     `quote`, and that quote must actually be in the record it names, at the layer it claims.
+    The record's brief, its deck text and what it recorded as results are all quotable; its
+    title is not, because a title is not evidence. A quote is at least 12 characters, and may
+    leave out at most two short passages with … — more than that is an assembly rather than a
+    quotation, and it belongs in two findings.
     A quote that is not there is refused rather than saved — copy the words from the evidence
     you were given, use … for anything you leave out, and never paraphrase into quotation
     marks. If you cannot quote it, drop the citation and say it as an observation; an

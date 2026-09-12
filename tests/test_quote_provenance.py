@@ -85,13 +85,15 @@ def test_a_faithful_quote_is_accepted_and_marked_verified(conn, peru):
                       "quote": "content angle, posting date and requirements per asset"}}))
 
     stored = store.get_evaluation(conn, result["evaluation_id"])
-    precedent = stored["findings"][0]["precedent"]
-    # `basis: computed`, in the vocabulary this codebase already uses for "the server worked
-    # this out" — NOT `verified: true`. "Verified" already means a performance claim backed
-    # by real metrics here, and on a finding it reads as a claim that the FINDING is true.
-    # `checked` says what was actually established, so 7.6 can add "window" to it later.
-    assert precedent["basis"] == "computed"
-    assert precedent["checked"] == ["record", "layer"]
+    finding = stored["findings"][0]
+    # `checked`, and no more. NOT `verified: true` — that word already means a performance
+    # claim backed by real metrics in this product, and on a finding the nearer reading is
+    # that the FINDING is verified. And NOT `basis: "computed"`: a finding's `basis` says who
+    # produced the finding, so the same key one level down would claim the server wrote the
+    # citation. It did not; it only checked it.
+    assert finding["precedent"]["checked"] == ["record", "layer"]
+    assert "basis" not in finding["precedent"], "that key means something else on the finding"
+    assert finding["basis"] == "judged", "and it still says the model reached this"
 
 
 def test_the_check_is_the_servers_to_make_not_the_models(conn, peru):
@@ -140,7 +142,7 @@ def test_the_same_quote_marked_as_commentary_is_accepted(conn, peru):
                       "layer": "commentary", "author": "R. Vega", "anchor": "slide 4"}}))
 
     stored = store.get_evaluation(conn, result["evaluation_id"])
-    assert stored["findings"][0]["precedent"]["basis"] == "computed"
+    assert stored["findings"][0]["precedent"]["checked"] == ["record", "layer"]
     assert stored["findings"][0]["precedent"]["layer"] == "commentary"
 
 
@@ -254,7 +256,7 @@ def test_a_rule_id_naming_a_reference_record_verifies_like_any_other(conn):
         "precedent": {"rule_id": rules, "quote": "Never use superlatives"}}))
 
     stored = store.get_evaluation(conn, result["evaluation_id"])
-    assert stored["findings"][0]["precedent"]["basis"] == "computed"
+    assert stored["findings"][0]["precedent"]["checked"] == ["record", "layer"]
 
 
 def test_a_rule_id_pointing_at_an_ordinary_campaign_is_refused(conn, peru):
@@ -684,3 +686,172 @@ def test_a_chunk_of_an_unrecognised_kind_is_not_somebodys_comment(conn):
             "finding": "Said before",
             "precedent": {"campaign_id": cid, "layer": "commentary", "author": "R. Vega",
                           "quote": "a kind nobody has defined yet"}}))
+
+
+# ── second review round ─────────────────────────────────────────────────────
+
+def test_an_elision_cannot_be_chained_across_a_deck_in_legal_hops(conn):
+    """Bounding each HOP did not bound the quote. Ten 130-character hops across a thirty-
+    slide deck passed every check, because each one was legal on its own — the total is what
+    makes the arithmetic impossible to walk around."""
+    deck = core.ingest_campaign(conn, title="Thirty slides", deck_text="\n\n".join(
+        f"Slide {n} says point number {n} clearly and briefly." for n in range(1, 31))
+    )["campaign_id"]
+    with pytest.raises(ValueError):
+        core.save_evaluation(conn, **_evaluation({
+            "severity": "blocking", "kind": "precedent_departure", "finding": "Departs",
+            "precedent": {"campaign_id": deck, "quote": " … ".join(
+                f"point number {n} clearly" for n in range(1, 30, 3))}}))
+
+
+def test_a_short_deck_cannot_be_stitched_into_a_sentence_it_never_contained(conn):
+    """The original reproduction, with nothing padding it out: four ordinary slides, and a
+    "quote" assembled from one phrase in each."""
+    deck = core.ingest_campaign(conn, title="Four slides", deck_text=(
+        "Budget is fixed at 40,000 USD.\n\nCreators are briefed on Monday.\n\n"
+        "Nobody may exceed the cap.\n\nNothing goes live before the embargo."))["campaign_id"]
+    with pytest.raises(ValueError):
+        core.save_evaluation(conn, **_evaluation({
+            "severity": "blocking", "kind": "precedent_departure", "finding": "Departs",
+            "precedent": {"campaign_id": deck,
+                          "quote": "Budget is fixed … Creators are briefed … Nobody may "
+                                   "exceed … Nothing goes live"}}))
+
+
+@pytest.mark.parametrize("stored,quoted", [
+    ("Flight runs 3 - 28 March in Lima.", "3-28 March in Lima"),
+    ("Flight runs 3 - 28 March in Lima.", "3\u2013 28 March in Lima"),
+    ("Flight runs 3\u201328 March in Lima.", "3 - 28 March in Lima"),
+    ("The Lima\u2014based roster is fixed.", "The Lima - based roster is fixed"),
+    ("Budget\u2014and this is final\u2014is 40,000 USD.", "Budget — and this is final — is 40,000"),
+])
+def test_a_dash_reads_the_same_however_it_was_spaced(conn, stored, quoted):
+    """Deleting every "- " deleted a SPACED dash and left an unspaced one, so the fold was
+    asymmetric and a faithful quote came back as "do not paraphrase"."""
+    cid = core.ingest_campaign(conn, title="Dashes", detail=stored)["campaign_id"]
+    assert core.save_evaluation(conn, **_evaluation({
+        "severity": "blocking", "kind": "precedent_departure", "finding": "Departs",
+        "precedent": {"campaign_id": cid, "quote": quoted}}))["evaluation_id"]
+
+
+def test_a_word_split_across_a_line_break_is_still_one_word(conn):
+    """The narrower rule still has to do the job it was added for."""
+    cid = core.ingest_campaign(
+        conn, title="Justified", detail="Posting sched-\nule per creator agreed.")["campaign_id"]
+    assert core.save_evaluation(conn, **_evaluation({
+        "severity": "blocking", "kind": "precedent_departure", "finding": "Departs",
+        "precedent": {"campaign_id": cid, "quote": "Posting schedule per creator"}}))
+
+
+def test_what_a_campaign_actually_achieved_can_be_quoted(conn):
+    """The product's most common real citation, and it was refused outright: metric detail is
+    what `find_similar` shows the model as evidence, and a metrics-only record was told it had
+    "nothing but a title" while the numbers' own words were what was being quoted."""
+    cid = core.ingest_campaign(conn, title="Jakarta launch",
+                               detail="Six-week flight.", status="concluded")["campaign_id"]
+    core.add_metrics(conn, campaign_id=cid,
+                     detail="CTR was 3.2 percent, well above the 1.8 percent benchmark.")
+
+    assert core.save_evaluation(conn, **_evaluation({
+        "severity": "should_fix", "kind": "precedent_departure",
+        "finding": "Forecast is below what Jakarta actually did",
+        "precedent": {"campaign_id": cid,
+                      "quote": "well above the 1.8 percent benchmark"}}))["evaluation_id"]
+
+
+def test_a_campaign_title_is_not_evidence(conn):
+    """It was quotable as body text whenever the record had any detail at all, so the same
+    quote was evidence or not depending on whether a brief happened to exist."""
+    cid = core.ingest_campaign(conn, title="Always-on Lima Creator Programme 2026",
+                               detail="Six-week flight.")["campaign_id"]
+    with pytest.raises(ValueError):
+        core.save_evaluation(conn, **_evaluation({
+            "severity": "blocking", "kind": "precedent_departure", "finding": "Departs",
+            "precedent": {"campaign_id": cid,
+                          "quote": "Always-on Lima Creator Programme 2026"}}))
+
+
+def test_two_unattributed_comments_are_not_one_persons_sentence(conn):
+    """`None == None`, so an unattributed run collapsed into one quotable block — two
+    strangers' remarks stitched into a single quotation, which is the misattribution the
+    layer rule exists to stop."""
+    cid = core.ingest_campaign(conn, title="Peru", detail="Six-week flight.")["campaign_id"]
+    store.insert_chunks(conn, cid, ["The timeline concerns me a great deal."],
+                        kind="commentary")
+    store.insert_chunks(conn, cid, ["The budget is more than generous here."],
+                        kind="commentary")
+    with pytest.raises(ValueError):
+        core.save_evaluation(conn, **_evaluation({
+            "severity": "should_fix", "kind": "precedent_departure", "finding": "Both raised",
+            "precedent": {"campaign_id": cid, "layer": "commentary",
+                          "quote": "timeline concerns me … budget is more than generous"}}))
+
+
+def test_the_same_comment_is_joined_whatever_order_its_keys_were_written_in(conn):
+    """Comparing the stored JSON as text made key order decide whether one person's comment
+    was one comment."""
+    cid = core.ingest_campaign(conn, title="Peru", detail="Six-week flight.")["campaign_id"]
+    store.insert_chunks(conn, cid, ["The timeline concerns me a great deal"],
+                        kind="commentary", sources=[{"author": "R. Vega", "anchor": "s4"}])
+    store.insert_chunks(conn, cid, ["and the budget will not stretch."],
+                        kind="commentary", sources=[{"anchor": "s4", "author": "R. Vega"}])
+
+    assert core.save_evaluation(conn, **_evaluation({
+        "severity": "should_fix", "kind": "precedent_departure", "finding": "Raised before",
+        "precedent": {"campaign_id": cid, "layer": "commentary", "author": "R. Vega",
+                      "quote": "concerns me a great deal and the budget"}}))
+
+
+@pytest.mark.parametrize("quote", [
+    "across Lima and Arequipa [...] Every asset in the flighting table",
+    "across Lima and Arequipa […] Every asset in the flighting table",
+    "across Lima and Arequipa . . . Every asset in the flighting table",
+])
+def test_the_ways_a_model_actually_writes_an_elision(conn, peru, quote):
+    """`[...]` is routine, and refusing it accused the model of paraphrase for using ordinary
+    editorial punctuation."""
+    assert core.save_evaluation(conn, **_evaluation({
+        "severity": "blocking", "kind": "precedent_departure", "finding": "Departs",
+        "precedent": {"campaign_id": peru, "quote": quote}}))["evaluation_id"]
+
+
+def test_a_fraction_survives_being_normalised(conn):
+    """NFKC rewrites "⅓" with a FRACTION SLASH, which is not the "/" anybody types."""
+    cid = core.ingest_campaign(conn, title="Budgets",
+                               detail="Budget is ⅓ of the Peru total spend.")["campaign_id"]
+    assert core.save_evaluation(conn, **_evaluation({
+        "severity": "blocking", "kind": "precedent_departure", "finding": "Departs",
+        "precedent": {"campaign_id": cid, "quote": "1/3 of the Peru total spend"}}))
+
+
+def test_the_headline_precedent_is_cleaned_not_echoed(conn, peru):
+    """It was stored exactly as sent — so a model could assert its own `verified` beside a
+    5,000-character junk field, one level up from the finding where those keys are refused."""
+    with pytest.raises(ValueError) as e:
+        core.save_evaluation(
+            conn, closest_precedent={"campaign_id": peru, "verified": True},
+            **_evaluation({"severity": "blocking", "kind": "missing_information",
+                           "finding": "No end date"}))
+    assert "server" in str(e.value)
+
+    saved = core.save_evaluation(
+        conn, closest_precedent={"id": peru, "similarity": 0.91, "junk": "x" * 5000},
+        **_evaluation({"severity": "blocking", "kind": "missing_information",
+                       "finding": "No end date"}))
+    stored = store.get_evaluation(conn, saved["evaluation_id"])["closest_precedent"]
+    assert stored == {"campaign_id": peru, "layer": "body", "similarity": 0.91}
+
+
+def test_an_unknown_layer_on_the_headline_precedent_reaches_the_model(conn, peru):
+    """It went into `on_file[layer]` unvalidated and came back a KeyError — which
+    `_catch_value_errors` does not catch, so the caller got "Error executing tool" with the
+    message discarded. That decorator exists for exactly this."""
+    import asyncio
+    refused = asyncio.run(_call("save_evaluation", {
+        "subject_title": "Colombia v2", "verdict": "revise", "summary": "Nothing is dated.",
+        "closest_precedent": {"campaign_id": peru, "layer": "hearsay",
+                              "quote": "content angle, posting date"},
+        "findings": [{"severity": "blocking", "kind": "missing_information",
+                      "finding": "No end date"}]}))
+    assert "error" in refused, refused
+    assert "hearsay" in refused["error"]
