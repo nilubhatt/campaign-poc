@@ -75,11 +75,12 @@ def test_running_out_of_budget_says_what_happened_and_how_to_finish(conn, monkey
     assert budget_warnings, f"no warning explained the early stop: {result['warnings']}"
     warning = budget_warnings[0]
     assert str(result["chunks_embedded"]) in warning and str(result["chunks_total"]) in warning
-    # Deliberately NOT asserting that it names a recovery tool: `reembed` does not exist
-    # until item 2.2, and a warning that tells a marketer to run a tool Claude cannot find
-    # is worse than one that simply states the position. That assertion belongs to 2.2.
     assert "saved" in warning.lower(), "must say the upload itself survived"
-    assert "without re-uploading" in warning.lower(), "must say the rest is recoverable"
+    # 2.1 deliberately left this open: naming a recovery tool that did not exist yet would
+    # have sent a marketer after something Claude could not find. 2.2 built it, so the
+    # sentence can now be closed - this is that promise being kept.
+    assert "finish_indexing" in warning, "must name the tool that finishes the job"
+    assert "no re-upload" in warning.lower()
 
 
 def test_a_fast_embedder_still_completes_everything(conn):

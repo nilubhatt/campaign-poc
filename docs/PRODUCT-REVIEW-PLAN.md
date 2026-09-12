@@ -31,6 +31,14 @@ path handling) gets verified per platform, not assumed from one.
   on top, never as the product's baked-in default.
 - **Evaluation schema:** clean cutover to the structured findings array. No legacy free-text
   reading path — there are no production customers to preserve.
+- **Durable partial state over transactional writes.** The review asked for this to be
+  decided deliberately ("either is defensible, silent partial state is not"). Chosen:
+  records are committed before they are indexed, so an interrupted run leaves rows rather
+  than rolling back. Rolling back would throw away the fingerprinting and reuse-check that
+  are the product's core question, and a deck too large for one time budget could then never
+  be stored at all. The obligation that comes with the choice is that partial state is never
+  silent: counts in `list_campaigns`/`get_campaign`, a warning on the upload that names the
+  fix, a warning on search that results may be incomplete, and `finish_indexing` to close it.
 
 Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, pushed)
 
@@ -226,9 +234,46 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       timing line (chunks, images, seconds) belongs in 3.2's version/diagnostics work so the
       next customer run produces the number rather than another estimate.
 
-- [ ] **2.2 `reembed(scope)` + partial-state visibility** (defect 05). Backfill any row
-      missing a vector (text or image); surface counts in `list_campaigns`/`get_campaign` so
-      "stored" and "searchable" are never conflated. Two assets are currently unrepairable.
+- [x] **2.2 `finish_indexing` + partial-state visibility** (defect 05). Repairs anything
+      stored but not searchable — unembedded chunks and unembedded image assets alike —
+      without re-uploading a thing, which is the review's acceptance line. Verified over a
+      real MCP round-trip against the reviewer's own scenario: a deck whose budget ran out
+      shows `chunks_embedded: 0`, is invisible to search, and comes back fully findable.
+      **Named for the user's intent, not the mechanism.** "reembed" is jargon and the "re-"
+      is false — these rows were never embedded. `reembed` is left free for 7.6's genuinely
+      different operation, re-embedding when the model identity changes (moved wholly to 7.6;
+      this item does NOT do model-mismatch detection).
+      **The failure modes mattered more than the happy path.** With the embedder down, every
+      item fails in milliseconds, so the first version reported a full backlog and advised
+      "call again" — an invitation to loop forever against something that is not coming back.
+      Now: progress made → resume; no progress → name the cause and say retrying will not
+      help; items that can never succeed (their file is gone) are counted as `failed` rather
+      than `remaining`, so `complete` can still become true. Errors are collapsed by cause
+      with counts — two hundred copies of one Ollama message is not a report.
+      Also from review: a nonexistent `campaign_id` used to report "complete, nothing to do"
+      (now an error, like every sibling); a global run rewrote `updated_at` on every
+      campaign including untouched ones; the backlog was worked oldest-first, so the deck
+      someone just uploaded finished last *and* a permanently failing row was retried at the
+      head of every run, able to starve everything behind it; `count_unembedded` dragged
+      every chunk's full text out of the database to count it.
+      **Search no longer stays quiet.** The review's second complaint was that a half-indexed
+      record is invisible to search while looking fine in a listing. The listing was the easy
+      half; the moment it misleads someone is when they ask a question and get a confident
+      answer missing a deck. `find_similar_campaigns` now warns when anything is outstanding.
+      **Deliberately not done:** background/automatic continuation. Warm-up is idempotent and
+      read-only, so a background thread was right there; backfill is a write loop competing
+      for the same Ollama model and SQLite connection in a process Claude Desktop kills on
+      quit — which would manufacture exactly the silent partial state this item exists to
+      remove. The product answer is this primitive plus proactivity: 5.2's `next_actions`
+      carrying a prefilled call, 5.3's `gaps()`, 2.3's `health_check` backlog, and 7.4's
+      server `instructions` offering to finish outstanding work at session start.
+      **Known limit, for pre-2.1 data only:** images that were never *extracted* (a
+      `deck_text`-only upload, a failed extraction, legacy `.ppt`) have no row and so cannot
+      be repaired — re-upload with `asset_ref` is the only route. Everything stored since
+      2.1's two-pass image loop leaves a row. The reviewer's two stranded assets were stored
+      and fingerprinted, so they are the repairable kind, and v0.2.0's schema already carries
+      the `embedded` columns — their existing database needs no migration.
+
 - [ ] **2.3 `health_check` tool** (defect 06). Component status (ollama/clip/db) + coverage
       counts. Doubles as the installer's post-install self-test and a pre-demo preflight.
 - [ ] **2.4 Structured findings array replaces free-text `analysis`** (defect 07). verdict,

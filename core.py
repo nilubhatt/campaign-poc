@@ -230,7 +230,8 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                 f"embedded {embedded_count} of {len(chunk_texts)} sections before the "
                 f"{config.TOOL_TIME_BUDGET_SECONDS:g}s time budget ran out. Tell the user: the "
                 f"campaign is saved, {embedded_count} of {len(chunk_texts)} sections are "
-                f"searchable so far, and the rest can be finished later without re-uploading."
+                f"searchable so far. Offer to finish it now — call "
+                f"finish_indexing(campaign_id='{cid}'); no re-upload needed."
             )
             break
         try:
@@ -282,6 +283,162 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
 
 
 # ── retrieval / evidence for Claude ──────────────────────────────────────────
+
+def finish_indexing(conn, *, campaign_id: Optional[str] = None) -> dict:
+    """Finish records that are stored but not yet searchable (defect 05).
+
+    The review's complaint was that there was no route back: two image assets sat
+    fingerprinted with no vector, and "the only recovery is to upload the images again".
+    Text had the same hole. Item 2.1 then made partial state a DESIGNED outcome (a time
+    budget stops mid-deck rather than outliving the transport), so a way to finish the job
+    stopped being optional.
+
+    Named for what the user wants rather than the mechanism: nothing here is *re*-embedded,
+    these rows were never embedded at all. `reembed` stays free for the genuinely different
+    operation 7.6 needs — re-embedding everything when the model identity changes.
+
+    Works on both modalities because both leave a row: chunks are inserted before they are
+    embedded, and deck images are stored and fingerprinted in a first pass precisely so an
+    interrupted run leaves something to come back to.
+
+    Resumable, but only claims to be when continuing would actually help. An embedder that
+    is down fails every item instantly; advising "call again" there invites a loop against a
+    component that is not coming back on its own."""
+    if campaign_id is not None:
+        if not campaign_id.strip():
+            raise ValueError("campaign_id cannot be empty — omit it to finish everything")
+        if store.get_campaign(conn, campaign_id) is None:
+            raise ValueError(f"campaign {campaign_id} not found")
+
+    deadline = time.monotonic() + config.TOOL_TIME_BUDGET_SECONDS
+    failures: dict[str, int] = {}
+    unfixable = 0
+    sections_indexed = images_indexed = 0
+    touched: set[str] = set()
+    ran_out_of_time = False
+
+    def note(exc: Exception) -> bool:
+        """Record a failure, collapsed by cause. Returns whether it can never succeed."""
+        failures[str(exc)] = failures.get(str(exc), 0) + 1
+        return isinstance(exc, FileNotFoundError)
+
+    for chunk in store.get_unembedded_chunks(conn, campaign_id):
+        remaining_time = deadline - time.monotonic()
+        if remaining_time <= 0:
+            ran_out_of_time = True
+            break
+        try:
+            vec = embedding.embed(chunk["text"], timeout=remaining_time)
+            vectorstore.add(conn, chunk["id"], vec)
+            store.set_chunk_embedded(conn, chunk["id"])
+            sections_indexed += 1
+            touched.add(chunk["campaign_id"])
+        except Exception as exc:
+            if note(exc):
+                unfixable += 1
+
+    # Vision needs its model; if that is what is broken there is no point spending the
+    # budget discovering it once per asset, and a cold load inside this call is exactly the
+    # first-use cost item 2.1 exists to keep out of handlers.
+    vision = clip_embed.weights_status()
+    if not vision.ok:
+        assets = store.get_unembedded_assets(conn, campaign_id)
+        if assets:
+            failures[f"{vision.reason} {vision.remedy}"] = len(assets)
+    else:
+        for asset in store.get_unembedded_assets(conn, campaign_id):
+            if time.monotonic() >= deadline:
+                ran_out_of_time = True
+                break
+            path = config.ASSET_DIR / asset["file_path"]
+            try:
+                if not path.is_file():
+                    raise FileNotFoundError(
+                        f"the stored image file is missing, so it cannot be indexed; "
+                        f"re-upload the deck if its visual matches matter")
+                vec = clip_embed.embed_image(path)
+                vectorstore.add(conn, asset["id"], vec, space="asset")
+                store.mark_asset_embedded(conn, asset["id"])
+                images_indexed += 1
+                touched.add(asset["campaign_id"])
+            except Exception as exc:
+                if note(exc):
+                    unfixable += 1
+
+    # Only campaigns this run actually changed: refreshing every campaign's rollup rewrote
+    # updated_at on untouched records, showing a modification that never happened.
+    for cid in touched:
+        counts = store.chunk_counts(conn, cid)
+        if counts["total"]:
+            store.mark_embedded(conn, cid, counts["embedded"] == counts["total"])
+
+    left = store.count_unembedded(conn, campaign_id)
+    # Items that fail identically every run are NOT "remaining": counting them there means
+    # `complete` never becomes true, and a caller following the advice loops forever on
+    # something no amount of retrying can fix.
+    remaining = max(0, left["chunks"] + left["assets"] - unfixable)
+    errors = [{"reason": reason, "count": count}
+              for reason, count in sorted(failures.items(), key=lambda kv: -kv[1])]
+
+    indexed = sections_indexed + images_indexed
+    result = {
+        "indexed": indexed,
+        "sections_indexed": sections_indexed,
+        "images_indexed": images_indexed,
+        "remaining": remaining,
+        "failed": unfixable,
+        "complete": remaining == 0,
+        "errors": errors,
+        "outstanding": store.outstanding_by_campaign(conn, campaign_id)[:5],
+    }
+
+    if remaining and indexed and ran_out_of_time:
+        result["note"] = (
+            f"indexed {indexed} items; {remaining} still to go. Call finish_indexing again "
+            f"to continue — it resumes where it stopped. Keep going without stopping to ask, "
+            f"unless the user is waiting on something else; report once at the end."
+        )
+    elif remaining and not indexed:
+        cause = errors[0]["reason"] if errors else "the indexer did not respond"
+        result["note"] = (
+            f"nothing could be indexed: {cause} Calling again will not help until that is "
+            f"fixed — tell the user what is wrong instead of retrying."
+        )
+    elif remaining:
+        result["note"] = (
+            f"indexed {indexed} items; {remaining} still to go, and the ones attempted this "
+            f"time failed. Check the errors before calling again."
+        )
+    elif unfixable:
+        result["note"] = (
+            f"indexed {indexed} items. {unfixable} cannot be indexed at all (see errors) and "
+            f"were skipped; nothing else is outstanding."
+        )
+    return result
+
+
+def find_similar_with_context(conn, **kwargs) -> dict:
+    """find_similar, plus a warning when the library itself is incompletely indexed.
+
+    The review's second complaint about partial state was that a half-indexed record is
+    "silently invisible to every search while still appearing in list_campaigns". Listing it
+    honestly fixes the listing; the moment it actually misleads someone is here — asking
+    "what have we run in Mexico" and getting a confident answer that quietly omits the deck
+    still waiting to be indexed. An absent result cannot announce itself, so the search has
+    to."""
+    matches = find_similar(conn, **kwargs)
+    warnings: list[str] = []
+    left = store.count_unembedded(conn)
+    outstanding = left["chunks"] + left["assets"]
+    if outstanding:
+        records = len(store.outstanding_by_campaign(conn))
+        warnings.append(
+            f"{records} record(s) are only partly searchable ({outstanding} items still to "
+            f"index), so these results may be incomplete. Mention this if the answer looks "
+            f"thin, and offer to run finish_indexing."
+        )
+    return {"matches": matches, "warnings": warnings}
+
 
 def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str] = None,
                  top_k: int = 5, record_type: Optional[str] = None, status: Optional[str] = None,
@@ -533,7 +690,9 @@ def _store_and_fingerprint_image(conn, campaign_id: str, stored_name: str) -> di
         store.mark_asset_embedded(conn, aid)
         visually_embedded = True
     except Exception as exc:
-        warnings.append(f"asset stored but not visually embedded (aesthetic similarity will miss it): {exc}")
+        warnings.append(f"asset stored but not visually embedded (aesthetic similarity will "
+                        f"miss it): {exc}. Run finish_indexing to complete it — the image "
+                        f"is saved, so it does not need uploading again.")
 
     return {"asset_id": aid, "campaign_id": campaign_id, "fingerprinted": fingerprinted,
             "visually_embedded": visually_embedded, "warnings": warnings}

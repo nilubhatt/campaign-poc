@@ -328,8 +328,13 @@ def insert_campaign(conn, *, title, record_type="campaign", status=None, detail=
 
 
 def mark_embedded(conn, campaign_id: str, flag: bool) -> None:
-    """Flag whether a campaign has at least one embedded chunk (§6.1: many chunks per
-    campaign now hold the actual vectors — this is just the rollup for list/get display)."""
+    """Flag whether a campaign is FULLY embedded, i.e. searchable in its entirety.
+
+    This used to mean "has at least one embedded chunk", which was merely imprecise while
+    partial embedding was an accident. Item 2.1 made partial a designed outcome (a time
+    budget stops mid-deck), so "at least one" would have reported a deck with 2 of 12
+    sections indexed as searchable — the stored-versus-searchable conflation defect 05 is
+    about. The counts in list_campaigns tell the partial story."""
     conn.execute(
         "UPDATE campaigns SET embedded = ?, updated_at = ? WHERE id = ?",
         (1 if flag else 0, _now(), campaign_id),
@@ -369,6 +374,10 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
     ).fetchall()
     d["chunks_total"] = len(chunk_rows)
     d["chunks_embedded"] = sum(1 for r in chunk_rows if r["embedded"])
+    # Same counts list_campaigns reports, so a caller does not get a different answer about
+    # the same record depending on which tool it asked.
+    d["assets_total"] = len(d["assets"])
+    d["assets_embedded"] = sum(1 for a in d["assets"] if a["embedded"])
     return d
 
 
@@ -672,6 +681,81 @@ def get_assets_for_campaign(conn, campaign_id: str) -> list[dict]:
     return [dict(r) for r in conn.execute(
         "SELECT * FROM assets WHERE campaign_id = ? ORDER BY created_at", (campaign_id,)
     ).fetchall()]
+
+
+def get_unembedded_chunks(conn, campaign_id: Optional[str] = None) -> list[dict]:
+    """Chunks that exist but have no vector — stored, not searchable.
+
+    This state used to be an accident (an embedder failure mid-upload) and is now also a
+    designed outcome (a time budget stopping mid-deck), which is what makes it worth being
+    able to find rather than only to regret."""
+    sql = "SELECT id, campaign_id, text FROM campaign_chunks WHERE embedded = 0"
+    params: list = []
+    if campaign_id:
+        sql += " AND campaign_id = ?"
+        params.append(campaign_id)
+    # Newest first: the deck someone just uploaded is the one they are waiting on, not an
+    # eight-month-old backlog. A fixed oldest-first order also meant a permanently failing
+    # row was retried at the head of every run, able to consume the whole budget and starve
+    # everything behind it.
+    return [dict(r) for r in conn.execute(sql + " ORDER BY created_at DESC", params).fetchall()]
+
+
+def get_unembedded_assets(conn, campaign_id: Optional[str] = None) -> list[dict]:
+    """Image assets stored (and usually fingerprinted) but never visually embedded — the
+    reviewer's two stranded assets, which had no route back short of re-uploading them."""
+    sql = "SELECT id, campaign_id, file_path FROM assets WHERE embedded = 0"
+    params: list = []
+    if campaign_id:
+        sql += " AND campaign_id = ?"
+        params.append(campaign_id)
+    return [dict(r) for r in conn.execute(sql + " ORDER BY created_at DESC", params).fetchall()]
+
+
+def get_all_campaign_ids_with_chunks(conn) -> list[dict]:
+    return [dict(r) for r in conn.execute(
+        "SELECT DISTINCT campaign_id FROM campaign_chunks").fetchall()]
+
+
+def chunk_counts(conn, campaign_id: str) -> dict:
+    row = conn.execute(
+        """SELECT COUNT(*) AS total, SUM(CASE WHEN embedded THEN 1 ELSE 0 END) AS done
+           FROM campaign_chunks WHERE campaign_id = ?""", (campaign_id,)).fetchone()
+    return {"total": row["total"] or 0, "embedded": row["done"] or 0}
+
+
+def count_unembedded(conn, campaign_id: Optional[str] = None) -> dict:
+    """COUNT(*), not len(fetch-everything): counting a backlog should not drag every
+    chunk's full text out of the database."""
+    out = {}
+    for key, table in (("chunks", "campaign_chunks"), ("assets", "assets")):
+        sql = f"SELECT COUNT(*) AS n FROM {table} WHERE embedded = 0"
+        params: list = []
+        if campaign_id:
+            sql += " AND campaign_id = ?"
+            params.append(campaign_id)
+        out[key] = conn.execute(sql, params).fetchone()["n"]
+    return out
+
+
+def outstanding_by_campaign(conn, campaign_id: Optional[str] = None) -> list[dict]:
+    """Which records are unfinished, by name — "212 remaining" means nothing to a marketer;
+    "your Mexico deck is done, two older records have 40 sections left" does."""
+    sql = """
+        SELECT c.id AS campaign_id, c.title AS title,
+               (SELECT COUNT(*) FROM campaign_chunks ch
+                 WHERE ch.campaign_id = c.id AND ch.embedded = 0) AS sections_left,
+               (SELECT COUNT(*) FROM assets a
+                 WHERE a.campaign_id = c.id AND a.embedded = 0) AS images_left
+        FROM campaigns c
+    """
+    params: list = []
+    if campaign_id:
+        sql += " WHERE c.id = ?"
+        params.append(campaign_id)
+    rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+    return sorted([r for r in rows if r["sections_left"] or r["images_left"]],
+                  key=lambda r: -(r["sections_left"] + r["images_left"]))
 
 
 def get_all_fingerprints(conn, *, exclude_campaign_id: Optional[str] = None) -> list[dict]:

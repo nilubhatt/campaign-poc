@@ -320,11 +320,47 @@ def bulk_import_metrics(rows: list) -> dict:
 
 @mcp.tool()
 @_catch_value_errors
+def finish_indexing(campaign_id: Optional[str] = None) -> dict:
+    """Finish records that are stored but not yet searchable, without re-uploading anything.
+
+    Use this when an upload reported it ran out of time, when list_campaigns shows
+    chunks_embedded below chunks_total (or assets_embedded below assets_total), or after the
+    embedder was down while uploads went in. Pass a campaign_id for one record, or nothing
+    to work through everything outstanding.
+
+    Bounded by the same time budget as any other call, so a large backlog takes several
+    passes. **If `complete` is false and `indexed` was above zero, just call it again
+    straight away** — do not stop to ask each time; the user wants the job done, not a
+    progress meeting. Report once at the end. Only stop and ask if there is a lot left
+    (`remaining` in the hundreds) or the user is waiting on something else.
+
+    **If `indexed` is zero, do NOT call it again** — nothing was achieved and nothing will
+    be until the cause in `errors` is fixed. Tell the user what is broken instead.
+    `failed` counts items that can never be indexed (their file is gone); those are skipped
+    rather than retried forever, which is why `complete` can be true with failures present.
+    `outstanding` names the records still waiting, so you can say "your Mexico deck is done,
+    two older records still have 40 sections to go" rather than reciting numbers."""
+    conn = store.connect()
+    try:
+        return core.finish_indexing(conn, campaign_id=campaign_id)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
 def list_campaigns(record_type: Optional[RecordType] = None, status: Optional[Status] = None) -> dict:
     """List records in the memory. Optionally filter by record_type ('campaign', 'reference',
     'stub') and/or status ('proposed', 'in_flight', 'concluded'). is_superseded/supersedes
     show whether a record has been replaced by a corrected/later one (and by what) — check
-    these before treating two similarly-titled records as both live."""
+    these before treating two similarly-titled records as both live.
+
+    `embedded` means FULLY searchable. When it is false, chunks_embedded/chunks_total (and
+    assets_embedded/assets_total) say how much of the record search can actually find —
+    "stored" and "searchable" are different states, and an upload that ran out of time sits
+    between them. Anything short of complete can be finished with reembed, without the user
+    re-uploading anything; say so rather than leaving them to wonder why a deck they
+    uploaded isn't coming back in results."""
     conn = store.connect()
     try:
         rows = store.list_campaigns(conn, record_type=record_type, status=status)
@@ -332,6 +368,8 @@ def list_campaigns(record_type: Optional[RecordType] = None, status: Optional[St
             {"campaign_id": r["id"], "title": r["title"], "record_type": r["record_type"],
              "status": r["status"], "tags": r["tags"], "region": r["region"],
              "market": r["market"], "collection": r["collection"], "embedded": r["embedded"],
+             "chunks_total": r["chunks_total"], "chunks_embedded": r["chunks_embedded"],
+             "assets_total": r["assets_total"], "assets_embedded": r["assets_embedded"],
              "has_metrics": r["has_metrics"], "has_evaluations": r["has_evaluations"],
              "supersedes": r["supersedes"], "is_superseded": r["is_superseded"]}
             for r in rows]}
@@ -391,13 +429,13 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
     untrimmed record."""
     conn = store.connect()
     try:
-        return {"matches": core.find_similar(conn, text=text, campaign_id=campaign_id,
+        return core.find_similar_with_context(conn, text=text, campaign_id=campaign_id,
                                              top_k=top_k, record_type=record_type,
                                              status=status, tags=tags,
                                              match_all_tags=match_all_tags, region=region,
                                              market=market, markets=markets,
                                              collection=collection,
-                                             full_detail=full_detail)}
+                                             full_detail=full_detail)
     finally:
         conn.close()
 
