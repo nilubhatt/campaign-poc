@@ -2846,6 +2846,11 @@ def _fact_changes(conn, earlier: str, later: str) -> list:
     second is what a diff of computed facts is for.
     """
     before, after = facts.for_campaign(conn, earlier), facts.for_campaign(conn, later)
+    # A missing record is not a version where every fact changed. `for_campaign` returns `{}`
+    # for an id that resolves to nothing, and comparing that against a real record reported
+    # the whole checklist as having appeared out of nowhere.
+    if not before or not after:
+        return []
     changed = []
     for code in sorted(set(before) | set(after)):
         was = before.get(code, {}).get("status")
@@ -4006,14 +4011,23 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
              "read. "
              if _earlier_version_findings(conn, campaign_id) else "") +
             "`computed` holds the facts the SERVER established about this brief by reading "
-            "it — dates, budget, creator engagement rates, channel coverage, and whether any "
-            "statement about dates contradicts the calendar. Do NOT re-derive them and do "
-            "not contradict them: they are already checked, they carry the text they were "
-            "read from, and a model deciding them again is the variance this exists to "
-            "remove. Reason about what is genuinely judgment — precedent fit, premise "
-            "disagreements, whether a departure is an improvement. Read each `status`: "
+            "it — dates, budget, creator engagement rates, which channels are NAMED, and "
+            "whether any statement about dates contradicts the calendar. Treat them as "
+            "established and do not re-derive them: a model deciding them again is the "
+            "variance this exists to remove. Read each `status` before using it — "
             "`nothing_to_check` and `not_applicable` are not clean results, they are "
             "unchecked ones. "
+            # The escape hatch, and it is not a hedge. Every one of these is a regex, and a
+            # wrong computed fact is worse than a model's guess precisely because it carries
+            # the server's authority — so the one remaining check is the model reading the
+            # attached evidence and seeing that it does not support the claim. Telling it
+            # never to contradict them removes that check.
+            "Each fact carries the `evidence` it was read from. If the evidence plainly does "
+            "not support the fact — the \u201ccreator\u201d is an email address, the "
+            "\u201cbudget\u201d is a retail price — say so as a `computed_fact_disputed` "
+            "observation naming the code and quoting the evidence, and reason from what you "
+            "can see. Do not silently re-derive it, and do not defer to it against the "
+            "evidence in front of you. "
             "`outcomes` splits this evidence into what WORKED and what did NOT, by measured "
             "result rather than by impression. Read both before deciding: resemblance to a "
             "strong performer is not evidence, and a brief that looks like something that "

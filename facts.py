@@ -38,7 +38,7 @@ import datetime
 import re
 from typing import Optional
 
-MAX_EVIDENCE = 3
+MAX_EVIDENCE = 8
 _EVIDENCE_CHARS = 160
 
 # ── dates ────────────────────────────────────────────────────────────────────
@@ -48,27 +48,50 @@ _MONTH_RE = "|".join(sorted(_MONTHS, key=len, reverse=True))
 # "3 March 2026", "3rd of March", "March 3", "2026-03-03". Deliberately not a general date
 # parser: a wrong date read out of a brief is worse than an unread one, so this matches the
 # forms a brief actually uses and leaves the rest to `nothing_to_check`.
+# `may` is a modal verb before it is a month: "Budget line 3 may be deferred" was read as a
+# date. See `_ambiguous` for the two ways a month name does ordinary work in a brief.
+_AMBIGUOUS_MONTHS = {"may"}
+_MONTH_ABBR = {m.lower() for m in calendar.month_abbr if m}
 _DATE_RE = re.compile(
     rf"""(?P<iso>\b\d{{4}}-\d{{2}}-\d{{2}}\b)
-       | (?P<dmy>\b(?P<d>\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?(?P<m>{_MONTH_RE})\b
-          (?:\s+(?P<y>\d{{4}}))?)
-       | (?P<mdy>\b(?P<m2>{_MONTH_RE})\s+(?P<d2>\d{{1,2}})(?:st|nd|rd|th)?\b
+       | (?P<dmy>\b(?P<d>\d{{1,2}})(?P<ord>st|nd|rd|th)?\s+(?:of\s+)?(?P<m>{_MONTH_RE})\b
+          (?:,?\s+(?P<y>\d{{4}}))?)
+       | (?P<mdy>\b(?P<m2>{_MONTH_RE})\s+(?P<d2>\d{{1,2}})(?P<ord2>st|nd|rd|th)?\b
           (?:,?\s+(?P<y2>\d{{4}}))?)""",
     re.IGNORECASE | re.VERBOSE)
+# A month and a year with no day: "Go live March 2026". A real date reference, and reporting
+# it as "no date appears anywhere in this brief" was the parser-failure-as-absence the module
+# docstring forbids, committed by the module.
+_MONTH_YEAR_RE = re.compile(rf"\b(?P<m>{_MONTH_RE})\s+(?P<y>\d{{4}})\b", re.IGNORECASE)
 _WEEKDAYS = {d.lower(): n for n, d in enumerate(calendar.day_name)}
-_WEEKDAY_RE = re.compile(r"\b(" + "|".join(_WEEKDAYS) + r")\b", re.IGNORECASE)
+# Slides abbreviate, and a check that only knows "Tuesday" silently passes "Tue 7 March 2026".
+_WEEKDAYS.update({d.lower(): n for n, d in enumerate(calendar.day_abbr)})
+_WEEKDAYS.update({"tues": 1, "weds": 2, "thur": 3, "thurs": 4})
+_WEEKDAY_RE = re.compile(r"\b(" + "|".join(sorted(_WEEKDAYS, key=len, reverse=True))
+                         + r")\b\.?", re.IGNORECASE)
 _WEEKEND_WORDS = re.compile(r"\bweekend\b", re.IGNORECASE)
 
 # ── money ────────────────────────────────────────────────────────────────────
 # A figure, not a mention. "Budget: TBC" is a brief with no budget in it, and counting the
 # word would report the gap as filled by the label naming it.
+# Currency codes are UPPERCASE only. Lower-cased, `pen` and `cop` are ordinary words, so
+# "12 pen and paper" and "20 cop cars" were money.
 _MONEY_RE = re.compile(
-    r"(?:(?:[$£€]|\b(?:usd|eur|gbp|pen|cop|mxn|myr|idr)\b)\s*\d[\d,.]*\s*(?:k|m|bn)?"
-    r"|\b\d[\d,.]*\s*(?:k|m|bn)?\s*(?:[$£€]|\b(?:usd|eur|gbp|pen|cop|mxn|myr|idr)\b))",
+    r"(?:(?:[$£€]|\b(?:USD|EUR|GBP|PEN|COP|MXN|MYR|IDR)\b)\s*\d[\d,.]*\s*(?:k|m|bn)?\b"
+    r"|\b\d[\d,.]*\s*(?:k|m|bn)?\s*(?:[$£€]|\b(?:USD|EUR|GBP|PEN|COP|MXN|MYR|IDR)\b))")
+# A money figure is not a budget. A retail price, a ticket price and "$0 spend on paid" are
+# all money and none of them is the thing the review means by "budget detected". The figure
+# has to sit near a word that says it is one.
+_BUDGET_WORDS = re.compile(
+    r"\b(?:budget|spend|investment|fee|cost|funding|media\s+spend|working\s+media)\b",
     re.IGNORECASE)
+_BUDGET_WINDOW = 60
 
 # ── creator profiles and engagement ──────────────────────────────────────────
-_PROFILE_RE = re.compile(r"@[A-Za-z0-9_.]{2,}")
+# A handle, not an email address. `maria@brand.com` was two creator profiles, and almost every
+# brief carries a contact address — so the commonest real brief got an authoritative "none of
+# your creators has an engagement rate" about people who do not exist.
+_PROFILE_RE = re.compile(r"(?<![\w.@])@(?![\w.]*@)[A-Za-z0-9_.]{2,}(?<![.])")
 _RATE_RE = re.compile(r"(?:\b\d[\d.]*\s*%\s*(?:er\b|engagement)|"
                       r"\bengagement(?:\s+rate)?\b[^.\n]{0,20}?\d[\d.]*\s*%|"
                       r"\b\d[\d.]*\s*%\s*(?=[^.\n]{0,20}\bengagement\b))", re.IGNORECASE)
@@ -79,16 +102,19 @@ _RATE_RE = re.compile(r"(?:\b\d[\d.]*\s*%\s*(?:er\b|engagement)|"
 # list is the product's, and `channels.checklist` says which one was used so a reader is never
 # guessing what "missing" was measured against.
 _CHANNELS = {
-    "paid_social": (r"paid social", r"\bmeta\b", r"\bfacebook\b", r"\binstagram ads\b",
-                    r"\btiktok ads\b", r"\bpaid media\b"),
-    "organic_social": (r"organic social", r"\borganic\b", r"brand handles?",
-                       r"\bcommunity\b"),
+    "paid_social": (r"paid social", r"\bMeta\b(?! description)", r"\bfacebook ads?\b",
+                    r"\binstagram ads?\b", r"\btiktok ads?\b", r"\bpaid media\b"),
+    "organic_social": (r"organic social", r"organic (?:posts?|content|channels?|feed)",
+                       r"brand handles?", r"community (?:management|posts?|content)"),
     "influencer": (r"\binfluencers?\b", r"\bcreators?\b", r"\bugc\b", r"\bseeding\b"),
     "email": (r"\bemail\b", r"\bcrm\b", r"\bnewsletter\b"),
-    "out_of_home": (r"\booh\b", r"out.of.home", r"\bbillboard", r"\bmetro\b", r"\btransit\b"),
+    "out_of_home": (r"\bOOH\b", r"out.of.home", r"\bbillboards?\b",
+                    r"metro (?:stations?|network|takeover)", r"transit (?:media|ads?)"),
     "retail": (r"\bretail\b", r"in.store", r"\bstore launch\b", r"\bpop.?up\b"),
-    "pr": (r"\bpr\b", r"press", r"\beditorial\b", r"\bmedia relations\b"),
-    "web": (r"\bwebsite\b", r"\becom", r"\be-commerce\b", r"\blanding page\b", r"\bsite\b"),
+    "pr": (r"\bPR\b(?![-/.\w])", r"\bpress (?:release|office|coverage|kit|day)\b",
+           r"\beditorial\b", r"\bmedia relations\b"),
+    "web": (r"\bwebsite\b", r"\becomm?erce\b", r"\be-commerce\b", r"\blanding pages?\b",
+            r"\bon.site\b(?! activation)", r"\bdotcom\b"),
 }
 
 
@@ -109,6 +135,8 @@ def _parsed_dates(text: str) -> list:
     """Every date the checker recognised, with its span and whether a year was given."""
     out = []
     for m in _DATE_RE.finditer(text):
+        if not m.group("iso") and _ambiguous(m, text):
+            continue
         try:
             if m.group("iso"):
                 value = datetime.date.fromisoformat(m.group("iso"))
@@ -132,6 +160,12 @@ def _parsed_dates(text: str) -> list:
 
 def _date_coverage(text: str) -> dict:
     found = _parsed_dates(text)
+    # A month and a year is a date reference. "Go live March 2026" reported "no date appears
+    # anywhere in this brief", which is the parser-failure-as-absence the docstring forbids.
+    spans = {(m.start(), m.end()) for m, _, _ in found}
+    month_years = [m for m in _MONTH_YEAR_RE.finditer(text)
+                   if not any(a <= m.start() < b for a, b in spans)]
+    found = found + [(m, None, True) for m in month_years]
     if not found:
         return _fact("date_coverage", "absent",
                      "No date appears anywhere in this brief, so nothing in it can be "
@@ -140,6 +174,67 @@ def _date_coverage(text: str) -> dict:
                  f"{len(found)} date(s) appear in the brief.",
                  evidence=[_evidence(text, m.start(), len(m.group(0))) for m, _, _ in found],
                  dates_found=len(found))
+
+
+def _ambiguous(match, text: str) -> bool:
+    """Is this a month name doing ordinary work rather than naming a date?
+
+    Two ways it happens, both from review, both on ordinary brief prose:
+
+    "Budget line 3 may be deferred" — `may` is a modal verb, and `\bmay\b` after a number
+    looks exactly like a date. Capitalisation is the signal a brief actually carries: a month
+    is written "May" and the verb is not. A year or an ordinal settles it either way.
+
+    "Order 24 Dec-branded hoodies", "Reference 15 Jan-Feb split" — a month abbreviation
+    hyphenated into a compound is naming a product line, not a day.
+    """
+    name = match.group("m") or match.group("m2") or ""
+    after = text[match.end():match.end() + 2]
+    if name.lower() in _MONTH_ABBR and after[:1] == "-" and after[1:2].isalpha():
+        return True
+    if name.lower() not in _AMBIGUOUS_MONTHS:
+        return False
+    if match.group("y") or match.group("y2") or match.group("ord") or match.group("ord2"):
+        return False
+    return not name[:1].isupper()
+
+
+# Only these may sit between a weekday and the date it names. Anything else and the weekday
+# belongs to a different clause.
+_CLAIM_FILLER = re.compile(r"^[\s,]*(?:the\s+)?(?:of\s+)?(?:week\s+(?:commencing|of)\s+)?$",
+                           re.IGNORECASE)
+_CLAIM_WINDOW = 40
+
+
+def _claim_window(text: str, date, previous) -> str:
+    """The text that can legitimately be claiming a weekday for THIS date.
+
+    A fixed 40-character lookback read across neighbouring dates and sentence ends, so
+    "Saturday 7 March 2026 to 12 March 2026" — a correct brief — reported that the brief calls
+    12 March a Saturday. It produced the very finding this item was sold on, out of nothing,
+    with the server's authority behind it.
+
+    So the window stops at the previous date, and at a sentence boundary, and the weekday has
+    to be the last thing in it apart from filler like "the" or "of".
+    """
+    start = max(0, date.start() - _CLAIM_WINDOW)
+    if previous is not None:
+        # Defensive, and worth saying that no test can currently kill it: the filler rule
+        # below already refuses any weekday that is not the last token before the date, which
+        # covers every case a previous date creates. Kept because the two rules answer
+        # different questions — this one says which text belongs to this date, that one says
+        # whether the text is a claim — and a change to either should not silently widen the
+        # other. Review's mutation of this line survives the suite; that is accurate.
+        start = max(start, previous.end())
+    window = text[start:date.start()]
+    for boundary in (".", ";", "\n", " and ", " then ", " to ", " until ", " through "):
+        cut = window.rfind(boundary)
+        if cut >= 0:
+            window = window[cut + len(boundary):]
+    claimed = _WEEKDAY_RE.search(window)
+    if claimed and not _CLAIM_FILLER.match(window[claimed.end():]):
+        return ""
+    return window
 
 
 def _date_consistency(text: str) -> dict:
@@ -154,16 +249,17 @@ def _date_consistency(text: str) -> dict:
     checkable = [(m, d) for m, d, has_year in found if has_year]
     contradictions = []
 
-    for m, value in checkable:
-        # The word immediately before the date: "Saturday 3 March 2026", "the weekend of…".
-        before = text[max(0, m.start() - 40):m.start()]
-        claimed = _WEEKDAY_RE.findall(before)
+    for n, (m, value) in enumerate(checkable):
+        before = _claim_window(text, m, checkable[n - 1][0] if n else None)
+        claimed = _WEEKDAY_RE.search(before)
         actual = calendar.day_name[value.weekday()]
-        if claimed and _WEEKDAYS[claimed[-1].lower()] != value.weekday():
-            contradictions.append({
-                "detail": f"The brief calls this a {claimed[-1]}; "
-                          f"{value:%-d %B %Y} was a {actual}.",
-                "evidence": _evidence(text, m.start(), len(m.group(0)))})
+        if claimed:
+            named = claimed.group(1)
+            if _WEEKDAYS[named.lower()] != value.weekday():
+                contradictions.append({
+                    "detail": f"The brief calls this a {named}; "
+                              f"{value:%-d %B %Y} was a {actual}.",
+                    "evidence": _evidence(text, m.start(), len(m.group(0)))})
         elif _WEEKEND_WORDS.search(before) and value.weekday() < 5:
             contradictions.append({
                 "detail": f"The brief calls this a weekend; {value:%-d %B %Y} was a {actual}.",
@@ -198,13 +294,26 @@ def _date_consistency(text: str) -> dict:
 
 
 def _budget(text: str) -> dict:
-    hits = list(_MONEY_RE.finditer(text))
+    """A budget, not any money figure.
+
+    A retail price, a ticket price and a unit cost are all money, and none of them is what the
+    review means by "budget detected". `RRP $49.99 per unit` was reported as a budget, so the
+    model was told the brief carries one and told not to contradict it. The figure has to sit
+    near a word that says it is a budget.
+    """
+    money = list(_MONEY_RE.finditer(text))
+    hits = [m for m in money
+            if _BUDGET_WORDS.search(text[max(0, m.start() - _BUDGET_WINDOW):
+                                         m.end() + _BUDGET_WINDOW])]
     if not hits:
         return _fact("budget", "absent",
-                     "No money figure appears in this brief. Whether that matters is a "
-                     "judgment; that it is absent is not.")
-    return _fact("budget", "present", f"{len(hits)} money figure(s) appear in the brief.",
-                 evidence=[_evidence(text, m.start(), len(m.group(0))) for m in hits])
+                     "No budget figure appears in this brief"
+                     + (f" ({len(money)} money figure(s) appear, none of them near a word "
+                        f"like budget, spend or investment)." if money else "."),
+                     money_figures=len(money))
+    return _fact("budget", "present", f"{len(hits)} budget figure(s) appear in the brief.",
+                 evidence=[_evidence(text, m.start(), len(m.group(0))) for m in hits],
+                 money_figures=len(money))
 
 
 def _engagement_rate(text: str) -> dict:
@@ -221,8 +330,12 @@ def _engagement_rate(text: str) -> dict:
     # is how a roster reads on a slide. Not exact, and it does not need to be — the mechanical
     # question is whether the roster carries rates at all.
     with_rate = 0
-    for profile in profiles:
-        window = text[profile.end():profile.end() + 80]
+    for n, profile in enumerate(profiles):
+        # Bounded by the NEXT handle. A fixed 80 characters ran straight past it, so one
+        # creator was credited with another's rate and a roster with one measured profile
+        # read as fully rated.
+        end = profiles[n + 1].start() if n + 1 < len(profiles) else len(text)
+        window = text[profile.end():min(end, profile.end() + 80)]
         if _RATE_RE.search(window):
             with_rate += 1
     if not with_rate:
@@ -240,25 +353,52 @@ def _engagement_rate(text: str) -> dict:
                  profiles_found=len(profiles), profiles_with_rate=with_rate)
 
 
+# "No paid social", "we will not use influencers", "email is out of scope". A channel a brief
+# rules OUT is not a channel it covers, and reporting it as present inverts the finding.
+_NEGATION = re.compile(r"\b(?:no|not|without|excluding|minus)\b[^.\n]{0,20}$", re.IGNORECASE)
+_NEGATED_AFTER = re.compile(r"^[^.\n]{0,30}?\b(?:is|are)\s+(?:out of scope|excluded|"
+                            r"not (?:in scope|included|planned))\b", re.IGNORECASE)
+
+
+def _named_here(text: str, m) -> bool:
+    """Is this mention a plan, or a statement that the channel is not being used?"""
+    before = text[max(0, m.start() - 40):m.start()]
+    after = text[m.end():m.end() + 60]
+    return not (_NEGATION.search(before) or _NEGATED_AFTER.match(after))
+
+
 def _channels(text: str) -> dict:
-    present, evidence = [], []
+    present, evidence, ruled_out = [], {}, []
     for channel, patterns in _CHANNELS.items():
         for pattern in patterns:
-            m = re.search(pattern, text, re.IGNORECASE)
-            if m:
-                present.append(channel)
-                evidence.append(_evidence(text, m.start(), len(m.group(0))))
+            for m in re.finditer(pattern, text, re.IGNORECASE):
+                if _named_here(text, m):
+                    present.append(channel)
+                    # Keyed by channel: a flat list capped at three left five of eight
+                    # channels with no way to see which snippet justified them.
+                    evidence[channel] = _evidence(text, m.start(), len(m.group(0)))
+                    break
+                if channel not in ruled_out:
+                    ruled_out.append(channel)
+            if channel in present:
                 break
     missing = [c for c in _CHANNELS if c not in present]
+    ruled_out = [c for c in ruled_out if c not in present]
     if not present:
         return _fact("channels", "absent",
                      "No channel from the checklist is named in this brief.",
-                     present=[], missing=missing, checklist=list(_CHANNELS))
+                     present=[], missing=missing, ruled_out=ruled_out,
+                     checklist=list(_CHANNELS))
     status = "present" if not missing else "partial"
     return _fact("channels", status,
-                 f"{len(present)} of {len(_CHANNELS)} checklist channels are named"
-                 + (f"; missing: {', '.join(missing)}." if missing else "."),
-                 evidence=evidence, present=present, missing=missing,
+                 # "named", not "covered": the check reads words, and whether a channel that
+                 # is named is actually planned is a judgment. Saying "covered" would be the
+                 # server claiming something it did not establish.
+                 f"{len(present)} of {len(_CHANNELS)} checklist channels are NAMED in the "
+                 f"brief (named, not necessarily planned)"
+                 + (f"; not named: {', '.join(missing)}." if missing else "."),
+                 evidence=list(evidence.values()), evidence_by_channel=evidence,
+                 present=present, missing=missing, ruled_out=ruled_out,
                  checklist=list(_CHANNELS))
 
 

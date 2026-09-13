@@ -1656,6 +1656,35 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       dropped between versions, or a date contradiction introduced, was invisible. It reports
       the STATUS changing, not the value: "the budget went from 40,000 to 50,000" is content a
       reader can see, "the budget disappeared" is a change in what the brief can be judged on.
+      **From review, and every one of the five was a confident false fact on ordinary brief
+      text** — which is the specific thing this item must not do, because a wrong computed
+      fact is worse than a model's guess: it carries the server's authority and the note told
+      the model not to contradict it.
+      *`maria@brand.com` was two creator profiles.* Almost every brief carries a contact
+      address, so the commonest real brief got an authoritative "none of your creators has an
+      engagement rate" about people who do not exist — and it poisoned the D49 market gap on
+      top, because that filter excludes `not_applicable` and not a false `absent`.
+      *"500k impressions" marked PR as covered.* `press` was an unanchored substring, so the
+      checklist reported a channel as handled because another word contained it.
+      *A correct brief was told its dates contradict the calendar.* The weekday lookback was a
+      fixed forty characters, so "Saturday 7 March 2026 to 12 March 2026" — where 7 March
+      really is a Saturday — reported that the brief calls 12 March one. It produced the very
+      finding this item was sold on, out of nothing.
+      *"Budget line 3 may be deferred" was a date,* because `may` is a modal verb before it is
+      a month; and "Go live March 2026" was NO date at all, which is the parser-failure-as-
+      absence the module docstring forbids, committed by the module.
+      *"No paid social" reported paid social as present,* inverting the finding, and `RRP
+      $49.99 per unit` was a budget.
+      Fixed by precision rather than breadth: handles that are not email addresses, anchored
+      channel patterns with a negation check and `ruled_out` beside `present`, a claim window
+      bounded by the previous date and by sentence structure, capitalisation as the signal for
+      `may`, month-year as a date, uppercase-only currency codes, and a budget figure that has
+      to sit near a word saying it is one. The checklist now says NAMED rather than covered,
+      because the check reads words and whether a named channel is planned is a judgment.
+      **And the note got an escape hatch.** "Do not contradict them" removed the last check on
+      a wrong fact — the model reading the evidence and seeing the "creator" is an email
+      address. It now says to dispute a fact the evidence plainly does not support, naming the
+      code and quoting the evidence, rather than deferring to it or silently re-deriving it.
 - [ ] **7.2 Server owns the retrieval query.** Derive from the subject record/file, not
       model-authored `proposal_text`; derive filters from the subject's attributes; pin
       `top_k`; stable deterministic tie-breaking; record embedding-model version per vector.

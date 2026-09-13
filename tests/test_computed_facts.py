@@ -379,3 +379,211 @@ def test_a_record_the_field_cannot_apply_to_does_not_hide_the_gap(conn):
               if g["code"] == "field_never_recorded" and g["field"] == "engagement_rate"]
     assert blanks, "two rosters with no rates is a gap; the OOH brief is not evidence against"
     assert blanks[0]["campaigns"] == 2, "and it is counted over the records it applies to"
+
+
+# ── review round: every one of these was a confident false fact ─────────────
+
+@pytest.mark.parametrize("text", [
+    "Contact maria@brand.com and press@agency.co.uk for assets.",
+    "Send to mailto:jose@x.com before the launch.",
+])
+def test_an_email_address_is_not_a_creator(text):
+    """Almost every brief carries a contact address, so the commonest real brief got an
+    authoritative "none of your creators has an engagement rate" about people who do not
+    exist — and it poisoned the D49 market gap on top."""
+    assert facts.compute(text)["engagement_rate"]["status"] == "not_applicable"
+
+
+@pytest.mark.parametrize("text", [
+    "Express delivery on all orders.",
+    "500k impressions across the flight.",
+    "Impress the board with the numbers.",
+    "See https://x.com/pr/launch for the deck.",
+])
+def test_the_word_impressions_does_not_mean_public_relations(text):
+    """`press` was an unanchored substring, so every brief with a reach KPI reported PR as
+    covered — the checklist saying a channel is handled because another word contains it."""
+    assert "pr" not in facts.compute(text)["channels"]["present"]
+
+
+def test_press_release_still_counts():
+    assert "pr" in facts.compute("A press release goes out on launch day.")["channels"]["present"]
+
+
+def test_a_correct_brief_is_not_told_its_dates_contradict_the_calendar():
+    """The sharpest of them. A fixed lookback read across neighbouring dates, so a brief that
+    is right — 7 March 2026 really is a Saturday — was told it calls 12 March a Saturday. It
+    produced the very finding this item was sold on, out of nothing, with the server's
+    authority behind it."""
+    found = facts.compute("Saturday 7 March 2026 to 12 March 2026 in Lima.")
+    assert found["date_consistency"]["status"] == "consistent"
+
+
+@pytest.mark.parametrize("text", [
+    "Review on Monday. 7 March 2026 is launch.",
+    "The weekend of 7 March 2026, then 10 March 2026 workshop.",
+])
+def test_a_weekday_in_a_different_clause_is_not_a_claim_about_this_date(text):
+    assert facts.compute(text)["date_consistency"]["status"] == "consistent"
+
+
+@pytest.mark.parametrize("text,dates", [
+    ("Budget line 3 may be deferred.", 0),
+    ("We may 3 reduce spend.", 0),
+    ("Order 24 Dec-branded hoodies.", 0),
+    ("Reference 15 Jan-Feb split.", 0),
+    ("The 3rd of May is launch day.", 1),
+    ("Launch 3 May 2026.", 1),
+])
+def test_a_month_name_doing_ordinary_work_is_not_a_date(text, dates):
+    """`may` is a modal verb before it is a month, and a hyphenated abbreviation names a
+    product line. Both read as dates, and a date the brief does not contain is a fact about
+    the parser presented as a fact about the brief."""
+    assert facts.compute(text)["date_coverage"]["dates_found"] == dates
+
+
+@pytest.mark.parametrize("text", ["Go live March 2026, wrap May 2026.", "Runs across June 2026."])
+def test_a_month_and_a_year_is_a_date(text):
+    """"No date appears anywhere in this brief" was returned for "Go live March 2026" — the
+    parser-failure-as-absence the module docstring forbids, committed by the module."""
+    assert facts.compute(text)["date_coverage"]["status"] == "present"
+
+
+@pytest.mark.parametrize("text,detected", [
+    ("RRP $49.99 per unit; retails at €30.", False),
+    ("Ticket price $12 on the door.", False),
+    ("Budget is fixed at 40,000 USD.", True),
+    ("Total spend: $125,000.", True),
+    ("12 pen and paper, 20 cop cars.", False),
+])
+def test_a_price_is_not_a_budget(text, detected):
+    """A retail price is money and is not what the review means by "budget detected" — and
+    lower-cased `pen` and `cop` are ordinary words, so "12 pen and paper" was a budget."""
+    assert facts.compute(text)["budget"]["status"] == ("present" if detected else "absent")
+
+
+def test_a_brief_with_prices_and_no_budget_says_which(conn=None):
+    """"No money at all" and "money, but none of it a budget" are different states, and the
+    absent message has to say which — the same distinction every other check here makes."""
+    budget = facts.compute("RRP $49.99 per unit.")["budget"]
+    assert budget["money_figures"] == 1
+    assert "none of them near a word like budget" in budget["what_it_means"]
+
+
+def test_a_channel_the_brief_rules_out_is_not_a_channel_it_covers():
+    """"No paid social" reported paid social as present, which inverts the finding."""
+    found = facts.compute(
+        "No paid social. We will not use influencers. Email is out of scope.")
+    assert found["channels"]["present"] == []
+    assert set(found["channels"]["ruled_out"]) == {"paid_social", "influencer", "email"}
+
+
+@pytest.mark.parametrize("text,channel", [
+    ("Organic cotton tees in three colourways.", "organic_social"),
+    ("Community guidelines apply to all posts.", "organic_social"),
+    ("Metro Manila is the lead market.", "out_of_home"),
+    ("An on-site activation at the flagship.", "web"),
+    ("Meta description for the landing copy.", "paid_social"),
+    ("Ecomsoft is the vendor.", "web"),
+])
+def test_a_word_that_merely_contains_a_channel_name_is_not_that_channel(text, channel):
+    assert channel not in facts.compute(text)["channels"]["present"]
+
+
+def test_each_named_channel_shows_the_words_it_was_named_by():
+    """A flat evidence list capped at three left five of eight channels with nothing to check
+    them against — and unlabelled, so a reader could not tell which snippet was which."""
+    found = facts.compute(
+        "Paid social on Meta ads, a press release, an email push, and billboards in Lima.")
+    by_channel = found["channels"]["evidence_by_channel"]
+    assert set(by_channel) == set(found["channels"]["present"])
+    assert all(by_channel.values())
+
+
+def test_the_checklist_says_named_rather_than_covered():
+    """The check reads words. Whether a named channel is actually planned is a judgment, and
+    saying "covered" would be the server claiming what it did not establish."""
+    channels = facts.compute("Paid social on Meta ads.")["channels"]
+    assert "NAMED" in channels["what_it_means"]
+    assert "covered" not in channels["what_it_means"].lower()
+
+
+@pytest.mark.parametrize("text", ["Tue 7 March 2026 is launch.", "Weds 7 March 2026 is launch."])
+def test_an_abbreviated_weekday_is_still_a_claim(text):
+    """Slides abbreviate, and a check that only knows "Tuesday" silently passes the rest —
+    7 March 2026 was a Saturday."""
+    assert facts.compute(text)["date_consistency"]["status"] == "contradicted"
+
+
+def test_a_rate_belongs_to_the_profile_it_sits_beside():
+    """The 80-character window ran past the next handle, so one creator was credited with
+    another's engagement rate and the roster read as fully rated."""
+    found = facts.compute("@lucia.rios and @pedro.g are on the roster; "
+                          "@ana.p 3.1% ER is the only one measured.")
+    assert found["engagement_rate"]["profiles_with_rate"] == 1
+    assert found["engagement_rate"]["status"] == "partial"
+
+
+def test_a_missing_record_is_not_a_diff_where_everything_changed(conn):
+    """`for_campaign` returns `{}` for an unknown id, and `_fact_changes` then reported every
+    fact as having changed from nothing."""
+    import core
+
+    v1 = core.ingest_campaign(conn, title="Colombia v1",
+                              detail="Budget is 40,000 USD.")["campaign_id"]
+    assert core._fact_changes(conn, v1, "camp_nope") == []
+    assert core._fact_changes(conn, "camp_nope", v1) == []
+
+
+def test_the_model_is_told_what_to_do_when_a_computed_fact_is_wrong(conn):
+    """"Do not contradict them" removes the last check on a wrong fact — the model looking at
+    the evidence and noticing the creator is an email address. Every check here is a regex,
+    and the module's own premise is that a wrong computed fact is worse than a guess because
+    it carries the server's authority."""
+    import core
+
+    note = core.prepare_evaluation(conn, subject_title="X",
+                                   proposal_text="A brief.")["note"]
+    assert "evidence" in note.lower()
+    assert "computed_fact_disputed" in note
+
+
+def test_a_weekday_belonging_to_the_previous_date_does_not_reach_this_one():
+    """The sentence-boundary cut hides this on its own: "Saturday 7 March to 12 March" is cut
+    at " to ". Separated by a comma there is no boundary word, and only stopping the window at
+    the PREVIOUS DATE keeps the claim where it belongs."""
+    found = facts.compute("Key dates: Saturday 7 March 2026, 12 March 2026, 19 March 2026.")
+    assert found["date_consistency"]["status"] == "consistent"
+
+
+def test_a_weekday_further_back_in_the_same_clause_is_not_a_claim_about_this_date():
+    """A weekday has to be the last thing before the date apart from filler like "the" or
+    "of". Without that rule any weekday within forty characters became a claim, and no
+    boundary word separates these two."""
+    found = facts.compute("Monday briefing covers 7 March 2026 in detail.")
+    assert found["date_consistency"]["status"] == "consistent"
+
+    # And the rule still lets a real claim through.
+    assert facts.compute("Launch is Monday the 7 March 2026."
+                         )["date_consistency"]["status"] == "contradicted"
+
+
+def test_a_lowercase_currency_code_beside_a_budget_word_is_still_not_money():
+    """`pen` and `cop` are ordinary words. The budget-proximity rule hides this for prices,
+    but a brief that says "Budget: 20 cop cars" puts an ordinary word next to a budget word,
+    and only requiring uppercase codes keeps it out."""
+    assert facts.compute("Budget: 20 cop cars and 12 pen sets."
+                         )["budget"]["status"] == "absent"
+    assert facts.compute("Budget: 20000 COP for the market."
+                         )["budget"]["status"] == "present"
+
+
+def test_the_escape_hatch_says_what_to_do_and_not_only_what_to_call_it(conn):
+    """Naming the code is not the instruction. The model has to be told to quote the evidence
+    it is disputing, or "computed_fact_disputed" is a label with no argument attached."""
+    import core
+
+    note = core.prepare_evaluation(conn, subject_title="X",
+                                   proposal_text="A brief.")["note"]
+    assert "quoting the evidence" in note
+    assert "do not defer to it against the evidence" in note
