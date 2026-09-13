@@ -1618,12 +1618,44 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 
 *Reviewer's own order: 1 and 2 first, then 3 and 4, then 6 and 7 before any prompt tuning.*
 
-- [ ] **7.1 Compute what can be computed.** Must run on the BODY layer only (§2.5):
+- [x] **7.1 Compute what can be computed.** Must run on the BODY layer only (§2.5):
       a reviewer's comment saying "make sure we never mention adidas" would otherwise
       register as the brief mentioning adidas. Date coverage, ER presence per profile, budget
       detected, channel checklist, internal date consistency, guardrail keyword hits —
       returned as **computed facts** with evidence. Two thirds of real findings were
       mechanical; this removes most cross-user variance.
+      **The sentence that decides the design is "anything a model decides is something a model
+      can decide differently tomorrow."** Phase 7's subject is consistency across users, and
+      the mechanism here is not a better prompt — it is removing the question. Two thirds of
+      the output stops being generated, so two thirds of the variance has nowhere to come
+      from. In `facts.py`, its own module: six independent text checks that know nothing about
+      campaigns or retrieval, and burying them in `core.py` would make them harder to argue
+      with, which is the one thing a computed fact has to be.
+      **Five of the six shipped; the sixth is deferred and named.** Guardrail keyword hits
+      need a rulebook to have keywords, and today the "rulebook" is any `reference` record
+      retrieved by similarity — D92 carries it to §12.1. Shipping a keyword check against
+      whatever reference record happens to exist would be the guardrail-that-might-not-be-
+      retrieved the review already condemned.
+      **Absent is a finding; unknown is not.** "This brief carries no dates" is mechanical.
+      "No date in it carries a year, so no claim about which day it falls on can be checked"
+      is a different statement, and `date_consistency` returns `nothing_to_check` rather than
+      `consistent` for it — a green tick on an unread page is the collapse §6.4 needed three
+      codes to avoid. Same for `not_applicable`: a brief with no creators is not missing their
+      engagement rates.
+      **Closes D11** — the body layer, its first consumer. A reviewer's note saying "never
+      mention a competitor budget of 90,000" is not the brief's budget.
+      **Closes D49.** "No LATAM store launch has ever carried a budget" is one of the review's
+      own three gap examples and the only one about an absent FIELD inside records; it needed
+      this item because nothing could detect a budget. Two records minimum, because one record
+      missing a budget is a fact about that record and calling it a coverage gap would turn
+      every new market into a complaint the day it is added. Appended after the ranked gaps
+      and carrying no offer, because closing one means editing several records and that write
+      path is D84's — ranking an unofferable gap above an offerable one puts the thing nobody
+      can act on first.
+      **Closes D58.** `diff_campaigns` compared structured fields and citations; a budget
+      dropped between versions, or a date contradiction introduced, was invisible. It reports
+      the STATUS changing, not the value: "the budget went from 40,000 to 50,000" is content a
+      reader can see, "the budget disappeared" is a change in what the brief can be judged on.
 - [ ] **7.2 Server owns the retrieval query.** Derive from the subject record/file, not
       model-authored `proposal_text`; derive filters from the subject's attributes; pin
       `top_k`; stable deterministic tie-breaking; record embedding-model version per vector.

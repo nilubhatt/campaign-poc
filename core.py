@@ -24,6 +24,7 @@ import config
 import embedding
 import enums
 import extract
+import facts
 import images
 import notices
 import store
@@ -2161,6 +2162,56 @@ _GAP_RANK = {
 }
 
 
+# Which computed facts are worth reporting as never-recorded across a whole market (D49).
+# Not every check: `date_consistency` has no "never" reading, and `channels` is partial by
+# design for almost every brief.
+_FIELD_GAPS = ("budget", "date_coverage", "engagement_rate")
+# Below this a market is not a pattern. One record missing a budget is a fact about that
+# record; calling it a coverage gap would turn every new market into a complaint on the day
+# it is added.
+_MIN_FOR_A_PATTERN = 2
+
+
+def _fields_never_recorded(conn, campaigns: list) -> list:
+    """Markets where no record has ever carried a field (D49, §7.1).
+
+    "No LATAM store launch has ever carried a budget" is one of the review's own three
+    examples of a gap, and the only one about an absent FIELD inside records rather than an
+    absent record. It needed §7.1 first, because until then nothing could detect a budget.
+
+    `never` is the claim, so one record carrying the field makes it false — reporting the
+    market anyway would be the overstatement this whole surface is written against.
+    """
+    by_market: dict = {}
+    for campaign in campaigns:
+        by_market.setdefault(campaign.get("market") or campaign.get("region"),
+                             []).append(campaign)
+    found = []
+    for market, rows in sorted(by_market.items(), key=lambda kv: kv[0] or ""):
+        if not market or len(rows) < _MIN_FOR_A_PATTERN:
+            continue
+        computed = [facts.for_campaign(conn, c["id"]) for c in rows]
+        for field in _FIELD_GAPS:
+            statuses = [c.get(field, {}).get("status") for c in computed]
+            # "not_applicable" is not a miss — a brief with no creators is not missing their
+            # engagement rates, and counting it would make the gap unclosable.
+            relevant = [s for s in statuses if s != "not_applicable"]
+            if relevant and all(s == "absent" for s in relevant):
+                found.append({
+                    "code": "field_never_recorded",
+                    "field": field,
+                    "market": market,
+                    "campaigns": len(relevant),
+                    "what": f"No campaign in {market} has ever recorded a {field.replace('_', ' ')} "
+                            f"({len(relevant)} record(s) checked, all missing it).",
+                    "why_it_matters": "A field missing from every record in a market is a gap "
+                                      "no single upload reveals — every judgment there is "
+                                      "made without it and nothing says so.",
+                    "basis": "computed",
+                })
+    return found
+
+
 def gaps(conn) -> dict:
     """What this library is missing, ranked, with what would close each one.
 
@@ -2178,6 +2229,7 @@ def gaps(conn) -> dict:
     # gap. `after_upload` already drew this line; this did not.
     ran = [c for c in campaigns if c.get("status") == "concluded"]
     found: list[dict] = []
+    field_gaps = _fields_never_recorded(conn, campaigns)
 
     if not campaigns:
         # Every gap is present in an empty library, which makes the list useless. A new
@@ -2287,7 +2339,13 @@ def gaps(conn) -> dict:
     # worse is a complaint, which this item's own rule forbids; `commentary_checked` is kept
     # so it can be reported the moment there is something that closes it (D51).
 
-    return _ranked(found)
+    # Appended after ranking, not among the ranked gaps: these are patterns across a market
+    # rather than one missing thing, and they carry no offer, because closing one means
+    # editing several records and that write path is D84's. Ranking an unofferable gap above
+    # an offerable one would put the thing nobody can act on first.
+    ranked = _ranked(found)
+    ranked["gaps"] += field_gaps
+    return ranked
 
 
 def _ranked(found: list[dict]) -> dict:
@@ -2549,6 +2607,10 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
         "carried_stale": (_stale_citations(conn, before, "earlier")
                           + _stale_citations(conn, after, "later")),
         "record_changes": _record_changes(first, second),
+        # D58: what the BRIEFS say differently, not just what their structured fields do. A
+        # budget dropped, a channel gone, a date contradiction introduced — all invisible
+        # until §7.1 could read them, and all things a reader of a v1→v2 diff is asking about.
+        "fact_changes": _fact_changes(conn, earlier, later),
         "comparable": all(structured),
         "warnings": warnings,
     }
@@ -2773,6 +2835,28 @@ def _reread(earlier: dict, later: dict) -> dict:
         "reread": ("softened" if _DEPARTURES.index(after) > _DEPARTURES.index(before)
                    else "hardened"),
     }
+
+
+def _fact_changes(conn, earlier: str, later: str) -> list:
+    """Computed facts whose STATUS changed between two versions (D58, §7.1).
+
+    Status, not value: "the budget went from 40,000 to 50,000" is a change in the brief that
+    a reader can see for themselves, while "the budget disappeared" is a change in what the
+    brief can be judged on. The first is content and the second is coverage, and only the
+    second is what a diff of computed facts is for.
+    """
+    before, after = facts.for_campaign(conn, earlier), facts.for_campaign(conn, later)
+    changed = []
+    for code in sorted(set(before) | set(after)):
+        was = before.get(code, {}).get("status")
+        now = after.get(code, {}).get("status")
+        if was == now:
+            continue
+        changed.append({
+            "code": code, "was": was, "now": now, "basis": "computed",
+            "what_it_means": (after.get(code) or before.get(code) or {}).get("what_it_means"),
+        })
+    return changed
 
 
 def _record_changes(first: dict, second: dict) -> dict:
@@ -3921,6 +4005,15 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
              "which corrections were taken instead of guessing from how alike two sentences "
              "read. "
              if _earlier_version_findings(conn, campaign_id) else "") +
+            "`computed` holds the facts the SERVER established about this brief by reading "
+            "it — dates, budget, creator engagement rates, channel coverage, and whether any "
+            "statement about dates contradicts the calendar. Do NOT re-derive them and do "
+            "not contradict them: they are already checked, they carry the text they were "
+            "read from, and a model deciding them again is the variance this exists to "
+            "remove. Reason about what is genuinely judgment — precedent fit, premise "
+            "disagreements, whether a departure is an improvement. Read each `status`: "
+            "`nothing_to_check` and `not_applicable` are not clean results, they are "
+            "unchecked ones. "
             "`outcomes` splits this evidence into what WORKED and what did NOT, by measured "
             "result rather than by impression. Read both before deciding: resemblance to a "
             "strong performer is not evidence, and a brief that looks like something that "
@@ -3944,6 +4037,13 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
             "an observation, and saying it as one is better than a citation that fails."
         ),
         "campaigns_with_outcomes": [e["campaign_id"] for e in concluded],
+        # §7.1: the two thirds of a real evaluation that were mechanical, run as code so they
+        # stop being generated at all. From the RECORD when the subject is one — the same
+        # reasoning §6.4 reached about which text a check should run against — and from the
+        # body layer either way (D11), because a reviewer's note saying "never mention a
+        # competitor budget of 90,000" would otherwise be read as the brief's budget.
+        "computed": (facts.for_campaign(conn, campaign_id) if campaign_id
+                     else facts.compute(proposal_text)),
         # §6.4's other half, and the half that can actually change a verdict. The save-time
         # search RECORDS overconfidence; by then the judgment is written. What changes the
         # reasoning is seeing both sides while reasoning — so the evidence that worked and
