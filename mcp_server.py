@@ -25,6 +25,66 @@ import store
 # know to make (§3.2, defect 10). The restart sentence is here for the same reason: the
 # reviewer lost time to a rebuilt server whose old schema the client was still holding, and
 # closing the window does not stop the server.
+# §7.4. The evaluation procedure, written ONCE and referenced twice: in the server-level
+# `instructions` (a system prompt every client surfaces, which most servers leave empty) and
+# in `prepare_evaluation`'s own description. Not two copies that agree today — this project
+# has watched a hand-maintained copy drift four separate times, and a procedure whose two
+# halves disagree is worse than one that lives in a single place, because each reader is
+# confident and they are not reading the same thing.
+#
+# What it does NOT contain is as deliberate as what it does. The review asks for "the
+# scorecard's six criteria"; those belong to the customer's rulebook, which §12.1 has not
+# built, and hard-coding one customer's rubric into a product that ships generic is the thing
+# the product owner ruled out. It says so rather than omitting it silently.
+EVALUATION_PROCEDURE = """\
+HOW TO JUDGE A BRIEF. Every user of this library gets this same procedure; following it is
+what makes two people's judgments of one brief comparable.
+
+1. Call `prepare_evaluation`, passing `campaign_id` if the brief is already a record — the
+   server then derives the query and filters from the record, so the same subject retrieves
+   the same evidence however you describe it. Read it before writing anything. `computed`
+   holds facts the server established by reading the brief (dates, budget, engagement rates,
+   channels named, calendar contradictions): do not re-derive them, and dispute one only by
+   quoting the `evidence` it carries. `outcomes` splits precedent into what WORKED and what
+   did not, by measured result.
+2. Reason about what is genuinely judgment: precedent fit, premise disagreements, whether a
+   difference is an improvement. Weight concluded campaigns over proposed, and `verified`
+   performance over `stated` — a stated claim is somebody's impression.
+3. Call `save_evaluation`, passing `retrieval` (the receipt from step 1) so the server can
+   record which of your citations it had actually shown you.
+
+EVERY FINDING CITES SOMETHING IT CAN QUOTE. A precedent carries a `quote` from the record it
+names and the server checks it is really there; paraphrase is refused. Mark the LAYER: `body`
+is what the deck says, `commentary` is what somebody said ABOUT it. Quoting a reviewer's
+objection is often the best evidence there is — storing it unmarked says the deck claimed it,
+which is false.
+
+TWO CLASSES OF FINDING, AND THEY ARE NOT THE SAME KIND OF STATEMENT.
+  `guardrail_breach`     — a rule the customer wrote was broken. Cite the rule. NOT DEBATABLE:
+                           state it, never soften it into a question, and never a `note`.
+  `precedent_departure`  — done differently from a campaign on file. Cite the campaign, and
+                           say which way it departs: `regression`, `unexplained`, or
+                           `possible_improvement`. Debatable by design — ask, do not instruct.
+  `missing_information` / `internal_contradiction` — claims about the brief in front of you.
+                           They need no citation; do not go looking for one to satisfy a shape.
+
+THE SERVER ARGUES WITH YOU. After you save it searches for precedent CONTRADICTING your
+verdict and returns `disconfirming`. Read the `code`, not the absence of rows: "could not be
+checked" and "nothing came back" are opposite conclusions. If it found something you did not
+cite, say so before the verdict. `evidence` counts what the judgment rests on — give that
+before the verdict too, because afterwards a caveat reads as hedging.
+
+OUTPUT CONTRACT. `verdict` (approve / revise / reject), a one-line `summary`, one short
+finding per problem with `severity`, `kind`, and a `fix` if above a note. A `revise` carries
+`approve_if`: the change that would make it an approve. An `approve` and a `reject` may not.
+Say the verdict, the summary and what has to change; the reasoning is in `get_evaluation`.
+
+NOT YET IN THIS PROCEDURE: the customer's scorecard criteria and guardrail list. They belong
+in a versioned rulebook shipping with the product (§12.1). Until then, guidelines here are
+ordinary records retrieved by similarity — cite them when they are retrieved, and never claim
+a rule was checked when it simply was not returned."""
+
+
 INSTRUCTIONS = f"""Campaign Intelligence {config.VERSION_FULL} — a marketing team's own
 campaign library: past campaigns, what they achieved, and judgments about new proposals
 weighed against that record.
@@ -53,7 +113,9 @@ Never paraphrase `detail` at a user. It is the field defect 09 was about.
 If a parameter documented in a tool's description is missing from the schema you hold, the
 host has cached an older one: call health_check, compare its `tools` list against your
 schema, and tell the user to fully QUIT and reopen the app — closing the window leaves this
-server running, so the schema will not refresh."""
+server running, so the schema will not refresh.
+
+{EVALUATION_PROCEDURE}"""
 
 mcp = MCPServer("campaign-intelligence", version=config.VERSION, instructions=INSTRUCTIONS)
 
@@ -658,17 +720,12 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
         conn.close()
 
 
-@mcp.tool()
-@_catch_value_errors
-def prepare_evaluation(subject_title: str, proposal_text: str,
-                       campaign_id: Optional[str] = None, top_k: Optional[int] = None,
-                       record_type: Optional[RecordType] = None, status: Optional[Status] = None,
-                       tags: Optional[Union[TagInput, list[TagInput]]] = None,
-                       match_all_tags: bool = False,
-                       region: Optional[str] = None, market: Optional[str] = None,
-                       markets: Optional[Union[str, list[str]]] = None, collection: Optional[str] = None,
-                       full_detail: bool = True) -> dict:
-    """Evaluate a NEW campaign proposal against the memory. Returns the most similar prior
+# The description is built rather than taken from the docstring, so the shared procedure is
+# the same OBJECT here as in the server instructions rather than a second copy of the words.
+# The description the CLIENT sees, built rather than taken from the docstring so that
+# `EVALUATION_PROCEDURE` is the same object here as in the server instructions — one
+# procedure referenced twice, not two copies that agree today.
+_PREPARE_EVALUATION_DESCRIPTION = """Evaluate a NEW campaign proposal against the memory. Returns the most similar prior
     campaigns WITH their outcomes as an evidence package (full detail by default — this is
     for judging, not browsing). Optionally narrow to structured criteria first (e.g.
     region='APAC') so only relevant precedent is weighed. region/market are single-value
@@ -718,7 +775,27 @@ def prepare_evaluation(subject_title: str, proposal_text: str,
     one-line summary and one short finding per problem, CITING specific campaign_ids. When a
     finding quotes a `commentary` row, set that precedent's `layer: "commentary"` and carry
     its author and anchor across. Predicted CTR/ROI ranges go in `predictions`. This tool
-    gathers evidence; the judgment is yours."""
+    gathers evidence; the judgment is yours.
+
+""" + EVALUATION_PROCEDURE
+
+
+@mcp.tool(description=_PREPARE_EVALUATION_DESCRIPTION)
+@_catch_value_errors
+def prepare_evaluation(subject_title: str, proposal_text: str,
+                       campaign_id: Optional[str] = None, top_k: Optional[int] = None,
+                       record_type: Optional[RecordType] = None, status: Optional[Status] = None,
+                       tags: Optional[Union[TagInput, list[TagInput]]] = None,
+                       match_all_tags: bool = False,
+                       region: Optional[str] = None, market: Optional[str] = None,
+                       markets: Optional[Union[str, list[str]]] = None, collection: Optional[str] = None,
+                       full_detail: bool = True) -> dict:
+    """Package the evidence Claude needs to judge a new proposal.
+
+    The description a client actually receives is `_PREPARE_EVALUATION_DESCRIPTION`
+    above, which is this text plus the shared `EVALUATION_PROCEDURE` (§7.4).
+    """
+
     conn = store.connect()
     try:
         return core.prepare_evaluation(conn, subject_title=subject_title,

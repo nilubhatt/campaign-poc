@@ -1759,8 +1759,34 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       missing-quote half done by 6.1, which also verifies the quote rather than only
       requiring one. Completed by 6.2, which made `kind` required — until then a finding
       with no `kind` at all needed no citation.*
-- [ ] **7.4 Tool descriptions as the shared prompt** — the evaluation procedure into
+- [x] **7.4 Tool descriptions as the shared prompt** — the evaluation procedure into
       `prepare_evaluation`'s description; set the MCP server-level `instructions` field.
+      **The load-bearing decision is not what the procedure says — it is that there is ONE of
+      it.** The phase's subject is consistency across users, and a procedure only produces
+      consistency if every user gets the same one. A copy in the server instructions and a
+      copy in the tool description is two procedures that agree today, and this project has
+      watched a hand-maintained copy drift four times (the Windows installer version,
+      `TOOL_NAMES`, this plan's own counts, and D75's three definitions of "measured").
+      `EVALUATION_PROCEDURE` is one constant referenced twice, and a test fails if the opening
+      line ever appears in the source more than once.
+      **The description is built rather than taken from the docstring.** A docstring is for
+      somebody reading the file; what reaches a model is the registered description, and those
+      are not the same string unless something makes them so.
+      **Two of the review's six items could not ship as written, which is part of the item
+      rather than an omission.** The *scorecard's six criteria* belong to the customer's
+      rulebook: hard-coding Fabletics' rubric into a product that ships generic is exactly
+      what the product-owner decision forbids, so the procedure says so and D101 carries it to
+      §12.1. And *"the instruction to run a disconfirming search"* changed hands — §6.4
+      decided the SERVER runs it, because a model asked to find evidence against a verdict it
+      has already reached is marking its own homework. The instruction that exists is to read
+      the result, and to read the `code` rather than the absence of rows.
+      **Closes D12** — the layer rule now lives in the shared procedure rather than only on
+      the browsing tool.
+      **There is a length ceiling, and the number is a budget decision rather than a
+      measurement.** The review's own position is that restating the rules alongside the data
+      is "the highest-leverage prompt real estate the product has", so it is deliberately
+      generous; what the ceiling catches is the accretion that turns a procedure into a
+      manual, by forcing every future addition to displace something.
 - [ ] **7.5 Ship the procedure with the evidence** — `prepare_evaluation`'s `note` carries
       the pinned rulebook, computed facts, required output schema and weighting rules.
 - [ ] **7.6 Stamp every verdict** with `rulebook_version`, `server_version`,
