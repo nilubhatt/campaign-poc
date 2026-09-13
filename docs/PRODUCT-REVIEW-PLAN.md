@@ -1850,8 +1850,45 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       upgraded database it failed on an index before the migration that would have made it
       valid could run. Tables, then columns, then indexes — `store.upgrade()` is now the only
       correct order and the only entry point.
-- [ ] **7.7 Golden set + agreement measurement** — verdict agreement and finding recall, three
+- [x] **7.7 Golden set + agreement measurement** — verdict agreement and finding recall, three
       runs per brief. Harness built now; briefs to be supplied by the product owner.
+      **"Everything above is a hypothesis until it is measured"** is the sentence that places
+      this item. Phases 6 and 7 are twenty-odd changes made on the argument that they reduce
+      variance, and not one of them has been measured — every claim in them is an argument
+      until this exists. `agreement.py`, runnable as `python -m agreement`, because "run them
+      on every release" is the whole point and a harness nobody can invoke is a module.
+      **The harness ships; the briefs do not.** Ten to twenty briefs with CLIENT-AGREED
+      verdicts is the definition, and only the product owner can supply them. Inventing them
+      would measure agreement with my own guesses, which is worse than measuring nothing
+      because it produces a number somebody will quote.
+      **The judging is supplied too** — the model is on the other side of the protocol — so
+      `run` takes a callable. That is also what makes the measurement testable: a stub judge
+      with known behaviour is the only way to check the arithmetic is right.
+      **Three figures, not two.** The review asks for verdict agreement and finding recall.
+      Three runs per brief measures a third thing neither can see — whether the product
+      answers the same question the same way twice — and without it a brief that matches the
+      client two runs in three reads as a partial success rather than as instability. When
+      anything is unstable the report says to read that FIRST, because a product that answers
+      one question two ways has not agreed with anybody.
+      **An empty golden set reports nothing, not a perfect score.** Zero agreeing out of zero
+      is the confident-shape-with-nothing-in-it failure this project keeps finding, and it
+      would have been reported on every release until somebody noticed. The CLI exits 0 —
+      an absent measurement is not a failing build, and failing CI over it would make the
+      first person to add a brief the person who broke the pipeline.
+      **Recall, not precision,** exactly as the review asks: a judgment that raises the two
+      expected problems and one more has not failed. And a judge that raises is counted as an
+      error rather than a disagreement — a model that failed to answer did not disagree with
+      the client, and counting a crash as a wrong verdict would make the product look
+      inconsistent when it was merely unavailable.
+      **Stamped with §7.6's provenance.** A figure with no record of the conditions it was
+      measured under cannot be compared with last release's, and a change in it cannot be
+      attributed to anything.
+      **It also forced a fourth kind of tracker row.** Seven rows pointed at 7.7 saying "the
+      golden set will measure this" — D9, D56, D69, D78, D82, D83, D96 — and the harness
+      existing does not answer any of them. Filing them as still deferred would make a
+      finished item look incomplete; filing them as accepted limits would say nothing will
+      ever fix them, which is false. They are **awaiting input**, and the distinction the new
+      section records is who the next move belongs to.
 - [ ] **7.8 Mark findings `computed` vs `judged`.**
 
 ## Phase 8 — Metrics that evolve
