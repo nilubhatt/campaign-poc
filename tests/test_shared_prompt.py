@@ -146,3 +146,33 @@ def test_the_procedure_is_not_so_long_that_it_displaces_the_evidence():
     the slow accretion that turns a procedure into a manual: every future addition has to
     displace something, which is the right conversation to be forced into."""
     assert len(PROCEDURE) < 4000, f"{len(PROCEDURE)} characters"
+
+
+# ── D32: the vocabulary, glossed where the model reads it ───────────────────
+
+def test_every_marketer_facing_enum_is_glossed_with_its_synonyms():
+    """D32. §5.1 made the server forgiving about what a marketer types; the gloss is the
+    other half — a model that knows "live" and "in market" mean `in_flight` sends the right
+    value first time, and the forgiving layer goes back to being a safety net rather than the
+    primary path."""
+    import pathlib
+    import re
+
+    source = pathlib.Path(mcp_server.__file__).read_text()
+    for name, needed in (("Status", ("live", "in market", "finished", "wrapped")),
+                         ("MetricType", ("forecast", "measured")),
+                         ("RecordType", ("guidelines", "placeholder")),
+                         ("TagSource", ("impression", "actual"))):
+        block = re.search(rf'{name} = _enum\([^)]*\)\n"""(.*?)"""', source, re.S)
+        assert block, f"{name} carries no gloss"
+        text = block.group(1).lower()
+        for word in needed:
+            assert word in text, f"{name} gloss does not mention {word!r}"
+
+
+def test_the_instructions_say_a_normalised_value_should_be_spoken():
+    """The other half of D32. A silent rewrite is how somebody discovers months later that
+    their word meant something else here."""
+    lowered = mcp_server.INSTRUCTIONS.lower()
+    assert "normalised" in lowered
+    assert "say it" in lowered or "say the" in lowered

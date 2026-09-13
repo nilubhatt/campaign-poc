@@ -89,6 +89,12 @@ INSTRUCTIONS = f"""Campaign Intelligence {config.VERSION_FULL} — a marketing t
 campaign library: past campaigns, what they achieved, and judgments about new proposals
 weighed against that record.
 
+WHAT THE USER TYPED. Enum values are forgiving: "live" becomes `in_flight`, "client stated"
+becomes `stated`. When the server normalises something it echoes the change under
+`normalised` — SAY IT. "I've filed that as in_flight" takes one clause and stops the user
+learning a vocabulary they never chose, and a silent rewrite is how somebody discovers months
+later that their word meant something else here.
+
 NEXT ACTIONS. Many results carry `next_actions`: a short list of `{{label, tool,
 prefilled_args}}`. These are OFFERS, not instructions — say the label in your own words, and
 call the tool only if the user accepts. The arguments are already filled in from what this
@@ -162,9 +168,23 @@ def _enum(*values: str):
     return Annotated[str, Field(json_schema_extra={"enum": list(values)})]
 
 
+# D32: glossed, so the model maps MEANING before the server maps shape. §5.1 made the server
+# forgiving about what a marketer types; the gloss is the other half — a model that knows
+# "live" and "in market" mean `in_flight` sends the right value in the first place, and the
+# forgiving layer becomes the safety net it was meant to be rather than the primary path.
 RecordType = _enum("campaign", "reference", "stub")
+"""campaign — a real past or proposed campaign.
+reference — background material: brand guidelines, a rubric, a competitor deck.
+stub — a placeholder with results but no brief, e.g. a row imported from a KPI workbook."""
+
 Status = _enum("proposed", "in_flight", "concluded")
+"""proposed — not yet run: a pitch, a draft, a brief awaiting sign-off.
+in_flight — live, running, in market, in flight, activated.
+concluded — finished, wrapped, completed, ended, done, post-campaign."""
+
 MetricType = _enum("actual", "predicted")
+"""actual — measured, real, post-campaign, what happened.
+predicted — forecast, projected, estimated, target, what was expected."""
 
 # Suggested tag vocabulary (not enforced — tags stay freeform, this is guidance for the
 # conversational intake). Two independent axes that commonly co-occur on the same campaign
@@ -173,6 +193,8 @@ MetricType = _enum("actual", "predicted")
 # the real lessons are; querying it needs tags=["liked","underperformed"],
 # match_all_tags=True (see find_similar_campaigns).
 TagSource = _enum("verified", "stated")
+"""verified — backed by a metric_type='actual' row on that campaign.
+stated — somebody's impression, claim, recollection, or a number nobody checked."""
 
 SUGGESTED_TAGS = {
     "creative reaction": ["liked", "not_liked", "mixed_reaction"],
