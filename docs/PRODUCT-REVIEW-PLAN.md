@@ -1950,7 +1950,32 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       budget is not automatically good and over is not automatically bad. That is what
       `direction` was in the registry for. And a target is never weighed as a result: a
       library that does that reports what somebody hoped for as what happened.
-- [ ] **8.2 Unknown metric → provisional + ask** (never reject, never silently accept).
+- [x] **8.2 Unknown metric → provisional + ask** (never reject, never silently accept).
+      **Both halves fail in opposite directions.** Rejecting an unfamiliar key loses the
+      measurement: the marketer has the number, the product refuses it, and it goes into
+      freeform prose where nothing can ever compare it. Silently accepting is how two campaigns
+      produced 25 keys — every one was accepted, and nobody was ever asked whether `crm_reach`
+      was the `reach` already on file.
+      **"Surface it once" is what makes the loop bearable.** The same unknown key arriving in
+      ten campaigns asks once, not ten times, and once answered it never asks again —
+      including when the answer was "ignore", because re-asking a question somebody has
+      declined is how a product teaches people to dismiss it. `unanswered()` holds the ones
+      nobody answered, or "surface once" quietly becomes "surface once and lose".
+      **The three answers do different things.** `same_thing` folds the key in
+      RETROSPECTIVELY — the values already recorded under the provisional name belong to the
+      measure it turned out to be, and an answer that fixes the vocabulary while losing the
+      data has fixed nothing. `different_measure` keeps it and stops asking, but leaves it
+      `provisional`: becoming part of what a brief is EXPECTED to carry is §8.3's gate, and one
+      partner's house metric must not become a standing requirement because somebody said it
+      was real. `ignore` is a decision about the vocabulary and not the data — the values stay,
+      because a dismissive click must not destroy a measurement somebody recorded.
+      **The suggestion is never the default.** §5.1's cutoff, and its reasoning: a wrong alias
+      silently merges two measures that are not the same thing, and the answer is one click
+      away. A key that resembles nothing suggests nothing.
+      *Found while building it:* `footfall_uplift_pct` and `footfall_uplift_percent` would have
+      been two measures, because only currencies were being read as units in a key. That is
+      the exact collision this item exists to stop, reintroduced by the thing meant to prevent
+      it.
 - [ ] **8.3 Graduation gate** — seen in N campaigns, ≥2 partners/markets, confirmed once by a
       person, before a measure becomes expected.
 - [ ] **8.4 Fixed template, growing data** — never a self-editing prompt.

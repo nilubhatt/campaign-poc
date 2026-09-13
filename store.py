@@ -98,6 +98,12 @@ CREATE TABLE IF NOT EXISTS metric_registry (
     direction     TEXT,                  -- higher_is_better | lower_is_better | NULL
     aliases       TEXT NOT NULL DEFAULT '[]',  -- JSON: every spelling seen for this measure
     status        TEXT NOT NULL DEFAULT 'provisional',  -- provisional | expected | retired
+                                                        -- | ignored (§8.2's third answer)
+    surfaced      INTEGER NOT NULL DEFAULT 0,  -- §8.2 asks ONCE; this is what makes that true
+    answered      INTEGER NOT NULL DEFAULT 0,  -- somebody decided, so never ask again — even
+                                               -- when the decision was "ignore", because
+                                               -- re-asking a declined question teaches people
+                                               -- to dismiss the product
     first_seen    REAL,
     last_seen     REAL,
     times_seen    INTEGER NOT NULL DEFAULT 0,
@@ -1522,6 +1528,8 @@ def metric_registry(conn) -> dict:
         d = dict(row)
         d["aliases"] = json.loads(d["aliases"] or "[]")
         d["markets"] = json.loads(d["markets"] or "[]")
+        d["answered"] = bool(d.get("answered"))
+        d["surfaced"] = bool(d.get("surfaced"))
         out[d["canonical"]] = d
     return out
 
@@ -1532,6 +1540,43 @@ def register_metric(conn, *, canonical, display_name, unit, direction, aliases,
         "INSERT OR IGNORE INTO metric_registry (canonical, display_name, unit, direction, "
         "aliases, status) VALUES (?,?,?,?,?,?)",
         (canonical, display_name, unit, direction, json.dumps(list(aliases)), status))
+    conn.commit()
+
+
+def metric_was_surfaced(conn, canonical: str) -> bool:
+    row = conn.execute("SELECT surfaced FROM metric_registry WHERE canonical = ?",
+                       (canonical,)).fetchone()
+    return bool(row and row["surfaced"])
+
+
+def mark_metric_surfaced(conn, canonical: str) -> None:
+    conn.execute("UPDATE metric_registry SET surfaced = 1 WHERE canonical = ?", (canonical,))
+    conn.commit()
+
+
+def answer_metric(conn, canonical: str, *, status: str) -> None:
+    conn.execute("UPDATE metric_registry SET answered = 1, status = ? WHERE canonical = ?",
+                 (status, canonical))
+    conn.commit()
+
+
+def merge_metric(conn, *, provisional: str, into: str) -> None:
+    """Fold a provisional measure into an existing one (§8.2's "same thing").
+
+    RETROSPECTIVE. The values already recorded under the provisional name belong to the
+    measure it turned out to be, and an answer that fixes the vocabulary while leaving the
+    data behind has fixed nothing — the point of saying `crm_reach` is `reach` is being able
+    to ask for every reach on file and get both.
+    """
+    row = conn.execute("SELECT aliases FROM metric_registry WHERE canonical = ?",
+                       (into,)).fetchone()
+    aliases = json.loads(row["aliases"] or "[]") if row else []
+    if provisional not in aliases:
+        aliases.append(provisional)
+    conn.execute("UPDATE metric_registry SET aliases = ? WHERE canonical = ?",
+                 (json.dumps(aliases), into))
+    conn.execute("UPDATE metric_values SET metric = ? WHERE metric = ?", (into, provisional))
+    conn.execute("DELETE FROM metric_registry WHERE canonical = ?", (provisional,))
     conn.commit()
 
 

@@ -122,7 +122,8 @@ Offline smoke test (no Ollama): `CAMPAIGN_POC_EMBED_PROVIDER=hash python -m http
 `bulk_import_metrics` · `upload_image_asset` · `check_image_provenance` ·
 `find_similar_images` · `list_campaigns` · `get_campaign` · `find_similar_campaigns` ·
 `diff_campaigns` · `coverage` · `gaps` · `getting_started` · `prepare_evaluation` · `save_evaluation` · `get_evaluation` ·
-`list_evaluations` · `reconcile_evaluation` · `save_reconciliation` · `finish_indexing` ·
+`list_evaluations` · `reconcile_evaluation` · `save_reconciliation` · `resolve_measure` ·
+`finish_indexing` ·
 `health_check`
 
 ## Files

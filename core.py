@@ -26,6 +26,7 @@ import enums
 import extract
 import facts
 import images
+import metrics
 import notices
 import store
 import vectorstore
@@ -419,7 +420,23 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
         }
     mid = store.add_metrics(conn, campaign_id, detail=detail, structured=structured,
                            metric_type=metric_type)
+    # §8.1/§8.2: the structured values also go into the registry's TYPED storage, canonicalised
+    # — the JSON blob above stays as the record of what was sent, and this is what makes "show
+    # me every ROAS on file" answerable. An unfamiliar key asks once rather than being rejected
+    # (which loses the number) or silently accepted (which is how 25 keys happened).
+    asked = []
+    for key, value in (structured or {}).items():
+        try:
+            written = metrics.record(conn, campaign_id=campaign_id, key=key, value=value,
+                                     metric_type=metric_type)
+        except ValueError:
+            # A value that is not a number is still in the JSON blob and in `detail`. Failing
+            # the whole write over one unparseable figure would lose the other nine.
+            continue
+        if written.get("new_measure"):
+            asked.append(written["new_measure"])
     return {"metrics_id": mid, "campaign_id": campaign_id, "status": "stored",
+            **({"new_measures": asked} if asked else {}),
             # The moment the precondition for reconciling is satisfied. Offered at
             # save_evaluation time it simply failed: there were no actuals yet (§5.2 review).
             "next_actions": actions.after_metrics(

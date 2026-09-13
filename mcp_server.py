@@ -18,6 +18,7 @@ from mcp.server.mcpserver import MCPServer
 import config
 import core
 import enums
+import metrics
 import store
 
 # The version goes in the server's own description because that is where a host shows it,
@@ -139,6 +140,9 @@ predicted — forecast, projected, estimated, target, what was expected."""
 # match_all_tags=True (see find_similar_campaigns).
 # D85: what a reconciliation was checked against. §6.3 made the version-based one the common
 # case, so the distinction has to exist before anything computes calibration over the table.
+# §8.2's three answers.
+MeasureDecision = _enum("same_thing", "different_measure", "ignore")
+
 ReconciliationBasis = _enum("results", "superseding_version")
 """results — measured outcomes; the campaign ran and the numbers are in.
 superseding_version — a later version of the brief showed whether the judgment held."""
@@ -1144,6 +1148,35 @@ def reconcile_evaluation(evaluation_id: str, actual: Optional[str] = None) -> di
     conn = store.connect()
     try:
         return core.reconcile_evaluation(conn, evaluation_id=evaluation_id, actual=actual)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def resolve_measure(measure: str, decision: MeasureDecision,
+                    same_as: Optional[str] = None) -> dict:
+    """Answer the one question the library asks about a new measure (§8.2).
+
+    When an unfamiliar metric key arrives, the server records the value, registers the measure
+    provisionally, and asks ONCE — never rejecting it (which would lose the number) and never
+    silently accepting it (which is how two campaigns produced 25 keys for what turned out to
+    be a much smaller set of measures).
+
+      • `same_thing` — it is the measure named in `same_as`. The values already recorded move
+        with it, so asking for every one of that measure returns them all.
+      • `different_measure` — it is its own thing. It stays on file and stops asking. Whether
+        briefs should be EXPECTED to carry it is a separate question, asked once it has been
+        seen across more than one market.
+      • `ignore` — stop asking. The values already recorded are KEPT: this is a decision about
+        the vocabulary, not about the data.
+
+    Offer the three; do not choose for the user. Which of two names is the real measure is a
+    judgment about their vocabulary, and getting it wrong silently merges two things that are
+    not the same."""
+    conn = store.connect()
+    try:
+        return metrics.resolve(conn, measure, decision=decision, same_as=same_as)
     finally:
         conn.close()
 

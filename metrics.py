@@ -37,6 +37,10 @@ import re
 import time
 from typing import Optional
 
+# The measured cutoff from §5.1: below this a suggestion is noise, and a wrong alias merges
+# two measures that are not the same thing.
+_SUGGESTION_CUTOFF = 0.75
+
 # ── the shipped registry ─────────────────────────────────────────────────────
 # `direction` is here because a store that does not know which way a measure runs cannot say
 # whether a campaign did well — "cost per acquisition went up" is good news to anything that
@@ -72,6 +76,12 @@ SEED_REGISTRY = {
 # than spelled away: `total_budget_mxn` and `total_budget_usd` are one measure in two
 # currencies, and a unit inside a key means the library can neither add nor compare them.
 _CURRENCIES = ("usd", "eur", "gbp", "mxn", "cop", "pen", "myr", "idr", "brl", "sgd")
+# A unit spelled into the key, exactly like a currency. `footfall_uplift_pct` and
+# `footfall_uplift_percent` are one measure written two ways, and leaving the suffix in the
+# stem would make them two — the collision this whole item exists to stop, reintroduced by the
+# thing meant to prevent it.
+_UNIT_SUFFIXES = {"pct": "percent", "percent": "percent", "usd": "USD",
+                  "s": None, "sec": "seconds", "seconds": "seconds", "ms": "milliseconds"}
 # Scope words that appear in keys the same way. `impressions_upper_funnel` is impressions.
 _SCOPES = ("upper_funnel", "lower_funnel", "mid_funnel", "organic", "paid", "social",
            "local", "combined", "total", "stated", "planned", "actual")
@@ -100,6 +110,10 @@ def _strip_decoration(key: str) -> tuple:
     for token in _tokens(key):
         if token in _CURRENCIES:
             unit = token.upper()
+        elif token in _UNIT_SUFFIXES and kept:
+            # Only once something is already in `kept`: a key that IS just "pct" is not a
+            # measure with its unit stripped, it is a key nobody should have written.
+            unit = unit or _UNIT_SUFFIXES[token]
         elif token in _SOURCES:
             source = _SOURCES[token]
         elif token in _SCOPES:
@@ -168,6 +182,73 @@ def describe(conn, name: str) -> Optional[dict]:
     return _registry(conn).get(name)
 
 
+DECISIONS = ("same_thing", "different_measure", "ignore")
+
+
+def _suggestion(conn, stem: str) -> Optional[str]:
+    """The measure this unfamiliar key most resembles, or None (§8.2).
+
+    "Looks similar to: retail_traffic_uplift_pct" is what turns the question from a chore into
+    a decision somebody can make in a second. None when nothing is close, because §5.1 settled
+    that a wrong suggestion is worse than none — a bad alias silently merges two measures that
+    are not the same thing, and the answer is one click away.
+    """
+    import difflib
+
+    names = [n for n in _registry(conn) if n != stem]
+    if not names:
+        return None
+    close = difflib.get_close_matches(stem, names, n=1, cutoff=_SUGGESTION_CUTOFF)
+    return close[0] if close else None
+
+
+def resolve(conn, measure: str, *, decision: str, same_as: Optional[str] = None) -> dict:
+    """Answer the one question §8.2 asks. Three answers, and they do different things.
+
+    `same_thing` folds the key into the measure it turned out to be — RETROSPECTIVELY, because
+    the values already recorded under the provisional name belong to that measure, and an
+    answer that fixes the vocabulary while losing the data has fixed nothing.
+
+    `different_measure` keeps it and stops asking. It stays `provisional`: becoming part of
+    what a brief is expected to carry is §8.3's gate, and one partner's house metric must not
+    turn into a standing requirement for everyone just because somebody said it was real.
+
+    `ignore` is a decision about the VOCABULARY, not the data. The values stay — a dismissive
+    click must not destroy a measurement somebody recorded.
+    """
+    import store
+
+    if decision not in DECISIONS:
+        raise ValueError(f"decision must be one of {list(DECISIONS)}, got {decision!r}")
+    entry = describe(conn, measure)
+    if not entry:
+        raise ValueError(f"{measure!r} is not a measure on file")
+    if decision == "same_thing":
+        if not same_as:
+            raise ValueError(
+                f"`same_as` is required with 'same_thing': saying {measure!r} is the same as "
+                f"something means naming the something. Use 'different_measure' if it is its "
+                f"own thing.")
+        if not describe(conn, same_as):
+            raise ValueError(f"{same_as!r} is not a measure on file")
+        store.merge_metric(conn, provisional=measure, into=same_as)
+        return {"measure": same_as, "status": "merged", "absorbed": measure}
+    store.answer_metric(conn, measure,
+                        status="ignored" if decision == "ignore" else "provisional")
+    return {"measure": measure, "status": "ignored" if decision == "ignore" else "provisional",
+            "answered": True}
+
+
+def unanswered(conn) -> list:
+    """Measures nobody has answered the question about.
+
+    The question is asked ONCE, so something has to hold the ones nobody answered — otherwise
+    "surface once" quietly becomes "surface once and lose".
+    """
+    return [entry for entry in _registry(conn).values()
+            if entry["status"] == "provisional" and not entry["answered"]]
+
+
 def record(conn, *, campaign_id: str, key: str, value, metric_type: str = "actual") -> dict:
     """Store one measurement, typed and canonicalised.
 
@@ -180,19 +261,65 @@ def record(conn, *, campaign_id: str, key: str, value, metric_type: str = "actua
 
     stem, unit, source, scope = _strip_decoration(key)
     name = _lookup(_registry(conn), stem, key)
+    asked = None
     if name is None:
-        # §8.2 owns what happens next; until then an unknown key is registered provisionally
-        # rather than dropped, because dropping it is how 25 keys became invisible.
+        # §8.2: never rejected, never silently accepted. Rejecting loses the measurement — the
+        # marketer has the number and the product refuses it, so it goes into prose where
+        # nothing can compare it. Silently accepting is how two campaigns produced 25 keys.
         name = stem or "_".join(_tokens(key))
+        looks_like = _suggestion(conn, name)
         store.register_metric(conn, canonical=name, display_name=key, unit=unit,
                               direction=None, aliases=[], status="provisional")
+        record_row = store.get_campaign(conn, campaign_id) or {}
+        asked = {
+            "raw_key": key,
+            "measure": name,
+            # A key on its own is not a question anybody can answer — they need to know which
+            # brief brought it in, which is why the review's own mock-up names both.
+            "campaign_id": campaign_id,
+            "campaign_title": record_row.get("title"),
+            "seen_at": time.strftime("%Y-%m-%d"),
+            "looks_like": looks_like,
+            "next_actions": _resolution_offers(name, looks_like),
+        }
     number = _as_number(value, key)
     store.record_metric_value(
         conn, campaign_id=campaign_id, metric=name, raw_key=key, value=number,
         unit=unit or (describe(conn, name) or {}).get("unit"),
         source=source or "stated", scope=scope, metric_type=metric_type)
     store.touch_metric(conn, name, campaign_id=campaign_id)
-    return {"metric": name, "value": number, "unit": unit, "source": source or "stated"}
+    result = {"metric": name, "value": number, "unit": unit, "source": source or "stated"}
+    # Asked ONCE. The same key arriving in ten campaigns asks once, not ten times: a prompt on
+    # every write is a prompt nobody reads, and one nobody reads is one nobody answers.
+    if asked and not store.metric_was_surfaced(conn, name):
+        store.mark_metric_surfaced(conn, name)
+        result["new_measure"] = asked
+    return result
+
+
+def _resolution_offers(name: str, looks_like: Optional[str]) -> list:
+    """[same thing] [different measure] [ignore], as offers that can actually be called."""
+    import actions
+
+    offers = []
+    if looks_like:
+        offers.append(actions.action(
+            f"\u201c{name}\u201d is the same thing as \u201c{looks_like}\u201d",
+            "resolve_measure",
+            why="Two names for one measure is how a library ends up unable to answer "
+                "\u201cshow me every one of these\u201d.",
+            consent="ask", measure=name, decision="same_thing", same_as=looks_like))
+    offers.append(actions.action(
+        f"\u201c{name}\u201d is its own measure", "resolve_measure",
+        why="It stays on file and stops asking. Whether briefs should be EXPECTED to carry "
+            "it is a separate question, asked once it has been seen more widely.",
+        consent="ask", measure=name, decision="different_measure"))
+    offers.append(actions.action(
+        f"Stop asking about \u201c{name}\u201d", "resolve_measure",
+        why="The values already recorded are kept — this is a decision about the vocabulary, "
+            "not about the data.",
+        consent="ask", measure=name, decision="ignore"))
+    return actions.trim(offers)
 
 
 def _as_number(value, key: str) -> float:
