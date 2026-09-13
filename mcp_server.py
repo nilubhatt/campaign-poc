@@ -146,6 +146,10 @@ Severity = Literal["blocking", "should_fix", "note"]
 # guardrail breach cites the rulebook and is not open to debate; a departure from precedent
 # cites a campaign and invites a rationale — one real departure turned out better than the
 # precedent it departed from.
+# §6.2: which way a departure departs. A departure is a judgment about whether a difference
+# matters, and that judgment is what a partner is entitled to argue with — unlike a breach,
+# which is a fact about a rule.
+Departure = Literal["regression", "unexplained", "possible_improvement"]
 FindingKind = Literal["guardrail_breach", "precedent_departure", "missing_information",
                       "internal_contradiction"]
 # Whether the server worked this out or the model judged it (§7.8). Only "judged" is
@@ -189,7 +193,13 @@ class Finding(TypedDict):
     the paragraph this shape exists to replace."""
     severity: Severity
     finding: str                      # <= 120 chars, names the problem
-    kind: NotRequired[FindingKind]    # is it a rule broken, or a precedent departed from?
+    # REQUIRED, and deliberately not typed as such — see the note on `Precedent.quote`.
+    # Typed required, pydantic refuses the call at its own boundary and the caller gets
+    # "Field required" instead of the sentence naming the four kinds and what each means.
+    kind: NotRequired[FindingKind]    # REQUIRED: is it a rule broken, a precedent departed
+                                      # from, or a gap in the brief?
+    departure: NotRequired[Departure]  # precedent_departure only, and REQUIRED there:
+                                      # which way it departs
     repeats: NotRequired[str]         # the earlier finding's id, when this is the same
                                       # problem raised again (see diff_campaigns)
     basis: NotRequired[Basis]         # computed by the server, or judged (default: judged)
@@ -714,13 +724,32 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
     while recording a blocking one. Both are rejected rather than saved — and the honest fix
     for the second is the verdict, never a quieter severity.
 
-    `kind` says whether the finding is arguable at all, which severity cannot express:
-      • `guardrail_breach`      — a rule was broken. Cite it: `precedent: {rule_id, quote}`.
-        Not debatable, so never a `note`.
-      • `precedent_departure`   — done differently from a campaign that worked. Cite it:
-        `precedent: {campaign_id, quote}`. A departure can be an improvement; say so.
-      • `missing_information`   — the brief does not say.
-      • `internal_contradiction`— the brief contradicts itself.
+    `kind` is REQUIRED, and it says whether the finding is arguable at all — which severity
+    cannot express. Severity is how much it matters; kind is whether there is anything to
+    discuss. The first two are different classes of statement and must not be written in the
+    same register:
+
+      • `guardrail_breach` — a rule the customer wrote was broken. Cite the rule:
+        `precedent: {rule_id, quote}`, where `rule_id` is a record stored as reference
+        material. **Not debatable**, so never a `note`. State it: "this breaks your own rule
+        on AI imagery". There is no rationale that makes it not a breach; there is only a
+        decision to accept it, and that is the customer's to make, not yours to pre-empt.
+
+      • `precedent_departure` — done differently from a campaign on file. Cite the campaign:
+        `precedent: {campaign_id, quote}`. **Debatable by design**, and you must say which
+        way it departs with `departure`:
+          – `regression`          the difference is worse, and you can say why.
+          – `unexplained`         it may well be deliberate; the brief does not say.
+          – `possible_improvement` it may be better than the precedent. This must be a
+            `note` — asking for it to be changed back contradicts your own reading.
+        Ask, do not instruct: "Peru seeded one colourway per creator and this seeds four —
+        is that deliberate?" A departure that turns out BETTER than the precedent is the
+        most valuable thing this library can notice, and the product's own worked example is
+        a brief whose claw machine was a departure that beat what it departed from. Filing
+        that as a defect is the failure this field exists to prevent.
+
+      • `missing_information`   — the brief does not say. A gap to fill, not an argument.
+      • `internal_contradiction`— the brief contradicts itself. Same.
 
     Anchor findings to evidence, and the server checks it: a `precedent` must carry a
     `quote`, and that quote must actually be in the record it names, at the layer it claims.

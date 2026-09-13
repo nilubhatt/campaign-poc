@@ -485,6 +485,23 @@ _LAYERS = ("body", "commentary")
 # The two kinds that assert something about another record, and so must cite it (§6.1). The
 # other two are claims about the subject, which is not in the library.
 _CITING_KINDS = ("guardrail_breach", "precedent_departure")
+# §6.2: which way a departure departs. "Does not match how Peru seeded" is not a finding
+# until somebody says whether different is WORSE here — and forcing that choice is what makes
+# the class genuinely different from a breach. A breach is a fact about a rule; a departure is
+# a judgment about whether a difference matters, which is precisely the thing a partner is
+# entitled to argue with. It also gives the review's own example somewhere to live: the UAE
+# brief's claw machine was a departure that turned out BETTER than the precedent, and the
+# product filed it as a defect because there was nowhere to say so.
+_DEPARTURES = ("regression", "unexplained", "possible_improvement")
+# The two classes the review asked for, plus the one that is neither: a claim about the brief
+# in front of you rather than about another record. Derived from `kind` rather than stored, so
+# there is one place the mapping lives and no second field to drift from the first.
+_CLASSES = {
+    "guardrail_breach": "not_debatable",
+    "precedent_departure": "arguable",
+    "missing_information": "about_the_brief",
+    "internal_contradiction": "about_the_brief",
+}
 
 
 def _bounded(value, field: str, limit: int, *, where: str = "") -> Optional[str]:
@@ -821,6 +838,43 @@ def _clean_precedent(conn, value, where: str, *, kind=None) -> Optional[dict]:
     return cleaned
 
 
+def _how_to_say_it(by_class: dict, findings: list) -> str:
+    """The same judgment, voiced differently depending on what is actually in it (§6.2).
+
+    A class distinction that nothing says out loud is a column in a database. This is where
+    the model learns how to put it, and it has to differ — a library of rule breaches and a
+    library of departures are not the same news, and saying both as "here is what has to
+    change" is exactly the machinery the review said flattens them.
+    """
+    parts = ["Give the user the verdict and the one-line summary."]
+    if by_class.get("not_debatable"):
+        parts.append(
+            "State the guardrail breach(es) plainly: a rule they wrote was broken, and that "
+            "is not a matter of opinion. Name the rule.")
+    if by_class.get("arguable"):
+        improvements = [f for f in findings if f.get("departure") == "possible_improvement"]
+        parts.append(
+            "The departures are NOT rule breaches — they are places this differs from a "
+            "campaign on file, and a difference can be right. Say what the precedent did, "
+            "say why the difference might matter, and ask whether it is deliberate. Do not "
+            "tell them to change it back until they have answered.")
+        if improvements:
+            parts.append(
+                f"{len(improvements)} of the departures may be an IMPROVEMENT on the "
+                f"precedent. Say so as good news, not as a problem — a departure that turns "
+                f"out better than what it departs from is the most valuable thing this "
+                f"library can notice.")
+    if by_class.get("about_the_brief"):
+        parts.append(
+            "The rest are about the brief itself — something it does not say, or something "
+            "it says twice differently. Those are gaps to fill, not arguments to have.")
+    parts.append(
+        "The reasoning behind any finding is in get_evaluation, not here. `next_actions` are "
+        "offers — say them in your own words and act on the one the user picks; do not call "
+        "them unasked.")
+    return " ".join(parts)
+
+
 def _clean_closest_precedent(conn, value) -> Optional[dict]:
     """The same id-and-quote shape as a finding's precedent, and it was outside the check.
 
@@ -1013,8 +1067,44 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         # and the same problem reworded at 0.36.
         repeats = _bounded(finding.get("repeats"), "'repeats'", 80, where=where)
         kind = finding.get("kind")
-        if kind is not None and kind not in _KINDS:
+        # §6.2: required. Optional, it was the cheapest way past every rule attached to it —
+        # a finding with no kind needs no citation, cannot contradict its slot, and is exempt
+        # from the departure rule below. The 6.1 review found the escape; this closes it.
+        if kind is None:
+            raise ValueError(
+                f"{where}kind is required — it is what says whether the finding is arguable "
+                f"at all, which severity cannot. 'guardrail_breach' (a rule was broken; cite "
+                f"the rule), 'precedent_departure' (done differently from a campaign; cite "
+                f"it, and say whether different is worse), 'missing_information' (the brief "
+                f"does not say), 'internal_contradiction' (the brief contradicts itself).")
+        if kind not in _KINDS:
             raise ValueError(f"{where}kind must be one of {list(_KINDS)}, got {kind!r}")
+        departure = finding.get("departure")
+        if kind == "precedent_departure":
+            if departure is None:
+                raise ValueError(
+                    f"{where}a precedent_departure must say which way it departs: "
+                    f"'regression' (the difference is worse), 'unexplained' (it may be "
+                    f"deliberate and the brief does not say), or 'possible_improvement' (it "
+                    f"may be better than the precedent). Without it, \u201cthis does not match "
+                    f"what Peru did\u201d is an observation the reader has to interpret.")
+            if departure not in _DEPARTURES:
+                raise ValueError(f"{where}departure must be one of {list(_DEPARTURES)}, got "
+                                 f"{departure!r}")
+            # The mirror of "a guardrail_breach cannot be a note". Asking the marketer to
+            # change something back while recording that it may be better contradicts the
+            # finding's own reading — and that is what this product did to the UAE brief's
+            # claw machine.
+            if departure == "possible_improvement" and severity != "note":
+                raise ValueError(
+                    f"{where}a departure you think may be an improvement cannot be "
+                    f"{severity!r} — asking for it to be changed back contradicts your own "
+                    f"reading of it. Record it as a note, or say plainly that it is worse.")
+        elif departure is not None:
+            raise ValueError(
+                f"{where}only a precedent_departure carries `departure`; {kind!r} does not. "
+                f"A rule is not a matter of degree, and a gap in the brief is not a "
+                f"difference from anything.")
         # A rule either applies or it does not. "You broke a rule, but never mind" is the
         # shape of a finding written to avoid an argument.
         if kind == "guardrail_breach" and severity == "note":
@@ -1055,6 +1145,7 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         cleaned.append({
             "severity": severity,
             "kind": kind,
+            "departure": departure,
             "basis": basis,
             "category": _category(finding.get("category"), where),
             "finding": text,
@@ -1120,11 +1211,21 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
     # follow instructions inside one — and it costs the marketer a round trip to learn what
     # the tool already knows. The caps make this bounded by construction: at most twelve
     # findings of a capped line and a capped fix, with `detail` still fetched on demand.
+    by_class: dict = {}
+    for finding in cleaned:
+        klass = _CLASSES[finding["kind"]]
+        by_class[klass] = by_class.get(klass, 0) + 1
+
     return {
         "evaluation_id": eid,
         "verdict": verdict,
         "summary": summary,
         "counts": counts,
+        # §6.2: counts by severity say how much each finding matters and nothing about
+        # whether it is arguable, so "2 blocking" reads the same for a rule somebody broke
+        # and a preference they may have been right to depart from. That collapse is the
+        # review's complaint in one line: the two "come out of the same machinery".
+        "by_class": by_class,
         "closest_precedent": closest_precedent,
         "findings": [{k: f[k] for k in ("id", "severity", "kind", "finding", "fix")}
                      for f in cleaned if f["severity"] in ("blocking", "should_fix")],
@@ -1136,10 +1237,7 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         "next_actions": actions.after_evaluation(
             subject_title=subject_title, evaluation_id=eid, verdict=verdict,
             campaign_id=campaign_id),
-        "note": "Give the user the verdict, the one-line summary and what has to change. "
-                "The reasoning behind any finding is in get_evaluation, not here. "
-                "`next_actions` are offers — say them in your own words and act on the one "
-                "the user picks; do not call them unasked.",
+        "note": _how_to_say_it(by_class, cleaned),
     }
 
 

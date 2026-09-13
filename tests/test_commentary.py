@@ -505,6 +505,7 @@ def test_a_finding_can_cite_a_comment_and_has_to_say_that_it_did(conn, cited_rec
         findings=[{
             "severity": "should_fix",
             "kind": "precedent_departure",
+            "departure": "regression",
             "finding": "Same six-week timeline Peru's own reviewer called unrealistic",
             "precedent": {"campaign_id": "camp_peru", "layer": "commentary",
                           "author": "Dana Ruiz", "anchor": "slide 4",
@@ -522,7 +523,8 @@ def test_a_precedent_defaults_to_the_deck_body(conn, cited_records):
     became commentary would be the defect this field exists to prevent."""
     result = core.save_evaluation(
         conn, subject_title="Colombia v2", verdict="revise", summary="Nothing is dated.",
-        findings=[{"severity": "blocking", "finding": "No dates",
+        findings=[{"severity": "blocking", "kind": "precedent_departure",
+                   "departure": "regression", "finding": "No dates",
                    "precedent": {"campaign_id": "camp_x", "quote": "posting date per asset"}}])
 
     stored = store.get_evaluation(conn, result["evaluation_id"])
@@ -533,7 +535,8 @@ def test_an_unknown_layer_is_rejected(conn):
     with pytest.raises(ValueError) as exc:
         core.save_evaluation(
             conn, subject_title="T", verdict="revise", summary="s",
-            findings=[{"severity": "blocking", "finding": "x",
+            findings=[{"severity": "blocking", "kind": "precedent_departure",
+                       "departure": "regression", "finding": "x",
                        "precedent": {"campaign_id": "c", "quote": "q", "layer": "hearsay"}}])
 
     assert "commentary" in str(exc.value)

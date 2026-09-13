@@ -326,7 +326,8 @@ def test_the_verdict_itself_says_what_would_most_change_it(conn):
     result = core.save_evaluation(
         conn, subject_title="Colombia seeding", verdict="revise",
         summary="Nothing is dated.", cited_ids=[cid],
-        findings=[{"severity": "blocking", "finding": "No dates"}])
+        findings=[{"severity": "blocking", "kind": "missing_information",
+                   "finding": "No dates"}])
 
     missing = result["most_valuable_missing_input"]
     assert missing["code"] == "no_measured_precedent"
@@ -352,7 +353,8 @@ def test_the_line_survives_to_be_read_back_later(conn):
 
     saved = core.save_evaluation(
         conn, subject_title="Colombia", verdict="revise", summary="Nothing is dated.",
-        cited_ids=[cid], findings=[{"severity": "blocking", "finding": "No dates"}])
+        cited_ids=[cid], findings=[{"severity": "blocking", "kind": "missing_information",
+                   "finding": "No dates"}])
 
     stored = store.get_evaluation(conn, saved["evaluation_id"])
     assert stored["evidence"]["most_valuable_missing_input"]["code"] == "no_measured_precedent"

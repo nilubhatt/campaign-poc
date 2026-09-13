@@ -59,6 +59,11 @@ def cited_records(conn):
 def _finding(**over):
     base = {
         "severity": "blocking",
+        # §6.2: `kind` is required on every finding, and a precedent_departure has to say
+        # which way it departs. The default here cites a campaign, so it is a departure whose
+        # direction these tests do not turn on.
+        "kind": "precedent_departure",
+        "departure": "unexplained",
         "category": "timeline",
         "finding": "No posting dates on any deliverable",
         "detail": "Every asset in the flighting table is listed without a date, so nothing "
@@ -233,7 +238,8 @@ def test_a_finding_records_what_kind_of_problem_it_is(conn):
         # A breach cites the rulebook and a departure cites a campaign — §6.1 makes the slot
         # match the kind, because otherwise "a rule was broken" could be anchored to
         # somebody's Q3 deck, which is the distinction this test is about.
-        _finding(kind="guardrail_breach", finding="Uses AI-generated imagery",
+        _finding(kind="guardrail_breach", departure=None,
+                 finding="Uses AI-generated imagery",
                  precedent={"rule_id": "no_ai_imagery",
                             "quote": "No AI-generated imagery in any paid placement"}),
         _finding(severity="should_fix", kind="precedent_departure",
@@ -488,7 +494,8 @@ def test_a_precedent_can_cite_a_rule_not_only_a_campaign(conn):
     """A guardrail breach is anchored to a rule in the rulebook (phase 12), not to a
     campaign - so with only a campaign id there was nowhere to cite the thing breached."""
     result = core.save_evaluation(conn, **_evaluation(findings=[
-        _finding(kind="guardrail_breach", finding="Uses AI-generated imagery",
+        _finding(kind="guardrail_breach", departure=None,
+                 finding="Uses AI-generated imagery",
                  precedent={"rule_id": "no_ai_imagery",
                             "quote": "No AI-generated imagery in any paid placement"})]))
 

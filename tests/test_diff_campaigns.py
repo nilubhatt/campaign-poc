@@ -35,7 +35,11 @@ import store
 
 
 def _finding(text, **over):
-    base = {"severity": "blocking", "category": "timeline", "finding": text}
+    # §6.2: `kind` is required on every finding. These tests are about matching findings
+    # across two versions of a brief, not about classifying them — `missing_information` is
+    # the kind that needs no citation, so the fixtures stay about what they are testing.
+    base = {"severity": "blocking", "kind": "missing_information",
+            "category": "timeline", "finding": text}
     base.update(over)
     return base
 

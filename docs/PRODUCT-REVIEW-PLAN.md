@@ -1289,10 +1289,39 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       so the same key one level down claims the server wrote the citation. It did not — the
       model wrote the quote and the id, and only the check is the server's. `checked` alone,
       which says that and no more.
-- [ ] **6.2 (H) Guardrail breach vs departure from precedent** — two classes, different
-      vocabulary, only one is debatable. *2.4 defined `kind` and the rule that a guardrail
-      breach cannot be a note; what remains is making `kind` required, requiring a `rule_id`
-      citation on a breach, and giving the two classes genuinely different wording.*
+- [x] **6.2 (H) Guardrail breach vs departure from precedent** — two classes, different
+      vocabulary, only one is debatable.
+      **`kind` is required.** Optional, it was the cheapest way past every rule attached to
+      it: a finding with no kind needs no citation, cannot contradict its slot, and is exempt
+      from the departure rule below. The 6.1 review found that escape and it went into the
+      tracker as the cheaper half of D78. Required in core rather than in the type, for the
+      reason 6.1 learned the hard way — typed required, pydantic refuses at its own boundary
+      and the caller gets "Field required" instead of the sentence naming the four kinds.
+      **A departure has to say which way it departs**, and this is the part the review
+      actually asked for that neither 2.4 nor 6.1 delivered. "Does not match how Peru seeded"
+      is not a finding until somebody says whether different is WORSE here — and forcing that
+      choice is what makes the class genuinely different from a breach. A breach is a fact
+      about a rule. A departure is a judgment about whether a difference matters, and that
+      judgment is precisely what a partner is entitled to argue with. `departure` is
+      `regression` | `unexplained` | `possible_improvement`, required on a
+      `precedent_departure` and refused on anything else — a rule is not a matter of degree,
+      and a gap in the brief is not a difference from anything.
+      **`possible_improvement` must be a note**, the exact mirror of 2.4's "a guardrail
+      breach cannot be a note". Asking the marketer to change something back while recording
+      that it may be better contradicts the finding's own reading — and that is what this
+      product did to the UAE brief, whose claw machine was a departure that turned out better
+      than the precedent. The review named that case; until now there was nowhere to put it.
+      **The two classes are voiced differently, not just labelled differently.** A class
+      distinction nothing says out loud is a column in a database. `save_evaluation` returns
+      `by_class` (`not_debatable` / `arguable` / `about_the_brief`) beside the severity
+      counts, because "2 blocking" reads the same for a rule somebody broke and a preference
+      they may have been right to depart from — which is the review's complaint in one line,
+      that the two "come out of the same machinery". And the response `note` differs by what
+      is actually in the judgment: state a breach and name the rule; ask about a departure and
+      do not tell them to change it back until they have answered; say a possible improvement
+      as good news. The tool description carries the same split, with the claw machine in it,
+      because an abstract rule without a worked case is a rule nobody applies.
+      Closes D1. The `rule_id` half of D1 was already done by 6.1.
 - [ ] **6.3 (I) Close the prediction loop** — when a superseding record arrives, surface the
       prior evaluation's predictions and ask which held.
 - [ ] **6.4 (J) Disconfirming search required** before a verdict is saved; record what came
