@@ -1291,6 +1291,24 @@ def unreconciled_evaluation_id(conn, campaign_id: str) -> Optional[str]:
     return row["id"] if row else None
 
 
+def citations(conn) -> list[list[str]]:
+    """Every judgment's `cited_ids`, one list per judgment (D65 / §6.6).
+
+    Its own query rather than a wider `list_evaluations`: that function feeds a browsing
+    surface and returns what a person reads, and adding a field nothing there displays would
+    make it carry two jobs. This is a fact about citation traffic, and only one caller wants
+    it.
+    """
+    out = []
+    for row in conn.execute("SELECT cited_ids FROM evaluations").fetchall():
+        try:
+            cited = json.loads(row["cited_ids"]) if row["cited_ids"] else []
+        except (TypeError, ValueError):
+            continue
+        out.append([c for c in cited if isinstance(c, str)])
+    return out
+
+
 def list_evaluations(conn) -> list[dict]:
     """Titles and dates alone cannot answer "which of these still need work" — which is the
     one question a list of judgments exists to answer. Counts come from the stored findings

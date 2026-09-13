@@ -906,6 +906,90 @@ def _how_to_say_it(by_class: dict, findings: list) -> str:
     return " ".join(parts)
 
 
+# §6.6. A stable code beside a sentence, and never a word the counts cannot support — the
+# discipline §5.5 used for coverage cells and §6.1 for `checked`.
+_EVIDENCE_STRENGTH = {
+    "no_precedent": "It cites no past campaign at all, so it is an opinion about the brief "
+                    "and should be said as one.",
+    "single_example": "That is one campaign, or records nobody measured. One example is a "
+                      "story, not a pattern.",
+    "unmeasured": "None of them has measured results, so every comparison is to what was "
+                  "planned rather than what happened.",
+    "measured": "Several of them have measured results behind them.",
+}
+
+
+def _evidence_strength(conn, *, cited_ids: Optional[list], text: str) -> dict:
+    """What this judgment rests on, counted by the server (§6.6, D3).
+
+    The review's complaint is that "a verdict resting on five concluded campaigns with
+    verified outcomes and one resting on a single proposed brief currently look identical" —
+    and the load-bearing word is IDENTICAL. Two judgments of very different worth were
+    presented the same way, so a reader had no signal to weigh them by. That makes this a
+    shape problem, not a data problem, which decides two things.
+
+    Counted from `cited_ids`, NOT from the evidence package. What a judgment rests on is what
+    it cited; a verdict shown eight precedents and citing one rests on one, and reporting
+    eight would be the overstatement this field exists to prevent, made by the field written
+    to prevent it.
+
+    And a number nobody reads is not a signal. Five counts and a similarity are a row of
+    digits; "one match is carrying this" is a sentence. Hence `strength` and
+    `what_it_means`, which never claim more than the counts support.
+    """
+    cited = list(dict.fromkeys(cited_ids or []))
+    records, unresolved = [], []
+    for cid in cited:
+        record = store.get_campaign(conn, cid)
+        (records if record else unresolved).append(record or cid)
+    concluded = [r for r in records if r.get("status") == "concluded"]
+    verified = [r for r in records
+                if {t.get("value") for t in (r.get("tags") or [])
+                    if t.get("source") == "verified"} & {"performed_well", "underperformed"}]
+
+    dominated_by, top_similarity = None, None
+    if records:
+        try:
+            ranked = find_similar(conn, text=text, top_k=len(records) + 5, full_detail=False)
+        except (ValueError, embedding.Unavailable):
+            ranked = []
+        scores = {m["campaign_id"]: m["similarity"] for m in ranked}
+        mine = sorted(((scores.get(r["id"], 0.0), r["id"]) for r in records), reverse=True)
+        top_similarity = mine[0][0] if mine else None
+        # "When one match dominates, say so." A judgment resting on six records where one is
+        # doing all the work is not a judgment resting on six records — and the arithmetic has
+        # to be a gap rather than a rank, or the top of every list "dominates".
+        if len(mine) > 1 and mine[0][0] >= _DOMINANCE_FLOOR and (
+                mine[0][0] - mine[1][0]) >= _DOMINANCE_GAP:
+            dominated_by = mine[0][1]
+
+    if not records:
+        strength = "no_precedent"
+    elif len(records) < 2 or not verified:
+        strength = "single_example" if len(records) < 2 or not concluded else "unmeasured"
+    else:
+        strength = "measured"
+    what = _EVIDENCE_STRENGTH[strength]
+    if dominated_by:
+        what += (" And one of them is carrying it: the closest match is far nearer this brief "
+                 "than anything else cited, so the judgment is effectively resting on that "
+                 "one record.")
+    return {
+        "precedents": len(records),
+        "concluded": len(concluded),
+        "verified": len(verified),
+        "top_similarity": top_similarity,
+        "dominated_by": dominated_by,
+        # An id that resolves to no record cannot be evidence, and counting it would inflate
+        # the one number this item exists to make honest. §6.1 verifies the precedent on a
+        # finding; `cited_ids` is a separate list and nothing checked it.
+        "unresolved_citations": unresolved,
+        "strength": strength,
+        "basis": "computed",
+        "what_it_means": what,
+    }
+
+
 def _exit_checklist(verdict: Optional[str], findings: list) -> list:
     """The exit condition as something somebody can tick off (§6.5).
 
@@ -941,6 +1025,28 @@ def _exit_checklist(verdict: Optional[str], findings: list) -> list:
              "departure": f.get("departure"), "fix": f.get("fix")}
             for f in findings
             if f.get("severity") in ("blocking", "should_fix") and f.get("fix")]
+
+
+def _say_the_evidence_strength(evidence: dict) -> str:
+    """§6.6, said rather than counted at.
+
+    The review's word is "identical": two judgments of very different worth looked the same.
+    Returning the counts fixes the data and not the presentation, and this project's own note
+    on the response shape says models mirror what a result CONTAINS far more reliably than
+    they follow instructions inside one — so the sentence goes in the note and the counts go
+    in the field, and the note says to give the strength BEFORE the verdict, because after it
+    the verdict has already landed.
+    """
+    line = (f" This judgment rests on {evidence['precedents']} cited campaign(s), "
+            f"{evidence['concluded']} concluded, {evidence['verified']} with measured "
+            f"performance. {evidence['what_it_means']}")
+    if evidence["strength"] in ("no_precedent", "single_example") or evidence["dominated_by"]:
+        line += (" Say how much this rests on BEFORE giving the verdict — afterwards the "
+                 "verdict has already landed and the caveat reads as hedging.")
+    if evidence["unresolved_citations"]:
+        line += (f" {len(evidence['unresolved_citations'])} of the ids cited resolve to no "
+                 f"record and were not counted.")
+    return line
 
 
 def _say_the_disconfirming_check(check: dict) -> str:
@@ -993,6 +1099,9 @@ _MAX_DISCONFIRMING = 3
 # creator-led launch, and told the model to raise it before the verdict. Once a library holds
 # one measured campaign per pole, that fires on every save: the always-on field nobody reads.
 _DISCONFIRMING_FLOOR = 0.25
+# "When one match dominates, say so" — a gap, not a rank, or the top of every list dominates.
+_DOMINANCE_FLOOR = 0.2
+_DOMINANCE_GAP = 0.15
 
 
 def _pole_search(conn, *, tag: str, text: Optional[str] = None,
@@ -1340,6 +1449,9 @@ def get_evaluation(conn, *, evaluation_id: str, severity: Optional[str] = None,
         # response, which is the failure §2.4 fixed for the findings themselves.
         **({"disconfirming": (ev.get("evidence") or {})["disconfirming"]}
            if (ev.get("evidence") or {}).get("disconfirming") else {}),
+        # §6.6, on the read path: a strength line that lives for one response cannot be what a
+        # later reader weighs the judgment by, and weighing it later is the point.
+        **({"evidence": ev["evidence"]} if ev.get("evidence") else {}),
         **({"how_to_say_it": _how_to_say_it(by_class, stored)} if by_class else {}),
         "resolved": ev.get("resolved") or [],
         # A judgment written before §2.4 has no verdict and no findings, only the essay.
@@ -1391,10 +1503,15 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
     # §6.4 is a server fact for the same reason `basis` and `precedent.checked` are: a check
     # the model reports is a claim, and a model asked to find evidence against a verdict it
     # has already reached is marking its own homework.
-    if isinstance(evidence, dict) and "disconfirming" in evidence:
-        raise ValueError("evidence.disconfirming is written by the server, not by you — it "
-                         "records the search the server ran for precedent contradicting your "
-                         "verdict. A check you report on yourself is not a check.")
+    # D3/§6.6: the whole `evidence` block is the server's. It is a count of what this
+    # judgment cites and what those records carry — a model asserting "this rests on five
+    # concluded campaigns" is making a claim, and §7.8's premise (a difference in a computed
+    # thing is a bug) holds only when the server counted.
+    if evidence:
+        raise ValueError("`evidence` is written by the server, not by you: it counts what "
+                         "this judgment cites and what those records actually carry, and "
+                         "records the search for precedent contradicting your verdict. A "
+                         "measure of your own evidence, reported by you, is not a measure.")
     resolved = _clean_resolved(resolved, conn)
 
     cleaned = []
@@ -1587,9 +1704,6 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
     # carried from prepare_evaluation, and stored so get_evaluation and §7.6's stamp can
     # recover it.
     missing = missing_input_for_citations(conn, cited_ids)
-    if missing:
-        evidence = dict(evidence or {})
-        evidence["most_valuable_missing_input"] = missing
 
     by_class: dict = {}
     for finding in cleaned:
@@ -1618,8 +1732,16 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         subject_text=subject_text if subject_text is not None else "",
         query_basis=query_basis, cited_ids=cited_ids, by_class=by_class,
         subject_campaign_id=campaign_id if subject_record else None)
-    evidence = dict(evidence or {})
-    evidence["disconfirming"] = disconfirming
+    evidence = {
+        **_evidence_strength(conn, cited_ids=cited_ids,
+                             text="\n".join([subject_title, summary])),
+        "disconfirming": disconfirming,
+    }
+    if missing:
+        # §5.3 lives alongside it, and the two are deliberately different questions: this says
+        # what the judgment RESTS ON, that says what would most improve it. One describes, the
+        # other asks.
+        evidence["most_valuable_missing_input"] = missing
 
     eid = store.next_evaluation_id()
     for n, finding in enumerate(cleaned, start=1):
@@ -1672,6 +1794,8 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         # "nothing left to do, we checked", when the truth is there was never a list.
         **({"exit_checklist": exit_checklist} if exit_checklist else {}),
         "most_valuable_missing_input": missing,
+        # §6.6: two judgments of very different worth used to be presented identically.
+        "evidence": {k: v for k, v in evidence.items() if k != "most_valuable_missing_input"},
         "disconfirming": disconfirming,
         # §5.2: the three things anyone actually does after a judgment, prefilled. The
         # supersession offer only appears when there IS an earlier version — an approval of
@@ -1679,7 +1803,9 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         "next_actions": actions.after_evaluation(
             subject_title=subject_title, evaluation_id=eid, verdict=verdict,
             campaign_id=campaign_id),
-        "note": _how_to_say_it(by_class, cleaned) + _say_the_disconfirming_check(disconfirming),
+        "note": (_how_to_say_it(by_class, cleaned)
+                 + _say_the_evidence_strength(evidence)
+                 + _say_the_disconfirming_check(disconfirming)),
     }
 
 
@@ -2678,6 +2804,33 @@ MAX_COVERAGE_CELLS = 25
 _EVIDENCE_ORDER = ("no_outcomes", "single_example", "measured", "not_yet_run")
 
 
+def _citation_concentration(conn, campaign_ids: list) -> dict:
+    """How concentrated the citations across these records are (D65).
+
+    `cited_share_top` is the share of citing judgments that named the single most-cited
+    record — None when nothing has been judged, because zero judgments is not "one record
+    carries everything" and 1.0 would read as the worst possible state when the truth is
+    that there is no state yet. That distinction is the same one §6.4 needed three codes for.
+    """
+    if not campaign_ids:
+        return {"cited_share_top": None, "never_cited": []}
+    citations: dict = {cid: 0 for cid in campaign_ids}
+    total = 0
+    for cited_ids in store.citations(conn):
+        cited = set(cited_ids) & set(campaign_ids)
+        if not cited:
+            continue
+        total += 1
+        for cid in cited:
+            citations[cid] += 1
+    if not total:
+        return {"cited_share_top": None, "never_cited": list(campaign_ids)}
+    return {
+        "cited_share_top": max(citations.values()) / total,
+        "never_cited": [cid for cid, n in citations.items() if not n],
+    }
+
+
 def coverage(conn) -> dict:
     """Where the library is thick and where it is thin, by market, collection and stage.
 
@@ -2743,6 +2896,12 @@ def coverage(conn) -> dict:
                          else "single_example" if len(rows) == 1
                          else "measured"),
             "campaign_ids": [c["id"] for c in rows][:5],
+            # D65, owed to §6.6. `evidence` above counts what the cell HOLDS; these two count
+            # what judgments have actually leaned on. A cell of six measured campaigns where
+            # every verdict cites the same one reads `measured` and has a real depth of one —
+            # "one example carrying the weight" is a fact about judgments, and the schema has
+            # held it in `cited_ids` all along with nothing reading it.
+            **_citation_concentration(conn, [c["id"] for c in rows]),
         })
 
     # `cells` is for BROWSING, so it is ordered the way somebody reads a table. `thin` below

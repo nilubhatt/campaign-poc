@@ -814,6 +814,13 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
     and `note` says the register for each. `improvements` carries the possible improvements
     separately, because the rule that makes them notes also keeps them out of `findings`.
 
+    **The server measures what your judgment rests on.** `evidence` comes back with the
+    count of campaigns you cited, how many concluded, how many carry measured performance
+    rather than a stated impression, the top similarity, and whether ONE of them is carrying
+    the weight. Give that before the verdict when it is thin — after the verdict a caveat
+    reads as hedging. You cannot write this field: a measure of your own evidence, reported
+    by you, is not a measure. Cite honestly in `cited_ids` and the count follows.
+
     **The server checks your verdict against the other side.** After you save, it searches
     for precedent that CONTRADICTS the verdict — campaigns resembling this one that worked
     anyway when you said revise, or that failed when you said approve, counting only measured

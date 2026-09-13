@@ -1556,8 +1556,37 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       ticking it off whether an item is a change or an answer — the distinction §6.2 exists
       for and that this item's own worked example turns on.
       Closes D2.
-- [ ] **6.6 (L) Evidence-strength line** on every judgment — how many precedents, concluded,
+- [x] **6.6 (L) Evidence-strength line** on every judgment — how many precedents, concluded,
       verified; top similarity; whether one match dominates.
+      **The load-bearing word in the review is "identical":** "a verdict resting on five
+      concluded campaigns with verified outcomes and one resting on a single proposed brief
+      currently look identical". The complaint is not that the numbers are missing, it is
+      that two judgments of very different worth are presented the same way — a shape problem,
+      not a data problem, which decides the rest.
+      **Counted from `cited_ids`, not from the evidence package.** What a judgment rests on is
+      what it CITED, not what it was handed. A verdict shown eight precedents and citing one
+      rests on one, and reporting eight would be the overstatement this field exists to
+      prevent, committed by the field written to prevent it. An id that resolves to no record
+      is not counted and is listed as unresolved — §6.1 verifies the precedent on a finding,
+      and `cited_ids` is a separate list nothing had ever checked.
+      **A number nobody reads is not a signal.** Five counts and a similarity are a row of
+      digits; "one match is carrying this" is a sentence. `strength` is a stable code
+      (`no_precedent` / `single_example` / `unmeasured` / `measured`) with a line saying what
+      it means, and the note says to give it BEFORE the verdict — afterwards the verdict has
+      landed and the caveat reads as hedging.
+      **Dominance is a gap, not a rank.** Something is always top of the list; what the review
+      asks for is the case where one match is far nearer than anything else cited, so the
+      judgment is effectively resting on one record while appearing to rest on six.
+      **Closes D3.** The whole `evidence` block is the server's now, which is what D3 asked
+      for and what a 2.4 test had to be rewritten to reflect: the column landed early so no
+      migration would be needed, and it was accepting whatever the caller passed. A model
+      reporting the strength of its own evidence is not reporting a measure.
+      **Closes D65** with the same question one level up: `coverage` reads a cell of six
+      measured campaigns as `measured`, but if every verdict in it cites the same one record
+      the library's real depth there is one. `cited_share_top` and `never_cited` come from
+      `cited_ids`, which the schema has held all along with nothing reading it. `None` rather
+      than 1.0 when nothing has been judged — zero judgments is not "one record carries
+      everything", and that is the same distinction §6.4 needed separate codes for.
 
 ## Phase 7 — Consistency across users (ideas 1–8)
 

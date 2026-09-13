@@ -301,15 +301,24 @@ def test_an_evaluation_can_carry_its_exit_condition(conn):
     assert stored["approve_if"].startswith("Dates added")
 
 
-def test_an_evaluation_can_carry_the_strength_of_its_evidence(conn):
-    """Item 6.6: a verdict resting on five concluded campaigns with verified outcomes and
-    one resting on a single proposed brief currently look identical."""
-    result = core.save_evaluation(conn, **_evaluation(
-        evidence={"precedents": 5, "concluded": 4, "verified_outcomes": 2,
-                  "top_similarity": 0.91}))
+def test_an_evaluation_carries_the_strength_of_its_evidence(conn):
+    """Item 6.6: a verdict resting on five concluded campaigns with verified outcomes and one
+    resting on a single proposed brief currently look identical.
+
+    This test used to pass a hand-written `evidence` dict and check the column stored it,
+    which was right for 2.4 — the column landed early so a migration would not be needed
+    later. 6.6 closed D3: the block is the server's count of what the judgment cites, and a
+    model reporting the strength of its own evidence is not reporting a measure. The column
+    is the same; who fills it is the item."""
+    result = core.save_evaluation(conn, **_evaluation())
 
     stored = store.get_evaluation(conn, result["evaluation_id"])
-    assert stored["evidence"]["verified_outcomes"] == 2
+    assert stored["evidence"]["basis"] == "computed"
+    assert stored["evidence"]["precedents"] == 0
+    assert stored["evidence"]["strength"] == "no_precedent"
+
+    with pytest.raises(ValueError):
+        core.save_evaluation(conn, **_evaluation(evidence={"precedents": 5}))
 
 
 def test_an_evaluation_can_carry_what_produced_it(conn):
