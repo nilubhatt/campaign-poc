@@ -1976,10 +1976,101 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       been two measures, because only currencies were being read as units in a key. That is
       the exact collision this item exists to stop, reintroduced by the thing meant to prevent
       it.
-- [ ] **8.3 Graduation gate** — seen in N campaigns, ≥2 partners/markets, confirmed once by a
+- [x] **8.3 Graduation gate** — seen in N campaigns, ≥2 partners/markets, confirmed once by a
       person, before a measure becomes expected.
-- [ ] **8.4 Fixed template, growing data** — never a self-editing prompt.
-- [ ] **8.5 Retirement** — track last seen, demote after M campaigns, never delete.
+      **"Count alone is not enough" is the sentence that shapes the gate.** Three conditions,
+      all required, and the second is the one doing the work: fifteen sightings in one market
+      is one partner's habit, and promoting it makes every other market fail a checklist it
+      never agreed to. The third is a person, deliberately not automatable — §8.2 called its
+      question "the only human step in the loop" and this is where it is spent.
+      **CAMPAIGNS, not writes.** `times_seen` counts every value recorded, so a brief logging a
+      stated figure and a recomputed correction would count twice towards a gate meant to say
+      "three different briefs carried this". One brief's opinion recorded three times is one
+      brief.
+      **A shipped name is not a standing requirement.** The seed registry's twelve measures
+      register as `known`, not `expected`: `status` is where a measure sits in the VOCABULARY
+      and `expected_in` is which checklists it is on, and collapsing the two would have put
+      twelve measures on every checklist the day the product is installed. A check that fires
+      on everything is one nobody reads.
+      **A measure is expected only where it graduated.** `expected_in` holds the markets it was
+      actually seen in, so a measure that earned its place on LATAM and SEA is not a gap in a
+      market nobody has used it in — otherwise every new market fails a checklist on its first
+      brief.
+      **The checklist is keyed on MARKET, and the review asked for campaign TYPE** — "Expected
+      for a store launch". No field carries that: `record_type` is a storage class, `collection`
+      is an instance family, `objective` does not exist, and `tags` has no controlled
+      vocabulary (D73 owes that to 12.1). Market is a **stand-in**, recorded as D102 rather
+      than presented as the reading; "partners", which the review names first, has no field at
+      all (D103).
+      *Found by review:* every one of these reproduced. **One market typed three ways** —
+      "SEA", "sea", "Sea" — satisfied the two-market gate, which is exactly the capture the
+      gate exists to stop, and C16 had already closed this bug elsewhere. A campaign that
+      **literally ran in MX and CO counted as zero markets**, because the gate read
+      `market or region` and ignored `markets` — the fifth implementation of one question
+      (D55/D88), now moved into `store.markets_of` where `core` and `metrics` share it.
+      **v1/v2/v3 of one brief counted as three campaigns.** A brief with **no market was held
+      to the union of every checklist**, and a `reference` record was told it was missing
+      footfall uplift. A **target counted as a result**, so a concluded campaign holding only
+      targets was told it "carries all of them". The gate **refused the only names a user
+      has** (`footfall_uplift_pct`, `crm_reach`), and on an already-graduated measure it said
+      "collect more data" while a second `graduate` **overwrote `confirmed_by`** — the one
+      audit field the gate exists to create. An **`ignore`d measure was told to collect more
+      data** too, re-asking a question the user had declined, which §8.2 named one item ago.
+      And `resolve_measure` could **demote or DELETE a graduated measure** — `same_thing` runs
+      `merge_metric`, which drops the registry row and `confirmed_by` with it: §8.5's "never
+      delete", broken from the one direction nothing was watching.
+- [x] **8.4 Fixed template, growing data** — never a self-editing prompt.
+      The expected set is read from the registry at call time and rendered into
+      `prepare_evaluation`'s `expected_measures`, so a measure graduating changes what every
+      subsequent brief is checked against **without anybody touching a string** — the review's
+      own test: *"No prompt was edited to make that appear."* The per-brief note names what
+      THIS brief is missing and is silent when nothing has graduated, and it says missing
+      rather than wrong: the server establishes the gap, the model decides whether it matters
+      (§6.5).
+      **The human step has to be reachable, or none of this ever fires.** The gate's third
+      condition is a person, and nothing surfaced eligibility — which left `measure_status`, a
+      tool a user would have to know exists, think to call, and name the measure by its
+      canonical stem to use. No measure would ever have graduated, so §8.4's headline sentence
+      could never have appeared under any data. §8.2 had already solved this: the question
+      rides on the write that creates it. `add_metrics` now returns `newly_eligible` once, with
+      a prefilled offer whose `confirmed_by` is deliberately **not** filled in — prefilled with
+      a name nobody gave, it would manufacture the very confirmation the gate requires (§6.5);
+      left out silently it would fail when accepted (§5.2). `needs` is how this codebase
+      already says "one more thing, and it is yours to supply".
+      **Documenting the field is not editing the prompt.** `expected_measures` was in the
+      package and in no description, which most plausibly means the model turns every miss into
+      an uncited `missing_information` finding — the pressure D78 already tracks.
+- [x] **8.5 Retirement** — track last seen, demote after M campaigns, never delete.
+      Campaigns, not months: a library nobody has opened for six months has not retired
+      anything. A retired measure keeps its row, its `expected_in` and every value under it —
+      "we used to track this" is an answer somebody will need, and a deleted row can only say
+      "we never did". One that is recorded again is expected again without a second
+      confirmation, because it graduated once and a person confirmed it.
+      *Found while building it:* `_add_missing_columns` iterated a hand-kept TUPLE of tables,
+      and §8.1 added `metric_registry` and `metric_values` without adding them to it — so every
+      column §8.3 declares would have reached a fresh install and no upgraded one. That is
+      exactly the D89 defect, which was closed "as a class rather than the three instances
+      somebody happened to notice", reopened by the one list still holding a second copy of the
+      schema. The tuple is now derived from `_SCHEMA`, and the D89 test — which named four
+      tables by hand — now iterates every declared one.
+      *Also found:* a real protocol round-trip printed **"This brief carries none of the 1."**
+      The review's sentence is "none of the four" and the code had hard-coded that word.
+      *And by review:* the retirement unit was wrong in three separate ways, each of which
+      retires a measure the library is actively using. It counted **writes**, so one campaign
+      logging ten figures aged out everything; it counted **every campaign**, so a bulk import
+      of 200 historical briefs retired the measure carried by 53 of the 63 on file; and it
+      counted **every market**, so ten APAC campaigns retired a measure expected in LATAM, SEA
+      and EMEA. It is now campaigns, in the markets where the measure is expected, that
+      reported measurements and **skipped this one** — which is what "stopped appearing" means.
+      It also ran **inside a read**: `prepare_evaluation` silently mutated the registry, the
+      list of what it demoted was discarded, and *who read* decided *what was retired*. It runs
+      on the write that makes it true and is reported on `add_metrics`, per §2.1.
+      *Upgrade:* §8.1 wrote the twelve seed measures as `status='expected'` when the word meant
+      "a measure this product recognises". §8.3 gave it its real meaning, so on a database from
+      the earlier release all twelve would have become standing requirements confirmed by
+      nobody. A column migration cannot see a change of MEANING, so
+      `_demote_unconfirmed_seed_metrics` migrates it — touching only rows with no `expected_in`
+      and no `confirmed_by`, so anything a person really graduated survives.
 - [ ] **8.6 Same loop for standing corrections** — one learning mechanism for both.
 - [ ] **8.7 Replay as a report** — which campaigns now fail a new expectation; which past
       verdicts would change. Never silently rewrite old verdicts.

@@ -424,7 +424,7 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
     # — the JSON blob above stays as the record of what was sent, and this is what makes "show
     # me every ROAS on file" answerable. An unfamiliar key asks once rather than being rejected
     # (which loses the number) or silently accepted (which is how 25 keys happened).
-    asked = []
+    asked, eligible, retired = [], [], []
     for key, value in (structured or {}).items():
         try:
             written = metrics.record(conn, campaign_id=campaign_id, key=key, value=value,
@@ -435,8 +435,17 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
             continue
         if written.get("new_measure"):
             asked.append(written["new_measure"])
+        # §8.3: the write that makes a measure eligible is the moment somebody is present to
+        # be asked, and the gate's third condition is a person. Without this the only route to
+        # the gate was a tool the user would have to know exists and name the measure by its
+        # canonical stem to call — so nothing would ever graduate.
+        eligible += [written["newly_eligible"]] if written.get("newly_eligible") else []
+        # §8.5/§2.1: a checklist that shrank silently is partial state nobody was told about.
+        retired += written.get("retired") or []
     return {"metrics_id": mid, "campaign_id": campaign_id, "status": "stored",
             **({"new_measures": asked} if asked else {}),
+            **({"newly_eligible": eligible} if eligible else {}),
+            **({"retired_measures": retired} if retired else {}),
             # The moment the precondition for reconciling is satisfied. Offered at
             # save_evaluation time it simply failed: there were no actuals yet (§5.2 review).
             "next_actions": actions.after_metrics(
@@ -987,6 +996,47 @@ def _dominant(scored: list) -> Optional[str]:
     if (scored[0][0] - scored[1][0]) < _DOMINANCE_GAP:
         return None
     return scored[0][1]
+
+
+def _say_the_expected_measures(expected: dict) -> str:
+    """What the model is told about the checklist, and only when there is one (§8.3/§8.4).
+
+    Silent when nothing has graduated, which on a new install is always. A line explaining a
+    checklist mechanism to a model that has just been handed an empty checklist is the note
+    that fires on everything — and this package already carries more standing instruction than
+    any one judgment needs.
+
+    It says MISSING, not wrong. A brief that does not carry a measure the market usually
+    reports may be incomplete or may be a kind of campaign where that measure is meaningless,
+    and the server cannot tell which. §6.5 settled the shape: the server establishes the fact
+    and the model decides whether it is a problem.
+    """
+    if not expected.get("expected"):
+        return ""
+    if not expected["missing"]:
+        return (f"`expected_measures` lists what briefs in this market usually report, and "
+                f"this one carries all of them. ")
+    return (f"`expected_measures` lists what briefs in this market usually report — the list "
+            f"is built from what the library has actually seen, not from a rule somebody "
+            f"wrote. This brief does not carry: {', '.join(expected['missing'])}. That is a "
+            f"gap in the brief, not a verdict on it: the measure may be meaningless for this "
+            f"kind of campaign, and only you can tell. Raise it as `missing_information` if "
+            f"it matters here, and say nothing if it does not. ")
+
+
+def _no_subject_to_check() -> dict:
+    """The checklist for a proposal that is not a record yet (§8.3).
+
+    An empty `missing` here would read as "this brief carries everything expected of it", which
+    is a clean bill of health the server has no basis for — the checklist is per market, and a
+    loose block of text has no market. Saying the check did not run is the honest answer, and
+    it is §7.1's rule: `nothing_to_check` is not a clean result, it is an unchecked one.
+    """
+    return {"market": None, "expected": [], "carried": [], "missing": [],
+            "basis": "computed", "status": "nothing_to_check",
+            "what_it_means": ("This proposal is not a stored record, so there is no market to "
+                              "read a checklist for. Store it and pass `campaign_id` to see "
+                              "which expected measures it carries.")}
 
 
 def _contract_for_this_brief(computed: dict) -> str:
@@ -3675,18 +3725,13 @@ def _offer_to_measure(conn, unmeasured: dict) -> list[dict]:
 def _markets_of(campaign: dict) -> list:
     """Every market this campaign counts towards, or `[None]` when it has none.
 
-    The `markets` list is the only way to express a multi-country activation, so ignoring it
-    would report a real LATAM campaign as covering nothing. And a record with no market at
-    all is most of a young library — dropping those would describe a library nobody has.
+    Lives in `store` now, because §8.3 needed the same answer and `metrics` cannot import
+    `core` (cycle) — so it was about to become the fifth implementation of one question, which
+    D55 and D88 both record as how these drift. It had already drifted once: §8.3's first
+    version read `market or region` and reported a campaign that literally ran in MX and CO as
+    covering zero markets.
     """
-    named = []
-    for raw in (campaign.get("market"), campaign.get("region"),
-                *(campaign.get("markets") or [])):
-        if raw and str(raw).strip():
-            value = str(raw).strip()
-            if value.lower() not in {m.lower() for m in named}:
-                named.append(value)
-    return named or [None]
+    return store.markets_of(campaign)
 
 
 # ── the first run (§5.6, idea F) ────────────────────────────────────────────
@@ -4609,6 +4654,10 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
     # note has to say what was found for THIS brief, not restate the rule for finding it.
     computed = (facts.for_campaign(conn, campaign_id) if campaign_id
                 else facts.compute(proposal_text))
+    # §8.3/§8.4, hoisted for the same reason: the note has to say what THIS brief is missing,
+    # not restate the rule that produces the list.
+    expected_now = (metrics.expected_check(conn, campaign_id) if campaign_id
+                    else _no_subject_to_check())
     # Gathered before the receipt is written, because D18 stamps them onto the verdict: a
     # judgment made over a half-indexed library is a different judgment from one made over a
     # whole one, and the warning that said so lived for exactly one response.
@@ -4677,6 +4726,7 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
             "observation naming the code and quoting the evidence, and reason from what you "
             "can see. Do not silently re-derive it, and do not defer to it against the "
             "evidence in front of you. "
+            + _say_the_expected_measures(expected_now) +
             "`outcomes` splits this evidence into what WORKED and what did NOT, by measured "
             "result rather than by impression. Read both before deciding: resemblance to a "
             "strong performer is not evidence, and a brief that looks like something that "
@@ -4707,6 +4757,12 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
         # body layer either way (D11), because a reviewer's note saying "never mention a
         # competitor budget of 90,000" would otherwise be read as the brief's budget.
         "computed": computed,
+        # §8.3/§8.4: the checklist for this market, rendered from the metric registry at call
+        # time. "Expected for a store launch: budget, reach, footfall uplift, sell-through at
+        # 60 days. This brief carries none of the four." — and no prompt was edited to make it
+        # appear. A measure graduating changes what every subsequent brief is checked against
+        # without anybody touching a string, which is the whole of §8.4.
+        "expected_measures": expected_now,
         # §6.4's other half, and the half that can actually change a verdict. The save-time
         # search RECORDS overconfidence; by then the judgment is written. What changes the
         # reasoning is seeing both sides while reasoning — so the evidence that worked and

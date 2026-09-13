@@ -722,6 +722,14 @@ _PREPARE_EVALUATION_DESCRIPTION = """Evaluate a NEW campaign proposal against th
     never blur them: quoting a commentary row as though the deck itself claimed it is a
     false statement about that campaign.
 
+    `expected_measures` is what briefs in this record's market usually report, built from what
+    the library has actually seen and confirmed rather than from a rule anybody wrote. Its
+    `missing` list is a gap in the brief, not a verdict on it — a measure can be meaningless
+    for a given kind of campaign, and only you can tell. Raise one as `missing_information`
+    where it matters and say nothing where it does not; it never moves the verdict on its own.
+    Read `status` first: `nothing_to_check` means no checklist applied (the record has no
+    market, or is not a campaign), which is not the same as a brief that carries everything.
+
     `most_valuable_missing_input` names the single thing that would most change this
     judgment, or is null when nothing would. Say it as part of the verdict rather than as an
     aside — "this rests on three campaigns, none of which has measured results" is context
@@ -1177,6 +1185,46 @@ def resolve_measure(measure: str, decision: MeasureDecision,
     conn = store.connect()
     try:
         return metrics.resolve(conn, measure, decision=decision, same_as=same_as)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def graduate_measure(measure: str, confirmed_by: str) -> dict:
+    """Add a measure to the checklist briefs in its markets are expected to carry (§8.3).
+
+    A measure graduates once it has been seen in several campaigns, ACROSS AT LEAST TWO
+    MARKETS, and a person has confirmed it. All three are required, and the second is the one
+    that matters: count alone is not enough, because one partner's house metric becoming a
+    standing requirement for everyone is how a checklist grows demands nobody agreed to.
+
+    `confirmed_by` is who is confirming it — a name, a role, a team. This is the human step,
+    and it is deliberately not automatable: a promotion nobody's name is against is a standing
+    requirement nobody can question later. Ask before calling; do not confirm on the user's
+    behalf.
+
+    Call `measure_status` first to see whether a measure is eligible and what is still missing
+    if it is not. Once promoted, prepare_evaluation reports the expected set for that market
+    against every subsequent brief automatically."""
+    conn = store.connect()
+    try:
+        return metrics.graduate(conn, measure, confirmed_by=confirmed_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def measure_status(measure: str) -> dict:
+    """Where a measure stands against the graduation gate (§8.3): how many campaigns and how
+    many markets have carried it, whether it is eligible, and what is missing if it is not.
+
+    Read-only. Use it to answer "should we be asking for this on every brief yet?" without
+    promoting anything."""
+    conn = store.connect()
+    try:
+        return metrics.graduation(conn, measure)
     finally:
         conn.close()
 

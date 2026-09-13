@@ -97,9 +97,20 @@ CREATE TABLE IF NOT EXISTS metric_registry (
     unit          TEXT,                  -- percent | ratio | currency | count | people
     direction     TEXT,                  -- higher_is_better | lower_is_better | NULL
     aliases       TEXT NOT NULL DEFAULT '[]',  -- JSON: every spelling seen for this measure
-    status        TEXT NOT NULL DEFAULT 'provisional',  -- provisional | expected | retired
-                                                        -- | ignored (§8.2's third answer)
+    status        TEXT NOT NULL DEFAULT 'provisional',  -- provisional | known | expected
+                                                        -- | retired | ignored
+    -- `status` is where a measure sits in the VOCABULARY; `expected_in` is which checklists it
+    -- is on. Two different questions, and collapsing them is what would make a shipped name
+    -- like `cpm` a standing requirement for every brief on day one (§8.3).
+    expected_in   TEXT NOT NULL DEFAULT '[]',  -- markets where it graduated; [] = no checklist
+    confirmed_by  TEXT,                  -- "confirmed once by a PERSON" — a standing
+                                         -- requirement nobody's name is against is one nobody
+                                         -- can question later
+    confirmed_at  REAL,
+    retired_at    REAL,                  -- §8.5 demotes and NEVER deletes: "we used to track
+                                         -- this" is an answer, "we never did" is a lie
     surfaced      INTEGER NOT NULL DEFAULT 0,  -- §8.2 asks ONCE; this is what makes that true
+    offered       INTEGER NOT NULL DEFAULT 0,  -- §8.3's graduation question, asked once too
     answered      INTEGER NOT NULL DEFAULT 0,  -- somebody decided, so never ask again — even
                                                -- when the decision was "ignore", because
                                                -- re-asking a declined question teaches people
@@ -289,6 +300,25 @@ def _declared_ddl(table: str) -> dict:
         scratch.close()
 
 
+def _declared_tables() -> list:
+    """Every table `_SCHEMA` declares, read from `_SCHEMA` itself.
+
+    Derived for the same reason the columns are, and found the same way: this was a hand-kept
+    tuple, and §8.1 added `metric_registry` and `metric_values` without adding them to it — so
+    every column §8.3 adds would have reached a fresh install and no upgraded one. That is
+    precisely the defect D89 closed "as a class rather than the three instances somebody
+    happened to notice", reopened by the one list that was still a second copy of the schema.
+    """
+    scratch = sqlite3.connect(":memory:")
+    try:
+        scratch.executescript(_SCHEMA)
+        return [r[0] for r in scratch.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()]
+    finally:
+        scratch.close()
+
+
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
     """Every column `_SCHEMA` declares that an existing table does not have (D89).
 
@@ -296,15 +326,32 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
     that adds a column reaches a fresh install and no upgraded one. This closes the class
     rather than the three instances somebody happened to notice.
     """
-    for table in ("campaigns", "campaign_chunks", "assets", "asset_fingerprints", "metrics",
-                  "evaluations", "reconciliations", "retrievals", "vector_provenance",
-                  "write_refusals"):
+    for table in _declared_tables():
         existing = _columns(conn, table)
         if not existing:
             continue                       # the table itself is created by `_SCHEMA`
         for column, clause in _declared_ddl(table).items():
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {clause}")
+
+
+def _demote_unconfirmed_seed_metrics(conn: sqlite3.Connection) -> None:
+    """Seed measures written as `expected` by §8.1, before the word meant a checklist (§8.3).
+
+    §8.1 registered the twelve shipped measures with `status='expected'` meaning "a recognised
+    measure". §8.3 gave the word its real meaning — on the checklist every brief in a market is
+    held to — and split the vocabulary state (`status`) from the checklist (`expected_in`).
+
+    On a database seeded by the earlier release those twelve rows still say `expected`, so
+    §8.3's first read of them would put all twelve on every checklist, confirmed by nobody. A
+    row is only demoted when it has no `expected_in` and no `confirmed_by`: anything a person
+    actually graduated has both, and must not be touched.
+    """
+    if "status" not in _columns(conn, "metric_registry"):
+        return
+    conn.execute("UPDATE metric_registry SET status = 'known' WHERE status = 'expected' "
+                 "AND confirmed_by IS NULL "
+                 "AND (expected_in IS NULL OR expected_in IN ('[]', ''))")
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
@@ -320,6 +367,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     # longer have to be the complete list, which is what made them a second copy of the
     # schema.
     _add_missing_columns(conn)
+    _demote_unconfirmed_seed_metrics(conn)
     existing = _columns(conn, "campaigns")
     if existing and "collection" not in existing:
         conn.execute("ALTER TABLE campaigns ADD COLUMN collection TEXT")
@@ -1528,6 +1576,7 @@ def metric_registry(conn) -> dict:
         d = dict(row)
         d["aliases"] = json.loads(d["aliases"] or "[]")
         d["markets"] = json.loads(d["markets"] or "[]")
+        d["expected_in"] = json.loads(d.get("expected_in") or "[]")
         d["answered"] = bool(d.get("answered"))
         d["surfaced"] = bool(d.get("surfaced"))
         out[d["canonical"]] = d
@@ -1547,6 +1596,18 @@ def metric_was_surfaced(conn, canonical: str) -> bool:
     row = conn.execute("SELECT surfaced FROM metric_registry WHERE canonical = ?",
                        (canonical,)).fetchone()
     return bool(row and row["surfaced"])
+
+
+def metric_was_offered(conn, canonical: str) -> bool:
+    """Whether §8.3's graduation question has been put once already."""
+    row = conn.execute("SELECT offered FROM metric_registry WHERE canonical = ?",
+                       (canonical,)).fetchone()
+    return bool(row and row["offered"])
+
+
+def mark_metric_offered(conn, canonical: str) -> None:
+    conn.execute("UPDATE metric_registry SET offered = 1 WHERE canonical = ?", (canonical,))
+    conn.commit()
 
 
 def mark_metric_surfaced(conn, canonical: str) -> None:
@@ -1590,16 +1651,132 @@ def touch_metric(conn, canonical: str, *, campaign_id: Optional[str] = None) -> 
         return
     markets = json.loads(row["markets"] or "[]")
     if campaign_id:
-        record = conn.execute("SELECT market, region FROM campaigns WHERE id = ?",
-                              (campaign_id,)).fetchone()
-        where = (record["market"] or record["region"]) if record else None
-        if where and where not in markets:
-            markets.append(where)
+        # Through `markets_of`, and every one of them: a campaign that ran in MX and CO counts
+        # towards both, and reading `market or region` alone counted it as zero — the fifth
+        # implementation of this question, drifting exactly as D55/D88 say they do.
+        record = get_campaign(conn, campaign_id) or {}
+        seen = {fold_market(m) for m in markets}
+        for where in markets_of(record):
+            # Folded, so "LATAM" and "latam" cannot satisfy a two-market gate between them.
+            # The first spelling seen is the one kept, because it is what somebody typed.
+            if where and fold_market(where) not in seen:
+                markets.append(where.strip())
+                seen.add(fold_market(where))
     now = _now()
     conn.execute("UPDATE metric_registry SET first_seen = COALESCE(first_seen, ?), "
                  "last_seen = ?, times_seen = times_seen + 1, markets = ? WHERE canonical = ?",
                  (now, now, json.dumps(markets), canonical))
     conn.commit()
+
+
+def markets_of(campaign: dict) -> list:
+    """Every market a campaign counts towards, or `[None]` when it has none.
+
+    The one implementation. `markets` is the only way to express a multi-country activation,
+    so ignoring it reports a real LATAM campaign as covering nothing; a record with no market
+    at all is most of a young library, so dropping those describes a library nobody has. Case
+    is folded WITHIN a record here — folding it across records is the caller's job, and §5.3
+    is where that was got wrong before (D71).
+    """
+    named = []
+    for raw in (campaign.get("market"), campaign.get("region"),
+                *(campaign.get("markets") or [])):
+        if raw and str(raw).strip():
+            value = str(raw).strip()
+            if value.lower() not in {m.lower() for m in named}:
+                named.append(value)
+    return named or [None]
+
+
+def fold_market(name: Optional[str]) -> Optional[str]:
+    """The comparison key for a market name.
+
+    "LATAM" and "latam" are one market. C16 established the fold after exactly this bug, and
+    §8.3 reintroduced it in the one place it does the most damage: three spellings of one
+    market satisfied a gate whose entire purpose is "seen in at least two markets".
+    """
+    return name.strip().lower() if name and name.strip() else None
+
+
+def graduate_metric(conn, canonical: str, *, markets: list, confirmed_by: str) -> None:
+    """Promote a measure onto the checklist for the markets it earned (§8.3).
+
+    `expected_in` is the markets it was actually SEEN in, not every market on file. A measure
+    that graduated on LATAM and SEA is not a gap in a market nobody has used it in, and
+    reporting it as one would make every new market fail a checklist on its first brief.
+    """
+    # `answered` too: putting a measure on the checklist is a stronger answer than §8.2's
+    # question asks for, and a measure that is expected of every brief while still asking "is
+    # this a new measure?" is the product asking a question it has already acted on.
+    conn.execute("UPDATE metric_registry SET status = 'expected', expected_in = ?, "
+                 "answered = 1, surfaced = 1, confirmed_by = ?, confirmed_at = ?, "
+                 "retired_at = NULL WHERE canonical = ?",
+                 (json.dumps(sorted(markets)), confirmed_by, _now(), canonical))
+    conn.commit()
+
+
+def retire_metric(conn, canonical: str) -> None:
+    """Demote, never delete (§8.5).
+
+    `expected_in` and every recorded value are left exactly where they are. The measure stops
+    being asked for; the record that it was once asked for survives, because "we used to track
+    this" is an answer somebody will need and a deleted row can only say "we never did".
+    """
+    conn.execute("UPDATE metric_registry SET status = 'retired', retired_at = ? "
+                 "WHERE canonical = ?", (_now(), canonical))
+    conn.commit()
+
+
+def revive_metric(conn, canonical: str) -> None:
+    """A retired measure that somebody recorded again is expected again (§8.5).
+
+    It graduated once and a person confirmed it. Asking them to confirm it a second time
+    because a quarter went by is asking the same question twice, which §8.2 established is how
+    a product teaches people to dismiss it.
+    """
+    conn.execute("UPDATE metric_registry SET status = 'expected', retired_at = NULL "
+                 "WHERE canonical = ? AND status = 'retired'", (canonical,))
+    conn.commit()
+
+
+def campaigns_that_skipped(conn, metric: str, *, since: Optional[float],
+                           markets: Optional[list] = None) -> int:
+    """How many campaigns reported measurements since `since` WITHOUT this one (§8.5).
+
+    Three things this is careful about, and each was wrong in the first version.
+
+    **Campaigns, not writes.** `COUNT(DISTINCT campaign_id)`: one campaign recording ten
+    values is one campaign, and counting writes turns "demote after M campaigns" into "demote
+    after M numbers".
+
+    **Campaigns that SKIPPED it, not campaigns that exist.** Counting every campaign meant a
+    bulk import of 200 historical briefs aged out every measure at once — including, in the
+    reviewed scenario, the measure carried by 53 of the 63 campaigns on file. A measure the
+    library keeps reporting has not stopped appearing, whatever else was imported alongside it.
+
+    **Only where it is expected.** Ten APAC campaigns retired a measure expected in LATAM, SEA
+    and EMEA. A market that never used it cannot be evidence that it fell out of use.
+    """
+    if not _columns(conn, "metric_values") or since is None:
+        return 0
+    sql = ("SELECT COUNT(DISTINCT v.campaign_id) AS n FROM metric_values v "
+           "WHERE v.created_at > ? "
+           "AND NOT EXISTS (SELECT 1 FROM metric_values m "
+           "                WHERE m.campaign_id = v.campaign_id AND m.metric = ?)")
+    params: list = [since, metric]
+    folded = [f for f in {fold_market(m) for m in (markets or [])} if f]
+    if folded:
+        # The campaign's own market OR region OR anything in its `markets` list — the same
+        # question `markets_of` answers, asked in SQL. LIKE on the JSON is deliberate: the
+        # list is a JSON array of names and an exact match would miss a multi-market record.
+        clause = " OR ".join(
+            ["LOWER(c.market) = ?", "LOWER(c.region) = ?", "LOWER(c.markets) LIKE ?"] * len(folded))
+        sql += (f" AND EXISTS (SELECT 1 FROM campaigns c WHERE c.id = v.campaign_id "
+                f"AND ({clause}))")
+        for f in folded:
+            params += [f, f, f'%"{f}"%']
+    row = conn.execute(sql, params).fetchone()
+    return int(row["n"] or 0)
 
 
 def record_metric_value(conn, *, campaign_id, metric, raw_key, value, unit, source, scope,

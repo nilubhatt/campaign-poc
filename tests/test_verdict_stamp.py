@@ -313,7 +313,86 @@ def test_the_migration_covers_every_table_not_just_campaigns(tmp_path):
     conn.row_factory = sqlite3.Row
     store.upgrade(conn)
 
-    for table in ("campaigns", "metrics", "campaign_chunks", "evaluations"):
+    # Every table the schema declares, not a hand-picked four — a list of tables to check is
+    # the same second copy of the schema as a list of columns to add, and it drifts the same
+    # way (see the §8.1-era test below for the drift it actually had).
+    for table in store._declared_tables():
         declared = store._declared_columns(table)
         actual = set(store._columns(conn, table))
         assert declared <= actual, f"{table} never gained: {sorted(declared - actual)}"
+
+
+def test_a_table_added_by_a_later_release_still_gains_its_later_columns(tmp_path):
+    """The D89 defect, reopened and caught by the mutation pass.
+
+    `_add_missing_columns` iterated a hand-kept TUPLE of tables. §8.1 added `metric_registry`
+    and `metric_values` and did not add them to it, so every column §8.3 declares on the
+    registry reached a fresh install and no upgraded one — and nothing failed, because the
+    tables exist on a fresh database and the tests all ran against fresh databases.
+
+    An old database here therefore has to carry the tables in their EARLIER shape. A test that
+    omits them lets `_SCHEMA` create them complete and asserts nothing at all.
+    """
+    import sqlite3
+
+    path = tmp_path / "eighty_one.db"
+    old = sqlite3.connect(path)
+    old.executescript("""
+        CREATE TABLE campaigns (id TEXT PRIMARY KEY, title TEXT NOT NULL);
+        CREATE TABLE metric_registry (canonical TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+                                      unit TEXT, direction TEXT,
+                                      aliases TEXT NOT NULL DEFAULT '[]',
+                                      status TEXT NOT NULL DEFAULT 'provisional');
+        CREATE TABLE metric_values (id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL,
+                                    metric TEXT NOT NULL, value REAL NOT NULL,
+                                    created_at REAL NOT NULL);
+    """)
+    old.execute("INSERT INTO metric_registry (canonical, display_name) VALUES ('roas', 'ROAS')")
+    old.commit()
+    old.close()
+
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    store.upgrade(conn)
+
+    for table in ("metric_registry", "metric_values"):
+        declared = store._declared_columns(table)
+        actual = set(store._columns(conn, table))
+        assert declared <= actual, f"{table} never gained: {sorted(declared - actual)}"
+    # And the reader works, which is the point of adding them at all.
+    assert store.metric_registry(conn)["roas"]["expected_in"] == []
+
+
+def test_seed_measures_written_before_expected_meant_a_checklist_are_demoted(tmp_path):
+    """§8.1 registered the twelve shipped measures as `status='expected'`, meaning "a measure
+    this product recognises". §8.3 gave the word its real meaning — on the checklist every
+    brief in a market is held to.
+
+    On a database seeded by the earlier release those rows still say `expected`, so the first
+    §8.3 read of them put all twelve on every checklist, confirmed by nobody. Adding a column
+    migrates the shape; this migrates the MEANING, which a column migration cannot see.
+    """
+    import sqlite3
+
+    import metrics
+
+    path = tmp_path / "eight_one.db"
+    old = sqlite3.connect(path)
+    old.executescript(store._SCHEMA)
+    old.executescript(store._INDEXES)
+    old.execute("INSERT INTO metric_registry (canonical, display_name, status) "
+                "VALUES ('cpm', 'Cost per mille', 'expected')")
+    # One a person actually graduated, which must survive untouched.
+    old.execute("INSERT INTO metric_registry (canonical, display_name, status, expected_in, "
+                "confirmed_by) VALUES ('footfall_uplift', 'Footfall uplift', 'expected', "
+                "'[\"LATAM\"]', 'R. Vega')")
+    old.commit()
+    old.close()
+
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    store.upgrade(conn)
+
+    assert store.metric_registry(conn)["cpm"]["status"] == "known"
+    assert metrics.expected_for(conn, market="LATAM") == ["footfall_uplift"]
+    assert store.metric_registry(conn)["footfall_uplift"]["confirmed_by"] == "R. Vega"

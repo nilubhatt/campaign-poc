@@ -152,9 +152,13 @@ def _registry(conn) -> dict:
     rows = store.metric_registry(conn)
     if not rows:
         for canonical, (display, unit, direction, aliases) in SEED_REGISTRY.items():
+            # `known`, not `expected`. A shipped name is a recognised measure with no question
+            # pending against it — it is not something every brief must carry. Collapsing the
+            # two would put twelve measures on every checklist the day the product is
+            # installed, and a check that fires on everything is one nobody reads (§8.3).
             store.register_metric(conn, canonical=canonical, display_name=display, unit=unit,
                                   direction=direction, aliases=list(aliases),
-                                  status="expected")
+                                  status="known")
         rows = store.metric_registry(conn)
     return rows
 
@@ -220,9 +224,23 @@ def resolve(conn, measure: str, *, decision: str, same_as: Optional[str] = None)
 
     if decision not in DECISIONS:
         raise ValueError(f"decision must be one of {list(DECISIONS)}, got {decision!r}")
+    measure = canonical(conn, measure) or measure
     entry = describe(conn, measure)
     if not entry:
         raise ValueError(f"{measure!r} is not a measure on file")
+    # §8.2's question is about a measure nobody has decided on. Answering it against one that
+    # has graduated is a different act entirely: `different_measure` would drop it off every
+    # checklist, `ignore` would set aside something a person confirmed, and `same_thing` runs
+    # `merge_metric`, which DELETES the registry row — taking `confirmed_by` and `expected_in`
+    # with it and breaking §8.5's "never delete" from the one direction nothing was watching.
+    # The realistic route in is the offers emitted at first sight being accepted months later.
+    if entry["status"] == "expected":
+        raise ValueError(
+            f"{measure!r} is already expected of briefs in "
+            f"{', '.join(entry['expected_in']) or 'no market'}"
+            + (f", confirmed by {entry['confirmed_by']}" if entry["confirmed_by"] else "")
+            + ". Answering the new-measure question about it would quietly undo that. If it "
+              "should no longer be expected, that is a retirement, not a naming decision.")
     if decision == "same_thing":
         if not same_as:
             raise ValueError(
@@ -288,7 +306,25 @@ def record(conn, *, campaign_id: str, key: str, value, metric_type: str = "actua
         unit=unit or (describe(conn, name) or {}).get("unit"),
         source=source or "stated", scope=scope, metric_type=metric_type)
     store.touch_metric(conn, name, campaign_id=campaign_id)
+    # §8.5: a retired measure somebody has recorded again is expected again. It graduated once
+    # and a person confirmed it; asking them a second time because a quarter went by is asking
+    # the same question twice.
+    store.revive_metric(conn, name)
     result = {"metric": name, "value": number, "unit": unit, "source": source or "stated"}
+    # §8.5, on the write that changes staleness rather than on a read. A campaign reporting its
+    # measures is exactly the event that can make another measure's absence a pattern, and it
+    # is the moment somebody is present to be told.
+    retired = retire_stale(conn)
+    if retired:
+        result["retired"] = retired
+    # §8.3: the gate is three conditions and the third is a person, so somebody has to be
+    # ASKED. Nothing surfaced eligibility, which left `measure_status` a tool a user would
+    # have to know exists, think to call, and name the measure by its canonical stem to use —
+    # so no measure would ever graduate and §8.4's sentence could never fire. §8.2 solved the
+    # same problem the same way: the question rides on the write that creates it.
+    newly = _newly_eligible(conn, name)
+    if newly:
+        result["newly_eligible"] = newly
     # Asked ONCE. The same key arriving in ten campaigns asks once, not ten times: a prompt on
     # every write is a prompt nobody reads, and one nobody reads is one nobody answers.
     if asked and not store.metric_was_surfaced(conn, name):
@@ -419,3 +455,345 @@ def across_library(conn, name: str) -> list:
 
 def campaigns_with(conn, name: str) -> list:
     return sorted({r["campaign_id"] for r in across_library(conn, name)})
+
+
+# ── §8.3: the graduation gate ────────────────────────────────────────────────
+# "Seen in N campaigns, across at least two partners or markets, and confirmed once by a
+# person." Three conditions, all required. The second is the one doing the work: *"count alone
+# is not enough — one partner's house metric should never quietly become a standing requirement
+# for everyone."* Fifteen sightings in one market is a habit, not a standard, and promoting it
+# makes every other market fail a checklist it never agreed to.
+GRADUATION_CAMPAIGNS = 3
+GRADUATION_MARKETS = 2
+# §8.5: how many campaigns may record measurements without this one appearing before it stops
+# being asked for. Campaigns, not months — see `store.campaigns_recording_metrics_since`.
+RETIREMENT_AFTER = 10
+
+
+def _distinct_briefs(conn, campaign_ids: list) -> int:
+    """How many separate briefs these records represent (§8.3).
+
+    Three versions of one brief are one brief. `supersedes` already says so, and counting the
+    records instead let v1, v2 and v3 of a single partner's deck satisfy a gate that means
+    "three different campaigns carried this" — the same mistake as counting writes, one level
+    up. Each record is folded onto the root of its supersession chain.
+    """
+    import store
+
+    roots = set()
+    for cid in campaign_ids:
+        chain = store.supersession_chain(conn, cid)
+        roots.add(chain[0] if chain else cid)
+    return len(roots)
+
+
+def graduation(conn, name: str) -> dict:
+    """Whether a measure has earned a place on the checklist, and what is still missing.
+
+    CAMPAIGNS, not writes. `times_seen` counts every value recorded, so a campaign that logs a
+    stated figure and a recomputed correction would count twice towards a gate that is supposed
+    to mean "three different briefs carried this" — the same key twice in one brief is one
+    brief's opinion, recorded twice.
+    """
+    import store
+
+    # The raw key is what the caller has. `footfall_uplift` is an artefact of
+    # `_strip_decoration`, surfaced once inside §8.2's question and possibly months ago, so a
+    # gate that only answers to it is one nobody can reach — the tool refused `crm_reach` and
+    # `footfall_uplift_pct`, which are the only names anybody actually types.
+    name = canonical(conn, name) or name
+    entry = describe(conn, name)
+    if not entry:
+        raise ValueError(f"{name!r} is not a measure on file")
+    campaigns = _distinct_briefs(conn, campaigns_with(conn, name))
+    # Folded. Three spellings of one market satisfied a gate whose whole purpose is "seen in at
+    # least two markets" — one partner's house metric graduating on one market typed three
+    # ways is precisely what the requirement forbids (C16).
+    markets, seen = [], set()
+    for raw in entry["markets"]:
+        key = store.fold_market(raw)
+        if key and key not in seen:
+            seen.add(key)
+            markets.append(raw.strip())
+    base = {"measure": name, "campaigns": campaigns, "markets": len(markets),
+            "seen_in": markets, "status": entry["status"],
+            "confirmed_by": entry.get("confirmed_by")}
+
+    # Status FIRST, before the counts. Asked in the other order, a measure somebody set aside
+    # read "seen in 1 campaign, needs 3" — telling the user to keep recording something that
+    # will be refused forever, and re-asking a question they had declined. §8.2 named that
+    # failure one item ago.
+    if entry["status"] == "expected":
+        return {**base, "eligible": False, "code": "already_expected",
+                "what_it_means": (
+                    f"{name} is already expected of briefs in "
+                    f"{', '.join(entry['expected_in']) or 'no market'}"
+                    + (f", confirmed by {entry['confirmed_by']}." if entry["confirmed_by"]
+                       else "."))}
+    if entry["status"] == "ignored":
+        return {**base, "eligible": False, "code": "set_aside",
+                "what_it_means": (f"{name} was set aside, so it will not be asked for. "
+                                  f"Recording more of it will not change that — reopen it "
+                                  f"with resolve_measure if that was wrong.")}
+
+    missing = []
+    if campaigns < GRADUATION_CAMPAIGNS:
+        missing.append(f"seen in {campaigns} campaign{'s' * (campaigns != 1)}, "
+                       f"needs {GRADUATION_CAMPAIGNS}")
+    if len(markets) < GRADUATION_MARKETS:
+        missing.append(f"seen in {len(markets)} market{'s' * (len(markets) != 1)} "
+                       f"({', '.join(markets) or 'none recorded'}), "
+                       f"needs {GRADUATION_MARKETS} — one partner's house metric should not "
+                       f"become a standing requirement for everyone")
+    if missing:
+        return {**base, "eligible": False, "code": "not_yet",
+                "what_it_means": f"{name} is not ready to be expected of a brief: "
+                                 + "; ".join(missing) + "."}
+    return {**base, "eligible": True, "code": "eligible",
+            "what_it_means": (f"{name} can be added to the checklist for "
+                              f"{', '.join(markets)}, once a person confirms it.")}
+
+
+def _newly_eligible(conn, name: str) -> Optional[dict]:
+    """The graduation question, asked once, on the write that made it askable (§8.3).
+
+    Surfaced once and never again, on §8.2's flag: a question about the same measure on every
+    subsequent write is a question nobody reads. Declining it costs nothing — the measure stays
+    exactly where it is, and `measure_status` still answers for anyone who comes back to it.
+    """
+    import actions
+    import store
+
+    gate = graduation(conn, name)
+    if not gate["eligible"] or store.metric_was_offered(conn, name):
+        return None
+    store.mark_metric_offered(conn, name)
+    return {
+        "measure": name,
+        "campaigns": gate["campaigns"],
+        "seen_in": gate["seen_in"],
+        "what_it_means": (
+            f"{name} has now been reported by {gate['campaigns']} campaigns across "
+            f"{', '.join(gate['seen_in'])}. It can become part of what briefs in those "
+            f"markets are checked for — which is a standing requirement, so somebody has to "
+            f"say so rather than the library deciding on its own."),
+        # `needs`, because `confirmed_by` is the one argument the server must not supply. The
+        # gate's third condition is a person, and an offer that arrived prefilled with a name
+        # nobody gave would manufacture exactly the confirmation it exists to require — §6.5's
+        # finding. Without saying so the offer would simply fail when accepted, which is §5.2's.
+        "next_actions": actions.trim([actions.action(
+            f"Expect “{name}” of briefs in {', '.join(gate['seen_in'])}",
+            "graduate_measure",
+            why="Briefs that do not report it will be shown as missing it. Nothing is deleted "
+                "and it stops being asked for if it falls out of use.",
+            consent="ask", needs=["confirmed_by — who is confirming this; ask, do not assume"],
+            measure=name)]),
+    }
+
+
+def graduate(conn, name: str, *, confirmed_by: str) -> dict:
+    """Promote a measure onto the checklist. Requires the gate AND a person (§8.3).
+
+    Eligible is not promoted. The third condition is deliberately not automatable: a checklist
+    that grows teeth on its own is one nobody agreed to, and §8.2 spent the loop's only human
+    step on exactly this question.
+    """
+    import store
+
+    if not (confirmed_by or "").strip():
+        raise ValueError(
+            "`confirmed_by` is required: the gate is 'confirmed once by a person', and a "
+            "promotion with nobody's name against it is a standing requirement nobody can "
+            "question later.")
+    gate = graduation(conn, name)
+    if not gate["eligible"]:
+        # Already expected is not a failure, and saying "not ready" about something that has
+        # already been promoted would send the caller off to collect data it does not need.
+        # Refusing rather than re-running it is what protects `confirmed_by`: a second call
+        # overwrote the name of the person who actually confirmed it, which is the one audit
+        # field this whole gate exists to create.
+        raise ValueError(gate["what_it_means"])
+    store.graduate_metric(conn, gate["measure"], markets=gate["seen_in"],
+                          confirmed_by=confirmed_by.strip())
+    entry = describe(conn, gate["measure"])
+    return {**entry, "graduated": True,
+            "what_it_means": (
+                f"Briefs in {', '.join(entry['expected_in'])} are now checked for "
+                f"{gate['measure']}, on {confirmed_by.strip()}'s confirmation. Ones that do "
+                f"not report it will be shown as missing it — a gap to consider, not a "
+                f"verdict. It stops being asked for if it falls out of use.")}
+
+
+# ── §8.4: the data grows, the prompt does not ────────────────────────────────
+
+def expected_for(conn, *, market: Optional[str] = None, markets: Optional[list] = None) -> list:
+    """The measures a brief in these markets is expected to carry.
+
+    Read from the registry at call time. *"No prompt was edited to make that appear."* A
+    measure graduating changes what every subsequent brief is checked against without anybody
+    touching a string, which is the whole of §8.4: grow the data the template renders, never
+    the template.
+
+    A market is REQUIRED. With neither argument this returned the union of every market's
+    checklist, so a record with no market — most of a young library — was measured against
+    every expectation anybody had ever earned anywhere. That is the check that fires on
+    everything, arrived at by an `if market and ...` that read as a convenience.
+    """
+    import store
+
+    wanted = {store.fold_market(m) for m in (markets or ([market] if market else []))}
+    wanted.discard(None)
+    if not wanted:
+        return []
+    out = []
+    for name, entry in sorted(_registry(conn).items()):
+        if entry["status"] != "expected":
+            continue               # retired, provisional, ignored and known are not checklists
+        if not wanted & {store.fold_market(m) for m in entry["expected_in"]}:
+            continue
+        out.append(name)
+    return out
+
+
+# A checklist is for a brief that is going to run. A reference record is brand guidelines and a
+# stub is a placeholder; telling either one it is missing footfall uplift is the check firing
+# on everything, and §7.1/D11 was careful about which TEXT a check reads while this was not
+# careful about which RECORD it runs against.
+_CHECKABLE_RECORDS = ("campaign", None)
+
+
+def expected_check(conn, campaign_id: str) -> dict:
+    """Which expected measures this brief carries and which it does not (§8.3/§8.4).
+
+    *"Expected for a store launch: budget, reach, footfall uplift, sell-through at 60 days.
+    This brief carries none of the four."* Computed, not judged: it is a set membership test
+    over the registry, identical for every user.
+
+    A `carried` measure has a MEASURED value. A target is what somebody is aiming at, and
+    counting one as carried told a concluded campaign holding nothing but targets that it
+    "carries all of them" — a clean bill of health for a record with no results at all, which
+    is §5.3's mistake in a new place.
+    """
+    import store
+
+    record = store.get_campaign(conn, campaign_id) or {}
+    if record.get("record_type") not in _CHECKABLE_RECORDS:
+        return _not_a_brief(record)
+    named = [m for m in store.markets_of(record) if m]
+    if not named:
+        return _no_market_to_check()
+    expected = expected_for(conn, markets=named)
+    carried, missing = [], []
+    for name in expected:
+        measured = [r for r in values_for(conn, campaign_id, name)
+                    if r["metric_type"] == "actual"]
+        (carried if measured else missing).append(name)
+    return {
+        "market": ", ".join(named),
+        "markets": named,
+        "expected": expected,
+        "carried": carried,
+        "missing": missing,
+        "basis": "computed",
+        "code": "checked" if expected else "none_expected",
+        "status": "checked" if expected else "nothing_to_check",
+        "what_it_means": _expected_sentence(", ".join(named), expected, carried, missing),
+    }
+
+
+def _unchecked(code: str, what: str) -> dict:
+    """The shape §7.1 settled on, so a reader can tell an unchecked result from a clean one.
+
+    `status: nothing_to_check` is not a pass. Every one of these returns an empty `missing`,
+    and an empty `missing` beside a missing `status` reads as "this brief carries everything
+    expected of it" — a clean bill of health the server has no basis for.
+    """
+    return {"market": None, "markets": [], "expected": [], "carried": [], "missing": [],
+            "basis": "computed", "code": code, "status": "nothing_to_check",
+            "what_it_means": what}
+
+
+def _no_market_to_check() -> dict:
+    return _unchecked("no_market", (
+        "This record names no market, and a checklist belongs to one — so there is nothing to "
+        "check it against. This is not a pass: add a market to see what briefs like it "
+        "usually carry."))
+
+
+def _not_a_brief(record: dict) -> dict:
+    return _unchecked("not_a_campaign", (
+        f"This is a {record.get('record_type')} record, not a campaign brief, so the "
+        f"checklist does not apply to it."))
+
+
+# "This brief carries none of the four" is the review's own sentence, and a server that
+# renders "none of the 1" instead has written something no person would. Counted out to ten,
+# and a bare numeral past that, because "none of the seventeen" is where the word stops helping.
+_COUNT_WORDS = ("", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+                "ten")
+
+
+def _count_word(n: int) -> str:
+    return _COUNT_WORDS[n] if n < len(_COUNT_WORDS) else str(n)
+
+
+def _expected_sentence(market, expected, carried, missing) -> str:
+    if not expected:
+        return ("Nothing is expected of a brief in this market yet. A measure joins the "
+                "checklist once it has been seen across several campaigns and markets and a "
+                "person has confirmed it.")
+    head = f"Expected for a campaign in {market}: " if market else "Expected: "
+    head += ", ".join(expected) + "."
+    if not missing:
+        return head + " This brief carries all of them."
+    if not carried:
+        if len(expected) == 1:
+            return head + " This brief does not carry it."
+        return head + f" This brief carries none of the {_count_word(len(expected))}."
+    return head + f" This brief is missing {', '.join(missing)}."
+
+
+# ── §8.5: retirement, never deletion ─────────────────────────────────────────
+
+def retire_stale(conn) -> list:
+    """Demote measures nobody has recorded in a long while. Never deletes (§8.5).
+
+    A measure that has stopped appearing has stopped being a standing expectation, and leaving
+    it on the checklist turns the report into a list of things the business no longer does. The
+    row and every value under it stay: "we used to track this" is an answer somebody will need,
+    and a deleted row can only say "we never did".
+
+    Only measures that were actually SEEN can go stale, and that falls out of the count rather
+    than being asserted here: a measure with no `last_seen` has nothing to count campaigns
+    since, so `campaigns_that_skipped` returns 0 and it is never retired. An extra guard on
+    `last_seen` here was a branch nothing could reach — a measure only reaches `expected` by
+    being seen in three campaigns — and the mutation pass caught it as a condition no test
+    could make false.
+
+    Called from the WRITE that changes staleness, never from a read. It ran inside
+    `expected_check` first, which meant `prepare_evaluation` quietly mutated the registry, the
+    returned list was discarded so nobody was ever told the checklist had shrunk, and *who
+    read* decided *what was demoted*. §2.1's rule is that partial state is never silent.
+    """
+    import store
+
+    retired = []
+    for name, entry in _registry(conn).items():
+        if entry["status"] != "expected":
+            continue
+        skipped = store.campaigns_that_skipped(conn, name, since=entry["last_seen"],
+                                               markets=entry["expected_in"])
+        if skipped >= RETIREMENT_AFTER:
+            store.retire_metric(conn, name)
+            retired.append({
+                "measure": name,
+                "was_expected_in": entry["expected_in"],
+                "campaigns_without_it": skipped,
+                "what_it_means": (
+                    f"{name} has not been reported by the last {skipped} campaigns in "
+                    f"{', '.join(entry['expected_in']) or 'its markets'}, so briefs are no "
+                    f"longer checked for it. Nothing was deleted — every value recorded "
+                    f"against it is still on file, and recording it again makes it expected "
+                    f"again."),
+            })
+    return sorted(retired, key=lambda r: r["measure"])
