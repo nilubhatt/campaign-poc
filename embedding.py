@@ -165,6 +165,41 @@ def rank(query_vec: list[float], candidates: list[tuple[str, list[float]]],
     return scored[:top_k]
 
 
+_DIGEST_CACHE: dict = {}
+
+
+def model_digest() -> Optional[str]:
+    """The digest of the embedding model actually loaded, or None (§7.6 / D29).
+
+    `ollama/nomic-embed-text` names a TAG, and a tag moves. CLIP is hash-pinned, so any
+    768-dimension model satisfied the text check — which means §7.6's stamp could say two
+    judgments used the same embedder while they used different weights, and the stamp's whole
+    claim is that it explains a disagreement.
+
+    Best-effort by design: it needs the embedder to answer, and when it cannot, the name alone
+    is what is known. A stamp implying a pin it does not have is the wrong-field failure §7.6
+    is careful about elsewhere. Cached per process, because this runs on every save and the
+    answer cannot change under a running server without restarting it.
+    """
+    if config.EMBED_PROVIDER != "ollama":
+        return None
+    if "ollama" in _DIGEST_CACHE:
+        return _DIGEST_CACHE["ollama"]
+    digest = None
+    try:
+        import httpx
+
+        response = httpx.post(f"{config.OLLAMA_URL}/api/show",
+                              json={"model": config.OLLAMA_EMBED_MODEL}, timeout=2.0)
+        if response.status_code == 200:
+            body = response.json()
+            digest = (body.get("details") or {}).get("parent_model") or body.get("digest")
+    except Exception:                      # noqa: BLE001
+        digest = None
+    _DIGEST_CACHE["ollama"] = digest
+    return digest
+
+
 def warm_up() -> None:
     """Load the embedding model now, at startup, rather than inside the first tool call.
 

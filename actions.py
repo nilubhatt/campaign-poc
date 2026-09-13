@@ -183,7 +183,11 @@ def after_upload(*, campaign_id: str, status: Optional[str],
             consent="ask",
             needs=["what the user says actually happened — which of the predictions and "
                    "findings held, in their words"],
-            evaluation_id=earlier_judgment["evaluation_id"]))
+            # D85: this offer exists because a LATER VERSION arrived, not because results
+            # came in. Prefilling the basis keeps that distinction in the record — otherwise
+            # "v2 shows the structure came back" sits in the same column as a CTR figure.
+            evaluation_id=earlier_judgment["evaluation_id"],
+            basis="superseding_version"))
     if status == "concluded" and not has_metrics:
         offers.append(action(
             "Record what this campaign actually achieved, so later judgments can weigh it",

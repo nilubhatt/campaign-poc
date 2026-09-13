@@ -29,6 +29,7 @@ import images
 import notices
 import store
 import vectorstore
+import version
 
 # Over-fetch factor for the unfiltered ANN path only (§6.1) — the filtered path ranks its
 # full candidate set directly, no cap needed. Several chunks from the same campaign can rank
@@ -1001,6 +1002,76 @@ def _mixed_model_warning(conn) -> list:
                   "call finish_indexing after clearing the index")]
 
 
+def _stamp(conn, *, receipt: Optional[dict], model_id: Optional[str]) -> dict:
+    """What produced this judgment (§7.6, D4).
+
+    The review's last clause is the one that decides the design: "when they agree, you have
+    evidence the agreement is real rather than luck". A stamp is not an audit trail for its
+    own sake — it is what lets AGREEMENT be read as evidence, which is the premise §7.7's
+    golden set rests on. Two runs that agree while differing in embedding model and rulebook
+    version agree about nothing in particular.
+
+    Four of the five fields are facts the server holds. `model_id` is the one it cannot
+    observe: the judging model is on the other side of the protocol. It is recorded as unknown
+    unless the caller says, and marked `stated` when they do — a stamp with a wrong field in
+    it is worse than one with a missing field, because the diff that is supposed to explain a
+    disagreement would then explain it wrongly.
+    """
+    retrieved = None
+    if receipt:
+        scores = dict(receipt.get("similarities") or [])
+        retrieved = [{"campaign_id": cid, "similarity": scores.get(cid)}
+                     for cid in receipt["campaign_ids"]]
+    return {
+        "server_version": version.VERSION,
+        "rulebook_version": RULEBOOK_VERSION,
+        "embedding_model": (receipt or {}).get("embedding_model") or embedding_model_id(),
+        # None rather than [] without a receipt: an empty list reads as "the search returned
+        # nothing", and "nobody recorded a search" is a different statement.
+        "retrieved": retrieved,
+        "model_id": model_id,
+        "model_id_basis": "stated" if model_id else None,
+        "model_id_note": ("the server cannot observe which model produced a judgment; pass "
+                          "`model_id` to record it"),
+        # D18: a judgment made over a half-indexed library is a different judgment from one
+        # made over a whole one, and the warning that said so lived for exactly one response.
+        "warnings_at_retrieval": (receipt or {}).get("warnings") or [],
+        "basis": "computed",
+    }
+
+
+def compare_provenance(conn, first: str, second: str) -> dict:
+    """Why two judgments might differ, field by field (§7.6).
+
+    "When two users disagree, the diff of those five fields usually explains it in seconds."
+    That only works if something actually produces the diff — a stamp nobody can compare is
+    an audit trail, and the review asked for a diagnosis.
+    """
+    a = (store.get_evaluation(conn, first) or {}).get("provenance") or {}
+    b = (store.get_evaluation(conn, second) or {}).get("provenance") or {}
+    if not a or not b:
+        return {"error": "one of those judgments carries no provenance stamp"}
+    fields = ("server_version", "rulebook_version", "embedding_model", "model_id")
+    differs = [f for f in fields if a.get(f) != b.get(f)]
+    same = [f for f in fields if a.get(f) == b.get(f)]
+    if (a.get("retrieved") or []) != (b.get("retrieved") or []):
+        differs.append("retrieved")
+    else:
+        same.append("retrieved")
+    return {
+        "differs": differs,
+        "same": same,
+        "first": a, "second": b,
+        "what_it_means": (
+            "These two judgments were produced under the same conditions, so a difference "
+            "between their verdicts is a difference in reasoning rather than in setup — and "
+            "an agreement between them is evidence rather than luck."
+            if not differs else
+            f"These two judgments differ in {', '.join(differs)}. Explain any disagreement "
+            f"between their verdicts from that before reading anything into the reasoning."),
+    }
+
+
 def _window_check(conn, retrieval: Optional[str], cited_ids: Optional[list], *,
                   subject_title: str, campaign_id: Optional[str]) -> dict:
     """Was each cited record in the evidence this judgment was actually given? (D77, §7.2)
@@ -1379,7 +1450,11 @@ def embedding_model_id(space: str = "campaign") -> str:
                 else "hash")
     provider = config.EMBED_PROVIDER
     if provider == "ollama":
-        return f"ollama/{config.OLLAMA_EMBED_MODEL}"
+        # D29: the tag names a moving target. The digest pins it when the embedder will say
+        # what it loaded, and is simply absent when it will not — see `embedding.model_digest`.
+        digest = embedding.model_digest()
+        return (f"ollama/{config.OLLAMA_EMBED_MODEL}@{digest}" if digest
+                else f"ollama/{config.OLLAMA_EMBED_MODEL}")
     if provider == "voyage":
         return f"voyage/{getattr(config, 'VOYAGE_EMBED_MODEL', 'default')}"
     return provider
@@ -1745,6 +1820,9 @@ def get_evaluation(conn, *, evaluation_id: str, severity: Optional[str] = None,
         # §6.6, on the read path: a strength line that lives for one response cannot be what a
         # later reader weighs the judgment by, and weighing it later is the point.
         **({"evidence": ev["evidence"]} if ev.get("evidence") else {}),
+        # §7.6 on the read path: a stamp nobody can read back cannot explain a disagreement,
+        # which is the only thing it is for.
+        **({"provenance": ev["provenance"]} if ev.get("provenance") else {}),
         **({"how_to_say_it": _how_to_say_it(by_class, stored)} if by_class else {}),
         "resolved": ev.get("resolved") or [],
         # A judgment written before §2.4 has no verdict and no findings, only the essay.
@@ -1758,14 +1836,55 @@ def get_evaluation(conn, *, evaluation_id: str, severity: Optional[str] = None,
     }
 
 
-def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
+# D81: the stable code for each rule that can refuse a write, so a drift in WHICH rule is
+# refusing is visible. A total says nothing — a rise in citation refusals and a rise in
+# severity downgrades mean different things, and the quietest outcome of all is a real finding
+# dropped because its citation would not verify, which today leaves no trace.
+_REFUSAL_CODES = (
+    ("is not a record in this library", "precedent_unresolved"),
+    ("that quote is not in", "quote_not_found"),
+    ("precedent needs a quote", "precedent_without_quote"),
+    ("has to cite what it departs from", "citing_kind_without_precedent"),
+    ("cannot approve with", "approve_with_blocking"),
+    ("cannot carry `approve_if`", "approve_with_exit_condition"),
+    ("needs `approve_if`", "revise_without_exit_condition"),
+    ("needs a `fix`", "finding_without_fix"),
+    ("kind is required", "finding_without_kind"),
+    ("must say which way it departs", "departure_without_direction"),
+    ("cannot be a note", "breach_as_note"),
+    ("needs at least one finding above a note", "verdict_without_finding"),
+)
+
+
+def _count_refusal(conn, message: str) -> None:
+    for needle, code in _REFUSAL_CODES:
+        if needle in message:
+            store.record_refusal(conn, code)
+            return
+    store.record_refusal(conn, "other")
+
+
+def save_evaluation(conn, *args, **kwargs) -> dict:
+    """`_save_evaluation`, counting what it refuses (§7.6 / D81).
+
+    A wrapper rather than a `try` around each check, because there are twelve of them and the
+    one that matters most is whichever one nobody thought to instrument.
+    """
+    try:
+        return _save_evaluation(conn, *args, **kwargs)
+    except ValueError as exc:
+        _count_refusal(conn, str(exc))
+        raise
+
+
+def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
                     findings: Optional[list] = None, resolved: Optional[list] = None,
                     closest_precedent: Optional[dict] = None,
                     approve_if: Optional[str] = None, evidence: Optional[dict] = None,
                     provenance: Optional[dict] = None,
                     campaign_id: Optional[str] = None, cited_ids: Optional[list] = None,
                     predictions: Optional[dict] = None, retrieval: Optional[str] = None,
-                    trusted: bool = False) -> dict:
+                    model_id: Optional[str] = None, trusted: bool = False) -> dict:
     """Record a judgment as structured findings rather than an essay (defect 07).
 
     The review's diagnosis was a data-model one, not a prompting one: handed a single
@@ -1803,6 +1922,14 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
     # judgment cites and what those records carry — a model asserting "this rests on five
     # concluded campaigns" is making a claim, and §7.8's premise (a difference in a computed
     # thing is a bug) holds only when the server counted.
+    if provenance:
+        # D4, and the same rule as `basis`, `checked` and `evidence`: a provenance record the
+        # model writes is a record of what the model SAYS produced it. `model_id` is the one
+        # field the server cannot observe, so it has its own argument.
+        raise ValueError("`provenance` is written by the server, not by you: it records what "
+                         "produced this judgment, and a record of what you say produced it "
+                         "explains nothing when two judgments disagree. Pass `model_id` if "
+                         "you know which model you are.")
     if evidence:
         raise ValueError("`evidence` is written by the server, not by you: it counts what "
                          "this judgment cites and what those records actually carry, and "
@@ -2083,6 +2210,7 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
     # what lets the next version's judgment close them by id rather than by wording.
     exit_checklist = _exit_checklist(verdict, cleaned)
 
+    provenance = _stamp(conn, receipt=receipt, model_id=model_id)
     store.insert_evaluation(
         conn, evaluation_id=eid, subject_title=subject_title, verdict=verdict, summary=summary,
         findings=cleaned, resolved=resolved, closest_precedent=closest_precedent,
@@ -4360,6 +4488,10 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
     # note has to say what was found for THIS brief, not restate the rule for finding it.
     computed = (facts.for_campaign(conn, campaign_id) if campaign_id
                 else facts.compute(proposal_text))
+    # Gathered before the receipt is written, because D18 stamps them onto the verdict: a
+    # judgment made over a half-indexed library is a different judgment from one made over a
+    # whole one, and the warning that said so lived for exactly one response.
+    warnings_now = _incompleteness_warnings(conn) + _mixed_model_warning(conn)
 
     # find_similar, not find_similar_with_context, so the "your library is only partly
     # indexed" warning is added explicitly below rather than inherited — see the note there.
@@ -4383,6 +4515,8 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
                 campaign_id=campaign_id if subject else None, query=query_basis,
                 filters=filters, top_k=_PINNED_TOP_K,
                 campaign_ids=[e["campaign_id"] for e in evidence],
+                similarities=[[e["campaign_id"], e["similarity"]] for e in evidence],
+                warnings=[w["code"] for w in warnings_now],
                 embedding_model=embedding_model_id()),
             "what_it_means": (
                 "The query was this record's own text, so the same subject retrieves the "
@@ -4478,7 +4612,7 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
         # nothing about it: find_similar_campaigns warns, and this — a verdict about to be
         # saved against this evidence — did not. "How many precedents did this rest on" is
         # the wrong number when records are missing from the search entirely (§6.6).
-        "warnings": _incompleteness_warnings(conn) + _mixed_model_warning(conn),
+        "warnings": warnings_now,
     }
 
 

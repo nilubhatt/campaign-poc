@@ -109,11 +109,21 @@ CREATE TABLE IF NOT EXISTS evaluations (
     predictions   TEXT,            -- optional JSON {predicted_ctr_range, predicted_roi_range, recommendation, ...}
     created_at    REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS write_refusals (
+    id            TEXT PRIMARY KEY,
+    reason        TEXT NOT NULL,   -- a stable code, not the message (§7.6 / D81)
+    created_at    REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS reconciliations (
     id            TEXT PRIMARY KEY,
     evaluation_id TEXT NOT NULL REFERENCES evaluations(id) ON DELETE CASCADE,
     actual        TEXT,            -- the real post-conclusion metrics (freeform + optional structured)
     comparison    TEXT NOT NULL,   -- Claude's prediction-vs-actual reconciliation + lesson learned
+    basis         TEXT,            -- results | superseding_version (D85): §6.3 made the
+                                    -- version-based reconciliation the common case, so
+                                    -- "v2 shows the structure came back" now lands in the
+                                    -- same `actual` column as a CTR figure, and anything
+                                    -- computing calibration would read both as outcome data
     created_at    REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS retrievals (
@@ -124,6 +134,9 @@ CREATE TABLE IF NOT EXISTS retrievals (
     filters       TEXT,            -- JSON, and where they came from
     top_k         INTEGER NOT NULL,
     campaign_ids  TEXT NOT NULL,   -- JSON list, in the order they were returned
+    similarities  TEXT,            -- JSON [[campaign_id, score]] — §7.6 stamps these onto
+                                    -- the verdict, so a disagreement can be read off them
+    warnings      TEXT,            -- JSON list of codes raised while gathering (D18)
     embedding_model TEXT,          -- so a re-ranking after a model change is visible
     created_at    REAL NOT NULL
 );
@@ -136,12 +149,35 @@ CREATE TABLE IF NOT EXISTS vector_provenance (
                                     -- entries across spaces is normal, not a mixed index
     created_at    REAL NOT NULL
 );
+"""
+
+
+# Split out of `_SCHEMA` deliberately. An index names a COLUMN, and on an upgraded database
+# the column may not exist until `_migrate_schema` has added it — so running the two together
+# meant `_SCHEMA` failing on an index before the migration that would have made it valid could
+# run. Tables first, then columns, then indexes: `upgrade()` is the only correct order and the
+# only thing that should ever be called.
+_INDEXES = """
 CREATE INDEX IF NOT EXISTS chunks_campaign_idx   ON campaign_chunks(campaign_id);
 CREATE INDEX IF NOT EXISTS assets_campaign_idx   ON assets(campaign_id);
 CREATE INDEX IF NOT EXISTS metrics_campaign_idx ON metrics(campaign_id);
 CREATE INDEX IF NOT EXISTS evals_campaign_idx   ON evaluations(campaign_id);
 CREATE INDEX IF NOT EXISTS recon_eval_idx       ON reconciliations(evaluation_id);
 """
+
+
+def upgrade(conn: sqlite3.Connection) -> None:
+    """Bring any database — fresh, or from any earlier release — up to the current schema.
+
+    Three steps in this order and no other. `CREATE TABLE IF NOT EXISTS` creates what is
+    missing and does nothing to what exists; `_migrate_schema` adds the columns an existing
+    table lacks; only then can an index be built on a column that is guaranteed to be there.
+    """
+    conn.executescript(_SCHEMA)
+    conn.commit()
+    _migrate_schema(conn)
+    conn.executescript(_INDEXES)
+    conn.commit()
 
 
 def connect() -> sqlite3.Connection:
@@ -163,6 +199,78 @@ def _columns(conn: sqlite3.Connection, table: str) -> dict[str, Any]:
     return {r["name"]: r for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
+def _declared_columns(table: str) -> set:
+    """Which columns `_SCHEMA` declares for a table, read from `_SCHEMA` itself.
+
+    Derived rather than listed, for the reason §2.4 learned when it had to rebuild the
+    evaluations table: a hand-kept list of columns to add is a second copy of the schema, and
+    a second copy drifts. `_migrate_schema` had three campaign columns in it while
+    `get_campaign` read the whole thing — `tags` and `supersedes` unconditionally, added by
+    nothing — so any database predating either broke the most-used reader in the codebase and
+    no test would have caught it (D89).
+    """
+    scratch = sqlite3.connect(":memory:")
+    try:
+        scratch.executescript(_SCHEMA)
+        rows = scratch.execute(f"PRAGMA table_info({table})").fetchall()
+        return {r[1] for r in rows}
+    finally:
+        scratch.close()
+
+
+def _declared_ddl(table: str) -> dict:
+    """`{column: type-and-default}` for a table, as `_SCHEMA` declares it.
+
+    Only what `ALTER TABLE ADD COLUMN` can express: SQLite allows NOT NULL only with a
+    constant default, and nothing can add a PRIMARY KEY. A NOT NULL column with no default is
+    added WITHOUT the constraint rather than skipped — the column existing and being null on
+    old rows is a true statement about those rows, and skipping it leaves a reader crashing on
+    a column the schema says is there.
+    """
+    scratch = sqlite3.connect(":memory:")
+    try:
+        scratch.executescript(_SCHEMA)
+        out = {}
+        for row in scratch.execute(f"PRAGMA table_info({table})").fetchall():
+            _, name, kind, notnull, default, pk = row
+            if pk:
+                continue
+            clause = kind or "TEXT"
+            if notnull and default is not None:
+                clause += f" NOT NULL DEFAULT {default}"
+            elif notnull:
+                # NOT NULL with no default cannot be added to a table that has rows, and the
+                # obvious workaround — DEFAULT 0 on a timestamp — backdates every existing
+                # record to 1970, which is a false answer rather than a missing one. Added
+                # NULLABLE instead: a null `created_at` on a pre-existing row says nobody
+                # recorded when, which is true.
+                pass
+            elif default is not None:
+                clause += f" DEFAULT {default}"
+            out[name] = clause
+        return out
+    finally:
+        scratch.close()
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Every column `_SCHEMA` declares that an existing table does not have (D89).
+
+    `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists, so a release
+    that adds a column reaches a fresh install and no upgraded one. This closes the class
+    rather than the three instances somebody happened to notice.
+    """
+    for table in ("campaigns", "campaign_chunks", "assets", "asset_fingerprints", "metrics",
+                  "evaluations", "reconciliations", "retrievals", "vector_provenance",
+                  "write_refusals"):
+        existing = _columns(conn, table)
+        if not existing:
+            continue                       # the table itself is created by `_SCHEMA`
+        for column, clause in _declared_ddl(table).items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {clause}")
+
+
 def _migrate_schema(conn: sqlite3.Connection) -> None:
     """Additive migrations for columns added after a release — CREATE TABLE IF NOT EXISTS
     (in _SCHEMA) does nothing for an EXISTING table, so a column added since someone's last
@@ -171,6 +279,11 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     reproduced against a pre-collection schema). Never destructive — only ever adds a column
     (nullable, or NOT NULL with a constant default — SQLite allows the latter on ADD COLUMN,
     backfilling existing rows) to an existing table; a fresh DB already has it via _SCHEMA."""
+    # D89: every declared column, derived from `_SCHEMA`. The named migrations below stay —
+    # they carry backfills and a table rebuild that adding a column cannot do — but they no
+    # longer have to be the complete list, which is what made them a second copy of the
+    # schema.
+    _add_missing_columns(conn)
     existing = _columns(conn, "campaigns")
     if existing and "collection" not in existing:
         conn.execute("ALTER TABLE campaigns ADD COLUMN collection TEXT")
@@ -200,10 +313,22 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS retrievals (
             id TEXT PRIMARY KEY, subject_title TEXT, campaign_id TEXT, query TEXT NOT NULL,
             filters TEXT, top_k INTEGER NOT NULL, campaign_ids TEXT NOT NULL,
+            similarities TEXT, warnings TEXT,
             embedding_model TEXT, created_at REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS vector_provenance (
             vector_id TEXT PRIMARY KEY, model TEXT NOT NULL, created_at REAL NOT NULL);
     """)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS write_refusals (
+            id TEXT PRIMARY KEY, reason TEXT NOT NULL, created_at REAL NOT NULL);
+    """)
+    recon_columns = _columns(conn, "reconciliations")
+    if recon_columns and "basis" not in recon_columns:
+        conn.execute("ALTER TABLE reconciliations ADD COLUMN basis TEXT")
+    retrieval_columns = _columns(conn, "retrievals")
+    for column in ("similarities", "warnings"):
+        if retrieval_columns and column not in retrieval_columns:
+            conn.execute(f"ALTER TABLE retrievals ADD COLUMN {column} TEXT")
     chunk_columns = _columns(conn, "campaign_chunks")
     if chunk_columns and "kind" not in chunk_columns:
         # Existing chunks are all deck body — the only kind that existed before §2.5.
@@ -260,9 +385,7 @@ def _rebuild_evaluations(conn: sqlite3.Connection) -> None:
 
 def init_db() -> None:
     conn = connect()
-    conn.executescript(_SCHEMA)
-    conn.commit()
-    _migrate_schema(conn)
+    upgrade(conn)
     vectorstore.init(conn)   # "campaign" space (text chunks, dim=config.EMBED_DIM)
     vectorstore.init(conn, space="asset", dim=config.CLIP_EMBED_DIM)  # CLIP image vectors
     conn.close()
@@ -1326,7 +1449,7 @@ def embedding_models(conn, space: str = "campaign") -> set:
 
 
 def insert_retrieval(conn, *, subject_title, campaign_id, query, filters, top_k,
-                     campaign_ids, embedding_model) -> str:
+                     campaign_ids, embedding_model, similarities=None, warnings=None) -> str:
     """Write down what the server retrieved (§7.2).
 
     §6.1 rejected a receipt as the mechanism for verifying a QUOTE (X7): it answers a weaker
@@ -1338,9 +1461,11 @@ def insert_retrieval(conn, *, subject_title, campaign_id, query, filters, top_k,
     rid = _id("ret")
     conn.execute(
         "INSERT INTO retrievals (id, subject_title, campaign_id, query, filters, top_k, "
-        "campaign_ids, embedding_model, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        "campaign_ids, embedding_model, similarities, warnings, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (rid, subject_title, campaign_id, query, json.dumps(filters or {}), top_k,
-         json.dumps(list(campaign_ids)), embedding_model, _now()))
+         json.dumps(list(campaign_ids)), embedding_model,
+         json.dumps(similarities or []), json.dumps(warnings or []), _now()))
     conn.commit()
     return rid
 
@@ -1354,6 +1479,8 @@ def get_retrieval(conn, retrieval_id: str) -> Optional[dict]:
     d = dict(row)
     d["campaign_ids"] = json.loads(d["campaign_ids"] or "[]")
     d["filters"] = json.loads(d["filters"] or "{}")
+    d["similarities"] = json.loads(d.get("similarities") or "[]")
+    d["warnings"] = json.loads(d.get("warnings") or "[]")
     return d
 
 
@@ -1456,11 +1583,48 @@ def list_evaluations(conn) -> list[dict]:
 
 # ── reconciliations ──────────────────────────────────────────────────────────
 
-def insert_reconciliation(conn, *, evaluation_id, comparison, actual=None) -> str:
+def insert_reconciliation(conn, *, evaluation_id, comparison, actual=None,
+                          basis: Optional[str] = None) -> str:
     rid = _id("recon")
     conn.execute(
-        "INSERT INTO reconciliations (id, evaluation_id, actual, comparison, created_at) VALUES (?,?,?,?,?)",
-        (rid, evaluation_id, actual, comparison, _now()),
+        "INSERT INTO reconciliations (id, evaluation_id, actual, comparison, basis, "
+        "created_at) VALUES (?,?,?,?,?,?)",
+        (rid, evaluation_id, actual, comparison, basis, _now()),
     )
     conn.commit()
     return rid
+
+
+def get_reconciliation(conn, reconciliation_id: str) -> Optional[dict]:
+    row = conn.execute("SELECT * FROM reconciliations WHERE id = ?",
+                       (reconciliation_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def record_refusal(conn, reason: str) -> None:
+    """Count a write the server refused, by REASON (§7.6 / D81).
+
+    "Thirty writes were refused" says nothing; which rule refused them is the signal, because
+    a rise in citation refusals and a rise in severity downgrades mean different things. The
+    worst outcome this makes visible is the quietest one: a real finding dropped because its
+    citation would not verify leaves no trace at all today, and the marketer never learns that
+    something was left out.
+
+    Best-effort and never raises — a counter that can break a save would be a worse bug than
+    the blindness it fixes.
+    """
+    try:
+        if not _columns(conn, "write_refusals"):
+            return
+        conn.execute("INSERT INTO write_refusals (id, reason, created_at) VALUES (?,?,?)",
+                     (_id("refusal"), reason, _now()))
+        conn.commit()
+    except sqlite3.Error:
+        pass
+
+
+def refusal_counts(conn) -> dict:
+    if not _columns(conn, "write_refusals"):
+        return {}
+    return {r["reason"]: r["n"] for r in conn.execute(
+        "SELECT reason, COUNT(*) AS n FROM write_refusals GROUP BY reason").fetchall()}

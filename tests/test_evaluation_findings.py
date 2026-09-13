@@ -321,15 +321,25 @@ def test_an_evaluation_carries_the_strength_of_its_evidence(conn):
         core.save_evaluation(conn, **_evaluation(evidence={"precedents": 5}))
 
 
-def test_an_evaluation_can_carry_what_produced_it(conn):
+def test_an_evaluation_carries_what_produced_it(conn):
     """Item 7.6: without version stamps, two evaluations of the same brief are
-    indistinguishable in the record, so drift cannot even be detected."""
-    result = core.save_evaluation(conn, **_evaluation(
-        provenance={"rulebook_version": "2026.09", "embedding_model": "nomic-embed-text",
-                    "server_version": "0.2.7"}))
+    indistinguishable in the record, so drift cannot even be detected.
+
+    This passed a hand-written `provenance` dict and checked the column stored it, which was
+    right for 2.4 — the column landed early so nothing would need migrating later. 7.6 closed
+    D4: the stamp is the server's, because a record of what the model SAYS produced a judgment
+    explains nothing when two judgments disagree. Same column; who fills it is the item, and
+    this is the second field to make that journey after `evidence`."""
+    result = core.save_evaluation(conn, **_evaluation())
 
     stored = store.get_evaluation(conn, result["evaluation_id"])
-    assert stored["provenance"]["rulebook_version"] == "2026.09"
+    assert stored["provenance"]["basis"] == "computed"
+    assert stored["provenance"]["server_version"]
+    assert stored["provenance"]["rulebook_version"]
+
+    with pytest.raises(ValueError):
+        core.save_evaluation(conn, **_evaluation(
+            provenance={"rulebook_version": "2026.09"}))
 
 
 # ══ adversarial + design review of 2.4 ═══════════════════════════════════════

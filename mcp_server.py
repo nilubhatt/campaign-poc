@@ -137,6 +137,12 @@ predicted — forecast, projected, estimated, target, what was expected."""
 # "missing quadrant" — liked but underperformed, or disliked but performed well — is where
 # the real lessons are; querying it needs tags=["liked","underperformed"],
 # match_all_tags=True (see find_similar_campaigns).
+# D85: what a reconciliation was checked against. §6.3 made the version-based one the common
+# case, so the distinction has to exist before anything computes calibration over the table.
+ReconciliationBasis = _enum("results", "superseding_version")
+"""results — measured outcomes; the campaign ran and the numbers are in.
+superseding_version — a later version of the brief showed whether the judgment held."""
+
 TagSource = _enum("verified", "stated")
 """verified — backed by a metric_type='actual' row on that campaign.
 stated — somebody's impression, claim, recollection, or a number nobody checked."""
@@ -786,7 +792,8 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
                     cited_ids: Optional[list] = None,
                     predictions: Optional[dict] = None,
                     campaign_id: Optional[str] = None,
-                    retrieval: Optional[str] = None) -> dict:
+                    retrieval: Optional[str] = None,
+                    model_id: Optional[str] = None) -> dict:
     """Persist your judgment as structured findings, not prose.
 
     Write ONE finding per problem. Each is a short line naming the problem (<=120 chars),
@@ -898,6 +905,11 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
     "could not be checked" and "nothing came back" are opposite conclusions. You cannot write
     this field; a check you report on yourself is not a check.
 
+    **Pass `model_id`** — which model you are. The server stamps every verdict with what
+    produced it (server version, rulebook version, embedding model, retrieved ids and scores)
+    so that a disagreement between two judgments can be read off the difference. This is the
+    one field it cannot observe, and it is recorded as unknown rather than guessed.
+
     `approve_if` is what would flip a `revise` to `approve`, stated so someone could check
     it: "dates on every deliverable and the two conflicted profiles removed". It doubles as
     the note the partner receives.
@@ -934,7 +946,7 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
             conn, subject_title=subject_title, verdict=verdict, summary=summary,
             findings=findings, resolved=resolved, closest_precedent=closest_precedent,
             approve_if=approve_if, campaign_id=campaign_id, cited_ids=cited_ids,
-            predictions=predictions, retrieval=retrieval)
+            predictions=predictions, retrieval=retrieval, model_id=model_id)
     finally:
         conn.close()
 
@@ -1131,13 +1143,22 @@ def reconcile_evaluation(evaluation_id: str, actual: Optional[str] = None) -> di
 
 @mcp.tool()
 @_catch_value_errors
-def save_reconciliation(evaluation_id: str, comparison: str, actual: Optional[str] = None) -> dict:
+def save_reconciliation(evaluation_id: str, comparison: str, actual: Optional[str] = None,
+                        basis: Optional[ReconciliationBasis] = None) -> dict:
     """Persist your prediction-vs-actual comparison and the lesson learned, so future
-    evaluations are better calibrated. Returns the reconciliation id."""
+    evaluations are better calibrated. Returns the reconciliation id.
+
+    `basis` says what you checked the judgment AGAINST, and the two are not the same evidence:
+      • `results`              — measured outcomes. The campaign ran and the numbers are in.
+      • `superseding_version`  — a later version of the brief. §6.3's moment: the prediction
+                                 said the structure would come back, and v2 shows whether it
+                                 did. Real evidence about the judgment, and not an outcome.
+    Without it, "v2 shows the structure came back" sits in the same column as a CTR figure and
+    anything computing calibration later reads both as measured results."""
     conn = store.connect()
     try:
         rid = store.insert_reconciliation(conn, evaluation_id=evaluation_id,
-                                          comparison=comparison, actual=actual)
+                                          comparison=comparison, actual=actual, basis=basis)
         return {"reconciliation_id": rid, "status": "saved"}
     finally:
         conn.close()

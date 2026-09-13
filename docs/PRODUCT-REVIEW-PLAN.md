@@ -1806,8 +1806,50 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       line, because a judgment made with no rulebook is a different judgment from one made
       under a rulebook that happened to say nothing. §7.6 stamps it onto the record so the two
       can be told apart later.
-- [ ] **7.6 Stamp every verdict** with `rulebook_version`, `server_version`,
+- [x] **7.6 Stamp every verdict** with `rulebook_version`, `server_version`,
       `embedding_model`, `model_id`, and retrieved ids + similarities.
+      **The clause that decides the design is the last one:** "when they agree, you have
+      evidence the agreement is real rather than luck". A stamp is not an audit trail for its
+      own sake — it is what lets AGREEMENT be read as evidence, which is the premise §7.7's
+      golden set rests on. Two runs that agree while differing in embedding model and rulebook
+      version agree about nothing in particular.
+      **Four of the five are facts the server holds. `model_id` is not** — the judging model
+      is on the other side of the protocol — so it is recorded as unknown unless the caller
+      says, and marked `stated` when they do. A stamp with a wrong field in it is worse than
+      one with a missing field, because the diff that is meant to explain a disagreement would
+      then explain it wrongly.
+      **`compare_provenance` produces the diff,** because "the diff of those five fields
+      usually explains it in seconds" only works if something actually produces it. It names
+      what the two had in COMMON as well as what differed — agreement is the claim the review
+      cares about, and it is a claim about the stamp rather than about the verdicts.
+      **Closes D4.** The block is the server's. A provenance record the model writes is a
+      record of what the model says produced it — and this is the second field to make that
+      journey after `evidence`, which means rewriting a second 2.4 test that had asserted the
+      column would store whatever the caller passed.
+      **Closes D18.** The warnings raised while the evidence was gathered are stamped: a
+      judgment made over a half-indexed library is a different judgment from one made over a
+      whole one, and the warning that said so lived for exactly one response.
+      **Closes D81.** Refusals are counted by REASON, not totalled — "thirty writes were
+      refused" says nothing, and a rise in citation refusals means something different from a
+      rise in severity downgrades. The quietest outcome is the one this makes visible: a real
+      finding dropped because its citation would not verify used to leave no trace at all.
+      **Closes D85.** A reconciliation says what it was checked against, `results` or
+      `superseding_version`. §6.3 made the version-based one the common case, so "v2 shows the
+      structure came back" was landing in the same column as a CTR figure — and anything
+      computing calibration later would have read both as measured outcomes.
+      **Closes D29.** The stamp names a digest when the embedder will say what it loaded.
+      `ollama/nomic-embed-text` names a TAG and a tag moves, so two judgments could be stamped
+      with the same embedder while using different weights — and the stamp's whole claim is
+      that it explains a disagreement. Absent rather than invented when the embedder will not
+      answer.
+      **Closes D89, and the fix is the class rather than the instances.** The columns to add
+      are derived from `_SCHEMA` itself, because a hand-kept list of migrations is a second
+      copy of the schema and a second copy drifts — three campaign columns were listed while
+      `get_campaign` read the whole thing. Writing the test surfaced a second, sharper
+      problem: `_SCHEMA` creates indexes on columns the migration has not yet added, so on an
+      upgraded database it failed on an index before the migration that would have made it
+      valid could run. Tables, then columns, then indexes — `store.upgrade()` is now the only
+      correct order and the only entry point.
 - [ ] **7.7 Golden set + agreement measurement** — verdict agreement and finding recall, three
       runs per brief. Harness built now; briefs to be supplied by the product owner.
 - [ ] **7.8 Mark findings `computed` vs `judged`.**
