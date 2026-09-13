@@ -210,6 +210,56 @@ def _as_number(value, key: str) -> float:
             f"the figure here where it can be compared.")
 
 
+def target_for(conn, campaign_id: str, name: str) -> Optional[dict]:
+    """The number somebody said they were aiming at (D33).
+
+    "`detail` is freeform and can never be reconciled, yet 'did we hit our number' is the
+    comparison a marketer most wants." A target written into prose is a number nothing can
+    compare against, which is why the refusal text existed at all. A `metric_type` rather than
+    a separate table: it is the same measure, and the only difference is whether it had
+    happened yet.
+    """
+    rows = [r for r in values_for(conn, campaign_id, name) if r["metric_type"] == "target"]
+    return rows[-1] if rows else None
+
+
+def against_target(conn, campaign_id: str, name: str) -> dict:
+    """Did we hit our number (D33).
+
+    Three answers, not two. `met` is None when the question cannot be asked — a campaign with
+    no result has not missed anything, and a measure with no `direction` cannot be judged at
+    all: under budget is not automatically good and over is not automatically bad. Reporting a
+    verdict on either would be the confident unfounded claim this review is built around.
+    """
+    target = target_for(conn, campaign_id, name)
+    actual = next((r for r in reversed(values_for(conn, campaign_id, name))
+                   if r["metric_type"] == "actual"), None)
+    entry = describe(conn, name) or {}
+    base = {"metric": name, "target": target["value"] if target else None,
+            "actual": actual["value"] if actual else None,
+            "direction": entry.get("direction")}
+    if not target:
+        return {**base, "met": None, "code": "no_target",
+                "what_it_means": f"Nobody recorded a target for {name}."}
+    if not actual:
+        return {**base, "met": None, "code": "no_result_yet",
+                "what_it_means": (f"There is a target for {name} and no measured result yet. "
+                                  f"A campaign that has not concluded has not missed its "
+                                  f"number.")}
+    if not entry.get("direction"):
+        return {**base, "met": None, "code": "no_direction",
+                "what_it_means": (f"{name} has no recorded direction, so whether "
+                                  f"{actual['value']} against a target of {target['value']} "
+                                  f"is good or bad is not something the library knows. Under "
+                                  f"budget is not automatically good.")}
+    met = (actual["value"] >= target["value"] if entry["direction"] == "higher_is_better"
+           else actual["value"] <= target["value"])
+    return {**base, "met": met, "code": "compared",
+            "what_it_means": (f"{name} came in at {actual['value']} against a target of "
+                              f"{target['value']}, and {name} is "
+                              f"{entry['direction'].replace('_', ' ')}.")}
+
+
 def values_for(conn, campaign_id: str, name: str) -> list:
     import store
     return store.metric_values(conn, campaign_id=campaign_id, metric=name)
@@ -225,8 +275,13 @@ def best_value(conn, campaign_id: str, name: str) -> Optional[dict]:
     rows = values_for(conn, campaign_id, name)
     if not rows:
         return None
-    recomputed = [r for r in rows if r["source"] == "recomputed"]
-    return (recomputed or rows)[-1]
+    # Results only. A target is not a result, and weighing one as if it were is how a
+    # library starts reporting what somebody hoped for as what happened.
+    results = [r for r in rows if r["metric_type"] == "actual"]
+    if not results:
+        return None
+    recomputed = [r for r in results if r["source"] == "recomputed"]
+    return (recomputed or results)[-1]
 
 
 def across_library(conn, name: str) -> list:

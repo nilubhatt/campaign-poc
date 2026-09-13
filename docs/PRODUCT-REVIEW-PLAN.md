@@ -1942,6 +1942,14 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       adds provisional entries and §8.3 graduates them — a registry half in code and half in a
       table is two registries, which is the drift this project has now watched five times.
       The seed is the PRODUCT's canonical names; §12.1 lets a rulebook extend it.
+      **Closes D33.** A target is a `metric_type` beside `actual`, not a separate thing: it is
+      the same measure and the only difference is whether it had happened yet. `against_target`
+      answers "did we hit our number" with THREE answers rather than two — `met` is None when
+      there is no result yet, because a campaign that has not concluded has not missed
+      anything, and None again when the measure has no recorded `direction`, because under
+      budget is not automatically good and over is not automatically bad. That is what
+      `direction` was in the registry for. And a target is never weighed as a result: a
+      library that does that reports what somebody hoped for as what happened.
 - [ ] **8.2 Unknown metric → provisional + ask** (never reject, never silently accept).
 - [ ] **8.3 Graduation gate** — seen in N campaigns, ≥2 partners/markets, confirmed once by a
       person, before a measure becomes expected.

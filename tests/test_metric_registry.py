@@ -185,3 +185,64 @@ def test_the_raw_key_is_kept_beside_the_canonical_one(conn):
     row = metrics.values_for(conn, cid, "reach")[0]
     assert row["raw_key"] == "stated_combined_influencer_reach"
     assert row["metric"] == "reach"
+
+
+# ── D33: "did we hit our number" ────────────────────────────────────────────
+
+def test_a_target_is_a_metric_type_like_any_other(conn):
+    """D33. "`detail` is freeform and can never be reconciled, yet 'did we hit our number' is
+    the comparison a marketer most wants." A target written into prose is a number nothing can
+    compare against, which is why the refusal text existed at all."""
+    cid = _campaign(conn)
+    metrics.record(conn, campaign_id=cid, key="roas", value=4.0, metric_type="target")
+    metrics.record(conn, campaign_id=cid, key="roas", value=3.1, metric_type="actual")
+
+    assert metrics.target_for(conn, cid, "roas")["value"] == 4.0
+    assert metrics.best_value(conn, cid, "roas")["value"] == 3.1, \
+        "a target is not a result, and must never be weighed as one"
+
+
+def test_whether_the_number_was_hit_is_answerable(conn):
+    """The comparison itself, which is the point of storing a target at all."""
+    cid = _campaign(conn)
+    metrics.record(conn, campaign_id=cid, key="roas", value=4.0, metric_type="target")
+    metrics.record(conn, campaign_id=cid, key="roas", value=3.1, metric_type="actual")
+
+    hit = metrics.against_target(conn, cid, "roas")
+    assert hit["met"] is False
+    assert hit["target"] == 4.0 and hit["actual"] == 3.1
+
+
+def test_a_lower_is_better_measure_is_compared_the_right_way_round(conn):
+    """The registry records `direction` precisely so this comparison does not assume. A CPA
+    under target is a success, and anything that assumes higher-is-better reports it as a
+    miss."""
+    cid = _campaign(conn)
+    metrics.record(conn, campaign_id=cid, key="cpa", value=12.0, metric_type="target")
+    metrics.record(conn, campaign_id=cid, key="cpa", value=9.0, metric_type="actual")
+
+    assert metrics.against_target(conn, cid, "cpa")["met"] is True
+
+
+def test_a_measure_with_no_direction_says_it_cannot_judge_rather_than_guessing(conn):
+    """`budget` has no direction — under budget is not automatically good, and over is not
+    automatically bad. Reporting a verdict there would be the confident unfounded claim this
+    whole review is about."""
+    cid = _campaign(conn)
+    metrics.record(conn, campaign_id=cid, key="budget", value=40000, metric_type="target")
+    metrics.record(conn, campaign_id=cid, key="budget", value=45000, metric_type="actual")
+
+    hit = metrics.against_target(conn, cid, "budget")
+    assert hit["met"] is None
+    assert "direction" in hit["what_it_means"].lower()
+
+
+def test_a_target_with_no_result_yet_is_not_a_miss(conn):
+    """A campaign that has not concluded has not missed its number. Reporting one would be the
+    permanent complaint §5.3 wrote out."""
+    cid = _campaign(conn)
+    metrics.record(conn, campaign_id=cid, key="roas", value=4.0, metric_type="target")
+
+    hit = metrics.against_target(conn, cid, "roas")
+    assert hit["met"] is None
+    assert hit["code"] == "no_result_yet"
