@@ -63,7 +63,9 @@ def _finding(**over):
         # which way it departs. The default here cites a campaign, so it is a departure whose
         # direction these tests do not turn on.
         "kind": "precedent_departure",
-        "departure": "unexplained",
+        # `regression`, not `unexplained`: the default severity here is blocking, and a
+        # departure nobody can yet call worse does not on its own stop a brief.
+        "departure": "regression",
         "category": "timeline",
         "finding": "No posting dates on any deliverable",
         "detail": "Every asset in the flighting table is listed without a date, so nothing "

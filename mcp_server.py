@@ -787,11 +787,20 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
        "detail": "All 14 assets in the flighting table are undated, so nothing can be
                   sequenced or held to the embargo.",
        "fix": "Add a posting date per asset to the flighting table"}
-      {"severity": "should_fix", "kind": "precedent_departure", "category": "influencer",
+      {"severity": "should_fix", "kind": "precedent_departure", "departure": "unexplained",
+       "category": "influencer",
        "finding": "Seeds four colourways where the Jakarta launch seeded one",
+       "detail": "Jakarta seeded one per creator and concluded above benchmark. Four may be
+                  deliberate for a launch this size; the brief does not say.",
        "precedent": {"campaign_id": "<a campaign_id from your evidence>",
-                     "quote": "<its own words, copied — not written from memory>"},
-       "fix": "Seed one colourway, or say why four is right here"}
+                     "quote": "<its own words, copied — not written from memory>"}}
+    Note what the second one does NOT have: a `fix`. It is marked `unexplained`, so the next
+    step is a question, and "seed one colourway" would be telling them to change something
+    you have just said may be deliberate. A `regression` is where a fix belongs.
+
+    The response tells you how to voice what you wrote: `by_class` counts the three classes
+    and `note` says the register for each. `improvements` carries the possible improvements
+    separately, because the rule that makes them notes also keeps them out of `findings`.
 
     `approve_if` is what would flip a `revise` to `approve`, stated so someone could check
     it: "dates on every deliverable and the two conflicted profiles removed". It doubles as
@@ -956,18 +965,25 @@ def gaps() -> dict:
 @mcp.tool()
 @_catch_value_errors
 def get_evaluation(evaluation_id: str, severity: Optional[Severity] = None,
-                   kind: Optional[FindingKind] = None) -> dict:
+                   kind: Optional[FindingKind] = None,
+                   departure: Optional[Departure] = None) -> dict:
     """Read a stored judgment back in full, with the reasoning `save_evaluation` left out.
 
     This is where "show me the blocking items" is answered — including in a session that did
-    not produce the evaluation. Narrow with `severity` ("blocking") or `kind`
-    ("guardrail_breach") rather than fetching everything and filtering in the reply.
+    not produce the evaluation. Narrow with `severity` ("blocking"), `kind`
+    ("guardrail_breach") or `departure` ("possible_improvement") rather than fetching
+    everything and filtering in the reply.
+
+    `by_class` and `how_to_say_it` come back with it, so a judgment read in a later session
+    is voiced the same way it was when it was written — a rule breach stated, a departure
+    asked about. `improvements` lists the departures somebody thought were better than the
+    precedent; those are notes by rule, so they are easy to miss in the findings list.
 
     Find the id with list_evaluations if the user names the judgment rather than its id."""
     conn = store.connect()
     try:
         return core.get_evaluation(conn, evaluation_id=evaluation_id, severity=severity,
-                                   kind=kind)
+                                   kind=kind, departure=departure)
     finally:
         conn.close()
 

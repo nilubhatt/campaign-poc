@@ -1321,6 +1321,48 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       do not tell them to change it back until they have answered; say a possible improvement
       as good news. The tool description carries the same split, with the claw machine in it,
       because an abstract rule without a worked case is a rule nobody applies.
+      **Not done here, named so it is not assumed** (the convention 2.4 set): the departure
+      asks a question and the product cannot take the answer. When the marketer says "yes,
+      four colourways was the client's call", nothing records it — there is no write path onto
+      a saved judgment (D53, D59), and `resolved` is accepted only on a later version's
+      judgment, where it records "we changed it", not "we kept it, and here is why". So the
+      stored finding still reads `unexplained` after it has been explained, and the same
+      question comes back next time. The response says that out loud rather than pretending
+      otherwise, and D84 owes the write path to 10.2.
+      The other thing named rather than fixed: `unexplained` is the cheap answer. It costs no
+      claim, unlike `regression`, and no visibility, unlike `possible_improvement`. Expect
+      mostly `unexplained` after a hundred evaluations; D78 predicts it and 7.7's agreement
+      runs are the instrument, which D81 says does not exist yet.
+      **From review — and two of the findings were this item repeating a mistake it had just
+      been written to prevent.** The response's `note` branched on the CLASS, so a blocking
+      `regression` was told to "ask whether it is deliberate, do not tell them to change it
+      back" in the same response as its own `fix` line: the three readings exist so the
+      voicing can differ, and two of the three were sharing one voice. And the `_how_to_say_it`
+      guidance told the model to deliver the good news about a possible improvement whose text
+      the response did not contain — the improvement is a `note` by rule, and `findings` keeps
+      only blocking and should_fix, so the claw machine was the finding least likely to reach
+      the marketer. It has its own `improvements` list now, and `departure` is in the findings
+      projection so "worse" and "may be deliberate" do not need a second round trip to tell
+      apart.
+      *The rule was one-sided.* `possible_improvement` could not be blocking, but
+      `unexplained` could — a question that by itself stops the brief is the same
+      contradiction. And a `possible_improvement` could still carry a `fix`, which is the
+      reversal the severity rule refuses, arriving in the other field.
+      *The worked example the shared prompt teaches was refused by the server* — no
+      `departure` — and its `fix` said "seed one colourway", telling the marketer to change
+      back the thing the same docstring says to ask about four paragraphs above. 6.1's review
+      found this same class of defect in this same docstring, so the test now SAVES the
+      examples rather than checking that the right words appear in them.
+      *`diff_campaigns` dropped `departure`,* so a first review calling a difference a
+      `regression` and a second calling it a `possible_improvement` was reported as "raised
+      again" — a correction not taken. That is the claw-machine story filed as a repeat
+      defect by the tool built to tell them apart. It now carries `departure_now` and a
+      `reread` code.
+      *And `get_evaluation` leaked the raw vocabulary:* `save_evaluation` translated the
+      classes into something a marketer can hear and the read path did not, which is the
+      "worked only inside the session that produced it" failure 2.4 fixed for the findings
+      themselves. It returns `by_class`, `improvements` and the same voicing note, and takes a
+      `departure=` filter.
       Closes D1. The `rule_id` half of D1 was already done by 6.1.
 - [ ] **6.3 (I) Close the prediction loop** — when a superseding record arrives, surface the
       prior evaluation's predictions and ask which held.
@@ -1348,8 +1390,8 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 - [x] **7.3 Enforce the output shape server-side** — reject writes missing a precedent quote
       or exceeding caps, rather than accepting and hoping. *Caps done by 2.4; the
       missing-quote half done by 6.1, which also verifies the quote rather than only
-      requiring one. Complete for findings that carry a `kind`; a finding with no `kind` at
-      all still needs no citation, and making `kind` required is 6.2 (D1).*
+      requiring one. Completed by 6.2, which made `kind` required — until then a finding
+      with no `kind` at all needed no citation.*
 - [ ] **7.4 Tool descriptions as the shared prompt** — the evaluation procedure into
       `prepare_evaluation`'s description; set the MCP server-level `instructions` field.
 - [ ] **7.5 Ship the procedure with the evidence** — `prepare_evaluation`'s `note` carries

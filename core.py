@@ -498,7 +498,7 @@ _DEPARTURES = ("regression", "unexplained", "possible_improvement")
 # there is one place the mapping lives and no second field to drift from the first.
 _CLASSES = {
     "guardrail_breach": "not_debatable",
-    "precedent_departure": "arguable",
+    "precedent_departure": "debatable",
     "missing_information": "about_the_brief",
     "internal_contradiction": "about_the_brief",
 }
@@ -851,19 +851,34 @@ def _how_to_say_it(by_class: dict, findings: list) -> str:
         parts.append(
             "State the guardrail breach(es) plainly: a rule they wrote was broken, and that "
             "is not a matter of opinion. Name the rule.")
-    if by_class.get("arguable"):
-        improvements = [f for f in findings if f.get("departure") == "possible_improvement"]
+    if by_class.get("debatable"):
         parts.append(
             "The departures are NOT rule breaches — they are places this differs from a "
-            "campaign on file, and a difference can be right. Say what the precedent did, "
-            "say why the difference might matter, and ask whether it is deliberate. Do not "
-            "tell them to change it back until they have answered.")
-        if improvements:
+            "campaign on file, and a difference can be right.")
+        # Keyed on the DEPARTURE, not the class. Keyed on the class, a blocking regression —
+        # the finding that carries a `revise` when there is no breach — was told to "ask
+        # whether it is deliberate, do not tell them to change it back", in the same response
+        # as its own `fix` line. The three readings exist so the voicing can differ; two of
+        # the three were sharing one voice.
+        found = {value: [f for f in findings if f.get("departure") == value]
+                 for value in _DEPARTURES}
+        if found["regression"]:
             parts.append(
-                f"{len(improvements)} of the departures may be an IMPROVEMENT on the "
-                f"precedent. Say so as good news, not as a problem — a departure that turns "
-                f"out better than what it departs from is the most valuable thing this "
-                f"library can notice.")
+                "The ones marked `regression` are a judgment, not a question: say what the "
+                "precedent did and why this is worse. They may disagree, and a rebuttal is a "
+                "legitimate answer — but do not soften it into a query.")
+        if found["unexplained"]:
+            parts.append(
+                "The ones marked `unexplained` ARE a question: ask whether the difference is "
+                "deliberate, and do not tell them to change it back until they have "
+                "answered. Say plainly that their answer cannot yet be recorded against this "
+                "judgment, so the same question will come back next time.")
+        if found["possible_improvement"]:
+            parts.append(
+                f"{len(found['possible_improvement'])} departure(s) may be an IMPROVEMENT on "
+                f"the precedent — they are in `improvements`, not in `findings`. Say so as "
+                f"good news, not as a problem: a departure that turns out better than what "
+                f"it departs from is the most valuable thing this library can notice.")
     if by_class.get("about_the_brief"):
         parts.append(
             "The rest are about the brief itself — something it does not say, or something "
@@ -977,21 +992,38 @@ def _clean_resolved(value, conn=None) -> list:
 
 
 def get_evaluation(conn, *, evaluation_id: str, severity: Optional[str] = None,
-                   kind: Optional[str] = None) -> dict:
-    """Read a stored judgment back, optionally narrowed to one severity or kind.
+                   kind: Optional[str] = None, departure: Optional[str] = None) -> dict:
+    """Read a stored judgment back, optionally narrowed to one severity, kind or departure.
 
     "The detail is fetched on demand" was true of the storage and false of the surface:
     there was no read path at all, so "show me the blocking items" worked only while the
     findings were still in the context window that produced them. The next session, another
-    person, and any later comparison had no way to reach them."""
+    person, and any later comparison had no way to reach them.
+
+    §6.2's class summary and voicing note come back too. Without them the read path had the
+    same failure one level up: `save_evaluation` translated `not_debatable` and `debatable`
+    into something a marketer can hear, and reading the judgment back a week later returned
+    the raw vocabulary with nothing to say how to put it.
+    """
     ev = store.get_evaluation(conn, evaluation_id)
     if not ev:
         return {"error": f"evaluation {evaluation_id} not found"}
     findings = ev.get("findings") or []
+    stored = list(findings)
     if severity:
         findings = [f for f in findings if f.get("severity") == severity]
     if kind:
         findings = [f for f in findings if f.get("kind") == kind]
+    if departure:
+        findings = [f for f in findings if f.get("departure") == departure]
+    # Counted over everything stored, not over the filtered view: "how much of this judgment
+    # is arguable" is a fact about the judgment, and a reader who asked for the blocking
+    # items should not be told the rest does not exist.
+    by_class: dict = {}
+    for finding in stored:
+        klass = _CLASSES.get(finding.get("kind"))
+        if klass:
+            by_class[klass] = by_class.get(klass, 0) + 1
     return {
         "evaluation_id": ev["id"],
         "subject_title": ev["subject_title"],
@@ -999,7 +1031,11 @@ def get_evaluation(conn, *, evaluation_id: str, severity: Optional[str] = None,
         "summary": ev["summary"],
         "approve_if": ev.get("approve_if"),
         "closest_precedent": ev.get("closest_precedent"),
+        "by_class": by_class,
         "findings": findings,
+        "improvements": [f for f in stored
+                         if f.get("departure") == "possible_improvement"],
+        **({"how_to_say_it": _how_to_say_it(by_class, stored)} if by_class else {}),
         "resolved": ev.get("resolved") or [],
         # A judgment written before §2.4 has no verdict and no findings, only the essay.
         # Returning it as an empty structured evaluation would be a confident answer built
@@ -1100,6 +1136,24 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
                     f"{where}a departure you think may be an improvement cannot be "
                     f"{severity!r} — asking for it to be changed back contradicts your own "
                     f"reading of it. Record it as a note, or say plainly that it is worse.")
+            # The same one-sided rule, made symmetric. `unexplained` means "it may well be
+            # deliberate; the brief does not say" — an open question. `blocking` means "this
+            # alone means the brief cannot proceed as written". A question that by itself
+            # stops the brief is the same contradiction as an improvement you want undone.
+            if departure == "unexplained" and severity == "blocking":
+                raise ValueError(
+                    f"{where}a departure you cannot yet say is worse cannot be blocking — "
+                    f"\u201cthe brief does not say whether this is deliberate\u201d is a question, and "
+                    f"a question does not on its own stop a brief. Say it is a regression if "
+                    f"you can say why, or lower it to should_fix and ask.")
+            # A fix is an instruction to change something. Attaching one to a departure you
+            # have just called a possible improvement is the reversal the severity rule above
+            # refuses, arriving in the other field.
+            if departure == "possible_improvement" and finding.get("fix"):
+                raise ValueError(
+                    f"{where}a departure you think may be an improvement cannot carry a "
+                    f"`fix` — a fix is an instruction to change it back. Put what you would "
+                    f"want to know in `detail` instead.")
         elif departure is not None:
             raise ValueError(
                 f"{where}only a precedent_departure carries `departure`; {kind!r} does not. "
@@ -1227,8 +1281,19 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         # review's complaint in one line: the two "come out of the same machinery".
         "by_class": by_class,
         "closest_precedent": closest_precedent,
-        "findings": [{k: f[k] for k in ("id", "severity", "kind", "finding", "fix")}
+        # `departure` is in the projection: without it the model cannot tell "this is worse"
+        # from "this may be deliberate" without a second round trip — the round trip this
+        # fixed shape exists to avoid.
+        "findings": [{k: f[k] for k in ("id", "severity", "kind", "departure", "finding",
+                                        "fix")}
                      for f in cleaned if f["severity"] in ("blocking", "should_fix")],
+        # Carried separately, because the rule making a possible improvement a `note` also
+        # dropped it out of `findings` — so the response told the model to deliver good news
+        # whose text it did not have, and the claw machine, this item's own headline example,
+        # was the finding least likely to reach the marketer.
+        "improvements": [{k: f[k] for k in ("id", "finding", "detail", "precedent")}
+                         for f in cleaned
+                         if f.get("departure") == "possible_improvement"],
         "approve_if": approve_if,
         "most_valuable_missing_input": missing,
         # §5.2: the three things anyone actually does after a judgment, prefilled. The
@@ -1946,7 +2011,8 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
         text_match[id(unsettled[i])] = (candidates[j], score)
 
     for finding in earlier_findings:
-        entry = {k: finding.get(k) for k in ("id", "severity", "kind", "category",
+        entry = {k: finding.get(k) for k in ("id", "severity", "kind", "departure",
+                                             "category",
                                              "finding")}
         if finding.get("id") in resolved_by_id:
             entry["basis"] = "computed"
@@ -1961,7 +2027,8 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
         if named is not None:
             matched_later.append(named)
             result["raised_again"].append({**entry, "basis": "computed", "match": "id",
-                                           "raised_again_as": named.get("finding")})
+                                           "raised_again_as": named.get("finding"),
+                                           **_reread(finding, named)})
             continue
 
         # Wording, as a fallback that is labelled as one. Character similarity scored
@@ -1973,7 +2040,7 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
             again, _score = paired
             matched_later.append(again)
             result["raised_again"].append({
-                **entry, "basis": "judged", "match": "text",
+                **entry, "basis": "judged", "match": "text", **_reread(finding, again),
                 "similarity": round(_looks_like(finding.get("finding"),
                                                 again.get("finding")), 2),
                 "raised_again_as": again.get("finding"),
@@ -2006,7 +2073,8 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
     for finding in later_findings:
         if finding in matched_later:
             continue
-        entry = {k: finding.get(k) for k in ("id", "severity", "kind", "category",
+        entry = {k: finding.get(k) for k in ("id", "severity", "kind", "departure",
+                                             "category",
                                              "finding")}
         entry["basis"] = "computed"
         result["newly_introduced"].append(entry)
@@ -2015,6 +2083,28 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
                         ("adopted", "raised_again", "newly_introduced", "no_longer_raised",
                          "carried_stale")}
     return result
+
+
+def _reread(earlier: dict, later: dict) -> dict:
+    """Did the second reader read the same difference differently? (§6.2)
+
+    A finding raised in both versions is reported as "raised again", which reads as a
+    correction not taken. But a departure the first review called a `regression` and the
+    second called a `possible_improvement` is not an ignored correction — it is the library
+    changing its mind, and it is the review's own headline case: the UAE brief's claw machine
+    was a departure that turned out better than the precedent. Reported without this, the
+    comparison files exactly that story as a repeat defect.
+    """
+    before, after = earlier.get("departure"), later.get("departure")
+    if not before or not after or before == after:
+        return {}
+    return {
+        "departure_now": after,
+        # A stable code, not prose: `softened` is the claw machine, `hardened` is a second
+        # reader who decided the difference was worse than the first thought.
+        "reread": ("softened" if _DEPARTURES.index(after) > _DEPARTURES.index(before)
+                   else "hardened"),
+    }
 
 
 def _record_changes(first: dict, second: dict) -> dict:
@@ -2997,7 +3087,8 @@ def _earlier_version_findings(conn, campaign_id: Optional[str]) -> Optional[dict
         "title": earlier["title"] if earlier else None,
         "evaluation_id": judgment["id"],
         "verdict": judgment.get("verdict"),
-        "findings": [{k: f.get(k) for k in ("id", "severity", "kind", "category",
+        "findings": [{k: f.get(k) for k in ("id", "severity", "kind", "departure",
+                                            "category",
                                             "finding", "fix")}
                      for f in judgment["findings"]],
     }
@@ -3045,7 +3136,11 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
             "Reason over this evidence, then call save_evaluation with a verdict "
             "(approve / revise / reject), a one-line summary, and one short finding per "
             "problem — each with its severity, its kind, and a quote from the campaign or "
-            "rule it is anchored to, CITING specific campaign_ids above. Predicted CTR/ROI "
+            "rule it is anchored to, CITING specific campaign_ids above. `kind` is required; "
+            "a precedent_departure must also say which way it departs (`departure`: "
+            "regression / unexplained / possible_improvement), because \u201cthis is not how Peru "
+            "did it\u201d is not a finding until you say whether different is worse here. "
+            "Predicted CTR/ROI "
             "ranges go in `predictions`. Weight concluded campaigns (those with metrics) "
             "most. "
             # Said here as well as in save_evaluation's description, because this is the

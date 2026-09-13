@@ -57,7 +57,11 @@ def _evaluation(finding, **over):
     # in sixty places — a departure whose direction is not the point is `unexplained`.
     finding = dict(finding)
     if finding.get("kind") == "precedent_departure":
-        finding.setdefault("departure", "unexplained")
+        # `unexplained` cannot be blocking — a question does not on its own stop a brief —
+        # so a blocking fixture is a `regression`. Neither is what these tests are about.
+        finding.setdefault(
+            "departure",
+            "regression" if finding.get("severity") == "blocking" else "unexplained")
     base = {
         "subject_title": "Colombia v2",
         "verdict": "revise",
@@ -316,7 +320,7 @@ def test_the_refusal_reaches_the_model_over_the_protocol(conn, peru):
     refused = mcp_server.save_evaluation(
         subject_title="Colombia v2", verdict="revise", summary="Nothing is dated.",
         findings=[{"severity": "blocking", "kind": "precedent_departure",
-                   "departure": "unexplained", "finding": "Undated deliverables",
+                   "departure": "regression", "finding": "Undated deliverables",
                    "precedent": {"campaign_id": peru,
                                  "quote": "a sentence nobody wrote"}}])
 
@@ -336,7 +340,7 @@ def test_a_faithful_quote_goes_through_the_tool_too(conn, peru):
     saved = mcp_server.save_evaluation(
         subject_title="Colombia v2", verdict="revise", summary="Nothing is dated.",
         findings=[{"severity": "blocking", "kind": "precedent_departure",
-                   "departure": "unexplained", "finding": "Undated deliverables",
+                   "departure": "regression", "finding": "Undated deliverables",
                    "precedent": {"campaign_id": peru, "quote": "posting date"}}])
 
     assert saved["evaluation_id"]
@@ -645,7 +649,7 @@ def test_the_missing_quote_message_survives_the_transport(conn, peru):
     refused = asyncio.run(_call("save_evaluation", {
         "subject_title": "Colombia v2", "verdict": "revise", "summary": "Nothing is dated.",
         "findings": [{"severity": "blocking", "kind": "precedent_departure",
-                      "departure": "unexplained", "finding": "Undated deliverables",
+                      "departure": "regression", "finding": "Undated deliverables",
                       "precedent": {"campaign_id": peru}}]}))
 
     assert "error" in refused, refused
