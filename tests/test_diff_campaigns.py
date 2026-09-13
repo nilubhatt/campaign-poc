@@ -47,7 +47,11 @@ def _finding(text, **over):
 
 
 def _version(conn, title, **kw):
-    kw.setdefault("detail", f"the {title} brief")
+    # §7.8 raises the mechanical findings itself, and a brief with no date in it earns one.
+    # This file is about matching findings ACROSS versions, so the fixtures carry a date and
+    # a creator rate rather than every test here growing a computed finding it is not about.
+    kw.setdefault("detail", f"the {title} brief. Runs 3 March 2026. "
+                            f"Creators: @lima (3.4% ER).")
     return core.ingest_campaign(conn, title=title, confirm=True, **kw)["campaign_id"]
 
 
@@ -340,7 +344,8 @@ def test_text_similarity_never_earns_the_word_ignored(conn):
     if diff["raised_again"]:
         entry = diff["raised_again"][0]
         assert entry["match"] == "text"
-        assert entry["basis"] == "judged", "a resemblance in wording is not a computed fact"
+        assert entry["basis"] == "heuristic", \
+        "a resemblance in wording is neither a computed fact nor somebody's judgment (D61)"
         assert 0 < entry["similarity"] < 1
 
 

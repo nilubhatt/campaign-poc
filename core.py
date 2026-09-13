@@ -476,7 +476,22 @@ _KINDS = ("guardrail_breach", "precedent_departure", "missing_information",
 # behind them. Defaults to "judged": anything the model asserted is a judgment unless the
 # server itself worked it out, and defaulting the other way would let an opinion inherit the
 # authority of a mechanical check.
-_BASES = ("computed", "judged")
+_BASES = ("computed", "judged", "heuristic")
+BASIS_MEANING = {
+    "computed": "The server worked this out by reading the brief. It is identical for every "
+                "user, so a difference in it is a bug rather than a disagreement.",
+    "judged": "Somebody reasoned their way to this. Two readers may legitimately differ, and "
+              "the evidence behind it is what makes it arguable rather than arbitrary.",
+    # D61. §5.4 matched findings across versions by character similarity and had to call the
+    # result `judged` with a caveat attached, because it is neither: a similarity score is not
+    # a human judgment, and it is not identical for every user in the sense `computed` means,
+    # since it is a heuristic whose threshold somebody picked. Reading `heuristic` as a softer
+    # `computed` is the mistake this sentence exists to prevent.
+    "heuristic": "The server inferred this from a similarity score against a threshold "
+                 "somebody chose. It is repeatable but it is not a fact — a different "
+                 "threshold would give a different answer, and it should never be stated as "
+                 "something the record says.",
+}
 _MAX_SUMMARY = 240
 _MAX_FINDING = 120
 _MAX_FIX = 120
@@ -901,6 +916,12 @@ def _how_to_say_it(by_class: dict, findings: list) -> str:
         parts.append(
             "The rest are about the brief itself — something it does not say, or something "
             "it says twice differently. Those are gaps to fill, not arguments to have.")
+    computed = [f for f in findings if f.get("basis") == "computed"]
+    if computed:
+        parts.append(
+            f"{len(computed)} of these findings are COMPUTED — the server read them out of "
+            f"the brief, they are the same for every user, and each carries what it read in "
+            f"`detail`. State them as facts; they are not yours and they are not opinions.")
     parts.append(
         "The reasoning behind any finding is in get_evaluation, not here. `next_actions` are "
         "offers — say them in your own words and act on the one the user picks; do not call "
@@ -1877,6 +1898,67 @@ def save_evaluation(conn, *args, **kwargs) -> dict:
         raise
 
 
+# §7.8 / D5. Which computed facts become FINDINGS rather than staying facts, and what to call
+# them. A fact is not a finding — "no date appears in this brief" becomes one when somebody
+# says it is a problem — and until this existed only the model could make that step, which put
+# a `judged` label on the most mechanical half of the output.
+#
+# Deliberately not every fact. `channels: partial` is the normal state of every brief, and a
+# finding that fires on everything is one nobody reads. These three are the review's own
+# examples of mechanical findings, and each is a thing that is simply absent or simply wrong.
+_COMPUTED_FINDINGS = {
+    "date_coverage": ("absent", "should_fix",
+                      "No date appears anywhere in this brief"),
+    "engagement_rate": ("absent", "should_fix",
+                        "No creator profile carries an engagement rate"),
+    "date_consistency": ("contradicted", "blocking",
+                         "A statement about dates contradicts the calendar"),
+}
+
+
+def _computed_findings(subject_text: Optional[str], computed: Optional[dict]) -> list:
+    """The mechanical findings, raised by the server (§7.8 / D5).
+
+    §2.4's premise — "a computed finding is identical for every user, so a difference there is
+    a bug" — says nothing while every finding is written by a model. §7.1 established the
+    facts; this is what turns the ones that are problems into findings, so §7.7 measures a
+    model's consistency at reasoning rather than its consistency at reading a regex's output.
+
+    They never change the verdict. The server establishes facts and the reasoner judges; a
+    server finding that flipped an approve would be the product overruling the reasoner on the
+    strength of a regex, and §6.4 already settled that the server ARGUES with a verdict rather
+    than replacing it.
+    """
+    if computed is None:
+        if not subject_text:
+            return []
+        computed = facts.compute(subject_text)
+    raised = []
+    for code, (status, severity, headline) in _COMPUTED_FINDINGS.items():
+        fact = computed.get(code) or {}
+        if fact.get("status") != status:
+            continue
+        raised.append({
+            "severity": severity,
+            "kind": "missing_information" if code != "date_consistency"
+                    else "internal_contradiction",
+            "departure": None,
+            "basis": "computed",
+            "category": code,
+            "finding": headline,
+            "repeats": None,
+            # The evidence the check read, for the same reason §7.1 attaches it to a fact: a
+            # finding that cannot show what it looked at is an assertion, and the server's
+            # assertions carry more weight than a model's.
+            "detail": _bounded(fact.get("what_it_means", "") + (
+                "  Read from: " + " / ".join(fact.get("evidence") or [])
+                if fact.get("evidence") else ""), "detail", _MAX_DETAIL),
+            "precedent": None,
+            "fix": None,
+        })
+    return raised
+
+
 def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
                     findings: Optional[list] = None, resolved: Optional[list] = None,
                     closest_precedent: Optional[dict] = None,
@@ -1884,7 +1966,8 @@ def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
                     provenance: Optional[dict] = None,
                     campaign_id: Optional[str] = None, cited_ids: Optional[list] = None,
                     predictions: Optional[dict] = None, retrieval: Optional[str] = None,
-                    model_id: Optional[str] = None, trusted: bool = False) -> dict:
+                    model_id: Optional[str] = None, subject_text: Optional[str] = None,
+                    trusted: bool = False) -> dict:
     """Record a judgment as structured findings rather than an essay (defect 07).
 
     The review's diagnosis was a data-model one, not a prompting one: handed a single
@@ -2045,9 +2128,11 @@ def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         # there is a bug" — which only holds if the SERVER computed it. A model that read a
         # missing date did not compute it, and letting it say so would let an opinion
         # inherit the authority of a mechanical check.
-        if basis == "computed" and not trusted:
-            raise ValueError(f"{where}only the server sets basis 'computed'; a finding you "
-                             f"reached yourself is 'judged', however certain it is")
+        if basis in ("computed", "heuristic") and not trusted:
+            raise ValueError(
+                f"{where}only the server sets basis {basis!r}: {BASIS_MEANING[basis]} A "
+                f"finding you reached yourself is 'judged', however certain it is — claiming "
+                f"a provenance is not the same as having one.")
         # §6.5 / D2: a finding above a note is a claim that something must change, and
         # without a `fix` the reader has the complaint and not the remedy. It is also what
         # the exit checklist is composed from, so a missing one leaves a hole in the list
@@ -2074,6 +2159,7 @@ def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
 
     counts = {level: sum(1 for f in cleaned if f["severity"] == level)
               for level in _SEVERITIES}
+
 
     # Internal consistency the prose version could not enforce, because nothing could count
     # the findings: a "revise" with nothing to revise is a hedge, and an "approve" carrying
@@ -2118,6 +2204,19 @@ def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
     # the same brief can be compared without re-reading them. The sort is stable, so two
     # findings of equal severity keep the order they were written in — a model that ordered
     # them deliberately is not second-guessed.
+    # The server's own findings join the list before ids are assigned, so they are addressable
+    # like any other — a later version can resolve one by id. They are appended rather than
+    # merged into the caps: the model's twelve are its own, and refusing a mechanical finding
+    # because the model filled the list would hide the half nobody is guessing at.
+    cleaned += _computed_findings(subject_text,
+                                  facts.for_campaign(conn, campaign_id) if campaign_id
+                                  else None)
+    # Counted AFTER the server's own findings join the list — counting before it meant the
+    # one figure that says which half of the output is the model's did not include the other
+    # half at all.
+    counts_by_basis: dict = {}
+    for finding in cleaned:
+        counts_by_basis[finding["basis"]] = counts_by_basis.get(finding["basis"], 0) + 1
     cleaned.sort(key=lambda f: _SEVERITIES.index(f["severity"]))
 
     # Identify the findings so a later version can say which one it closed, and so two
@@ -2231,6 +2330,10 @@ def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         "verdict": verdict,
         "summary": summary,
         "counts": counts,
+        # §7.8: which half of the output is the model's. §7.7 measures finding recall against
+        # what the product raised, and without this the figure would improve every time a
+        # regex fired and nobody could tell why.
+        "counts_by_basis": counts_by_basis,
         # §6.2: counts by severity say how much each finding matters and nothing about
         # whether it is arguable, so "2 blocking" reads the same for a rule somebody broke
         # and a preference they may have been right to depart from. That collapse is the
@@ -3114,7 +3217,8 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
             again, _score = paired
             matched_later.append(again)
             result["raised_again"].append({
-                **entry, "basis": "judged", "match": "text", **_reread(finding, again),
+                # D61/§7.8: `heuristic`, not `judged`. Nobody judged this — a threshold did.
+                **entry, "basis": "heuristic", "match": "text", **_reread(finding, again),
                 "similarity": round(_looks_like(finding.get("finding"),
                                                 again.get("finding")), 2),
                 "raised_again_as": again.get("finding"),

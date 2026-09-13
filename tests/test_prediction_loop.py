@@ -460,7 +460,10 @@ def test_the_quiz_is_capped(conn, peru):
     """A twelve-finding judgment turned filing a document into an exam. They are shown so the
     user can see what was said; they get settled one by one when this version is evaluated,
     where each is recorded by id rather than as free text."""
-    v1 = core.ingest_campaign(conn, title="Colombia v1", detail="Seeds four.")["campaign_id"]
+    # Dated, so §7.8's computed findings do not add one the cap test is not about.
+    v1 = core.ingest_campaign(
+        conn, title="Colombia v1",
+        detail="Seeds four. Runs 3 March 2026. Creators: @lima (3.4% ER).")["campaign_id"]
     _judge(conn, v1, peru, findings=[
         {"severity": "should_fix", "fix": "Change it", "kind": "missing_information",
          "finding": f"Gap number {n}"} for n in range(9)])

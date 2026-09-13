@@ -793,7 +793,8 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
                     predictions: Optional[dict] = None,
                     campaign_id: Optional[str] = None,
                     retrieval: Optional[str] = None,
-                    model_id: Optional[str] = None) -> dict:
+                    model_id: Optional[str] = None,
+                    subject_text: Optional[str] = None) -> dict:
     """Persist your judgment as structured findings, not prose.
 
     Write ONE finding per problem. Each is a short line naming the problem (<=120 chars),
@@ -905,6 +906,11 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
     "could not be checked" and "nothing came back" are opposite conclusions. You cannot write
     this field; a check you report on yourself is not a check.
 
+    **Pass `subject_text`** — the brief itself, if it is not a stored record. The server
+    raises the mechanical findings from it (no dates, no engagement rates, a date that
+    contradicts the calendar) and marks them `basis: computed`: identical for every user, so a
+    difference in one is a bug rather than a disagreement. They never change your verdict.
+
     **Pass `model_id`** — which model you are. The server stamps every verdict with what
     produced it (server version, rulebook version, embedding model, retrieved ids and scores)
     so that a disagreement between two judgments can be read off the difference. This is the
@@ -946,7 +952,8 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
             conn, subject_title=subject_title, verdict=verdict, summary=summary,
             findings=findings, resolved=resolved, closest_precedent=closest_precedent,
             approve_if=approve_if, campaign_id=campaign_id, cited_ids=cited_ids,
-            predictions=predictions, retrieval=retrieval, model_id=model_id)
+            predictions=predictions, retrieval=retrieval, model_id=model_id,
+            subject_text=subject_text)
     finally:
         conn.close()
 

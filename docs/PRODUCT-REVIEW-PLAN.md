@@ -1889,7 +1889,31 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       finished item look incomplete; filing them as accepted limits would say nothing will
       ever fix them, which is false. They are **awaiting input**, and the distinction the new
       section records is who the next move belongs to.
-- [ ] **7.8 Mark findings `computed` vs `judged`.**
+- [x] **7.8 Mark findings `computed` vs `judged`.**
+      **§2.4's premise said nothing until now.** "A computed finding is identical for every
+      user, so a difference there is a bug" is a claim about findings the SERVER produced —
+      and the server produced none, so `computed` was an unwritable value on an empty set.
+      **Closes D5.** §7.1 established the facts; this turns the ones that are problems into
+      findings. A fact is not a finding: "no date appears in this brief" becomes one when
+      somebody says it is a problem, and until now only the model could take that step, which
+      put a `judged` label on the most mechanical half of the output — so §7.7 would have been
+      measuring a model's consistency at reading a regex's result.
+      **Three facts become findings, not all of them.** `channels: partial` is the normal state
+      of every brief, and a finding that fires on everything is one nobody reads. The three
+      are the review's own examples, and each is a thing simply absent or simply wrong.
+      **They never change the verdict.** The server establishes facts and the reasoner judges;
+      a server finding that flipped an approve would be the product overruling the reasoner on
+      the strength of a regex, and §6.4 already settled that the server ARGUES with a verdict
+      rather than replacing it.
+      **`counts_by_basis` says which half of the output is the model's,** because §7.7
+      measures finding recall against what the product raised — and without it the figure
+      would improve every time a regex fired, with nobody able to tell why.
+      **Closes D61 with a third value.** §5.4 matches findings across versions by character
+      similarity and had to call the result `judged` with a caveat, because it is neither: a
+      similarity score is not a human judgment, and it is not identical for every user in the
+      sense `computed` means, since it is a heuristic whose threshold somebody chose.
+      `heuristic` says exactly that, and each of the three values carries a sentence — which
+      is what stops `heuristic` being read as a softer `computed`.
 
 ## Phase 8 — Metrics that evolve
 
