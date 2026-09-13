@@ -906,8 +906,19 @@ def _how_to_say_it(by_class: dict, findings: list) -> str:
     return " ".join(parts)
 
 
-def _exit_checklist(findings: list) -> list:
+def _exit_checklist(verdict: Optional[str], findings: list) -> list:
     """The exit condition as something somebody can tick off (§6.5).
+
+    **Only for a revise**, and the first version got this wrong in the way that matters: it
+    composed a checklist for every verdict, so an approve carrying a `should_fix` came back
+    with a list of things to change — the exact "reservation the verdict does not admit to"
+    that the `approve_if` rule two functions up refuses. The server was manufacturing it from
+    the `fix` it had just demanded. A reject got one too, while being refused an exit
+    condition on the grounds that having one makes it a revise. The rule was enforced on the
+    sentence and contradicted by the list.
+
+    The fixes are still on the findings for an approve or a reject. What they are not is an
+    exit condition, because neither verdict has an exit.
 
     The review asks for an exit condition that is "testable" and that "doubles as the note
     the partner receives", and those are the same requirement: a sentence cannot be checked
@@ -918,8 +929,18 @@ def _exit_checklist(findings: list) -> list:
     Notes are left out. "Worth saying once; nobody has to act" is the severity's own
     definition, and an item on an exit checklist is by definition something to act on.
     """
-    return [{"finding_id": f["id"], "severity": f["severity"], "fix": f["fix"]}
-            for f in findings if f["severity"] in ("blocking", "should_fix")]
+    if verdict != "revise":
+        return []
+    # `.get`, like every other read-path consumer here: a stored judgment from before the
+    # `fix` rule has no such key, and `_exit_checklist` was the one place that indexed it —
+    # so `get_evaluation` and §6.3's moment raised KeyError on a row nothing else minded.
+    # `departure` rides along because §6.2 distinguishes a fix that CHANGES something from
+    # one that answers a question, and a checklist stripped of it cannot show the difference
+    # to the person ticking it off.
+    return [{"finding_id": f.get("id"), "severity": f.get("severity"),
+             "departure": f.get("departure"), "fix": f.get("fix")}
+            for f in findings
+            if f.get("severity") in ("blocking", "should_fix") and f.get("fix")]
 
 
 def _say_the_disconfirming_check(check: dict) -> str:
@@ -1298,13 +1319,17 @@ def get_evaluation(conn, *, evaluation_id: str, severity: Optional[str] = None,
         klass = _CLASSES.get(finding.get("kind"))
         if klass:
             by_class[klass] = by_class.get(klass, 0) + 1
+    # Composed from everything STORED, not from the filtered view: a reader who asked for the
+    # blocking items should not be handed a shorter exit condition as a side effect, which is
+    # the same promise the class summary above makes.
+    read_checklist = _exit_checklist(ev.get("verdict"), stored)
     return {
         "evaluation_id": ev["id"],
         "subject_title": ev["subject_title"],
         "verdict": ev["verdict"],
         "summary": ev["summary"],
         "approve_if": ev.get("approve_if"),
-        **({"exit_checklist": _exit_checklist(stored)} if _exit_checklist(stored) else {}),
+        **({"exit_checklist": read_checklist} if read_checklist else {}),
         "closest_precedent": ev.get("closest_precedent"),
         "by_class": by_class,
         "findings": findings,
@@ -1601,7 +1626,7 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         finding["id"] = f"{eid}#{n}"
     # After the ids exist, because each item points at the finding it came from — that is
     # what lets the next version's judgment close them by id rather than by wording.
-    exit_checklist = _exit_checklist(cleaned)
+    exit_checklist = _exit_checklist(verdict, cleaned)
 
     store.insert_evaluation(
         conn, evaluation_id=eid, subject_title=subject_title, verdict=verdict, summary=summary,
@@ -3563,6 +3588,7 @@ def _judgment_to_check(conn, superseded: Optional[str]) -> Optional[dict]:
     # only THIS moment can catch is the forecast-shaped claim, which is why the verdict and
     # the predictions are not capped.
     all_findings = judgment.get("findings") or []
+    handoff_checklist = _exit_checklist(judgment.get("verdict"), all_findings)
     open_findings = [{k: f.get(k) for k in ("id", "severity", "kind", "departure", "finding")}
                      for f in all_findings[:_MAX_EARLIER_FINDINGS]]
     return {
@@ -3575,8 +3601,12 @@ def _judgment_to_check(conn, superseded: Optional[str]) -> Optional[dict]:
         # §6.5: the exit condition, in front of the version that is supposed to meet it. "The
         # specific, testable set of changes that converts this verdict to approve" is worth
         # nothing if nobody sees it when the next version arrives, and §6.3 built the moment.
-        "approve_if": judgment.get("approve_if"),
-        "exit_checklist": _exit_checklist(all_findings),
+        # Absent rather than empty, and capped like `open_findings` beside it — the cap is
+        # there because a twelve-item list turned filing a document into a quiz, and a second
+        # uncapped copy of the same findings under another key puts it straight back.
+        **({"approve_if": judgment["approve_if"]} if judgment.get("approve_if") else {}),
+        **({"exit_checklist": handoff_checklist[:_MAX_EARLIER_FINDINGS],
+            "exit_checklist_total": len(handoff_checklist)} if handoff_checklist else {}),
         "open_findings": open_findings,
         "open_findings_total": len(all_findings),
         "ask": ("This replaces a record the library has already judged. Ask which of the "

@@ -1537,6 +1537,24 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       that for an unexplained departure the action IS an answer — "say whether four colourways
       is deliberate" — which is a real, checkable thing to do and not an instruction to undo
       what the finding has just said may be deliberate. The worked example says so.
+      **From review, and the finding is this item contradicting itself one line apart.** The
+      checklist was composed for EVERY verdict. So an approve carrying a `should_fix` — which
+      §2.4 permits — came back with a list of things to change: the server manufacturing the
+      exact "reservation the verdict does not admit to" that the `approve_if` rule two
+      functions up refuses, out of the `fix` it had just demanded. A reject got one too, while
+      being refused an exit condition on the grounds that having one makes it a revise. The
+      rule was enforced on the sentence and contradicted by the list. Only a revise has an
+      exit, so only a revise gets a checklist; the fixes stay on the findings either way.
+      *`_exit_checklist` was the one read-path consumer that indexed rather than `.get`,* so a
+      stored judgment from before the `fix` rule raised `KeyError` out of `get_evaluation` —
+      and out of §6.3's moment, which would have 500'd instead of asking.
+      *The handoff broke two of its own neighbours' rules:* it emitted `approve_if: None` and
+      `exit_checklist: []` where the response beside it says absent-not-empty, and it re-listed
+      every finding uncapped under a second key, next to an `open_findings` capped at three
+      because "a twelve-finding judgment turned an upload into a quiz".
+      *And the checklist stripped `departure`,* which is the field that tells the person
+      ticking it off whether an item is a change or an answer — the distinction §6.2 exists
+      for and that this item's own worked example turns on.
       Closes D2.
 - [ ] **6.6 (L) Evidence-strength line** on every judgment — how many precedents, concluded,
       verified; top similarity; whether one match dominates.

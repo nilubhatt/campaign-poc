@@ -276,7 +276,9 @@ def test_an_improvement_cannot_smuggle_the_reversal_into_the_fix(conn, library):
             # A second finding, so the refusal is about the `fix` and not about a revise
             # carrying nothing above a note.
             _wire(_breach(), library)))
-    assert "fix" in str(e.value)
+    # "cannot carry", not "fix": §6.5's own message also contains the word `fix`, so the
+    # loose version would pass on the wrong refusal.
+    assert "cannot carry a `fix`" in str(e.value)
 
 
 def test_the_tailored_refusals_say_what_each_value_means(conn, library):

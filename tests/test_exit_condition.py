@@ -76,7 +76,7 @@ def test_an_approve_cannot_carry_one(conn, peru):
         core.save_evaluation(conn, **_evaluation(
             peru, verdict="approve", findings=[],
             approve_if="Actually, also fix the dates."))
-    assert "approve" in str(e.value)
+    assert "nothing to exit" in str(e.value)
 
 
 def test_a_reject_that_names_its_exit_is_a_revise(conn, peru):
@@ -87,7 +87,7 @@ def test_a_reject_that_names_its_exit_is_a_revise(conn, peru):
         core.save_evaluation(conn, **_evaluation(
             peru, verdict="reject", findings=[_finding(peru, severity="blocking")],
             approve_if="Seed one colourway and this is fine."))
-    assert "revise" in str(e.value)
+    assert "cannot get there from here" in str(e.value)
 
 
 def test_a_reject_without_one_is_accepted(conn, peru):
@@ -194,3 +194,103 @@ def test_it_reaches_the_model_over_the_protocol(conn, peru):
 
     saved = asyncio.run(call(_evaluation(peru)))
     assert saved["exit_checklist"][0]["fix"] == "Seed one colourway per creator"
+
+
+# ── review round ────────────────────────────────────────────────────────────
+
+def test_a_verdict_with_no_exit_is_not_handed_a_list_of_things_to_change(conn, peru):
+    """The rule was enforced on the sentence and contradicted by the list. An approve may
+    carry a `should_fix`, §6.5 then demands a `fix` for it, and the server composed that into
+    an `exit_checklist` — manufacturing the exact "reservation the verdict does not admit to"
+    that the `approve_if` rule refuses. A reject got one too, while being refused an exit
+    condition on the grounds that having one makes it a revise."""
+    approved = core.save_evaluation(conn, **_evaluation(
+        peru, verdict="approve", approve_if=None, findings=[_finding(peru)]))
+    assert "exit_checklist" not in approved
+
+    rejected = core.save_evaluation(conn, **_evaluation(
+        peru, verdict="reject", approve_if=None,
+        findings=[_finding(peru, severity="blocking")]))
+    assert "exit_checklist" not in rejected
+
+    # The fixes are still on the findings. What they are not is an exit condition.
+    assert store.get_evaluation(conn, approved["evaluation_id"])["findings"][0]["fix"]
+
+
+def test_a_note_is_not_on_the_checklist(conn, peru):
+    """"Worth saying once; nobody has to act" — and an item on an exit checklist is by
+    definition something to act on. Including notes left the whole suite green, because no
+    test put a note beside actionable findings and looked."""
+    result = core.save_evaluation(conn, **_evaluation(peru, findings=[
+        _finding(peru),
+        _finding(peru, severity="note", departure="possible_improvement", fix=None,
+                 finding="Adds a claw machine")]))
+
+    assert [item["severity"] for item in result["exit_checklist"]] == ["should_fix"]
+
+
+def test_asking_for_one_slice_does_not_shorten_the_exit_condition(conn, peru):
+    """Composing it from the filtered view left the suite green. A reader who asked for the
+    blocking items should not be handed a shorter exit condition as a side effect — the same
+    promise the class summary beside it makes."""
+    saved = core.save_evaluation(conn, **_evaluation(peru, findings=[
+        _finding(peru, severity="blocking", finding="No posting dates",
+                 kind="missing_information", departure=None, precedent=None,
+                 fix="Add a posting date to every asset"),
+        _finding(peru)]))
+
+    narrowed = core.get_evaluation(conn, evaluation_id=saved["evaluation_id"],
+                                   severity="blocking")
+    assert len(narrowed["findings"]) == 1
+    assert len(narrowed["exit_checklist"]) == 2
+
+
+def test_the_checklist_shows_which_items_are_questions(conn, peru):
+    """§6.2 distinguishes a fix that CHANGES something from one that answers a question, and
+    a checklist stripped of `departure` cannot show the person ticking it off which is which
+    — while the docstring tells the model the difference matters."""
+    result = core.save_evaluation(conn, **_evaluation(peru, findings=[
+        _finding(peru, departure="unexplained",
+                 fix="Say whether four colourways is deliberate")]))
+
+    assert result["exit_checklist"][0]["departure"] == "unexplained"
+
+
+def test_a_judgment_from_before_the_fix_rule_still_reads_back(conn, peru):
+    """`_exit_checklist` was the one read-path consumer that indexed `f["id"]` and
+    `f["fix"]` rather than using `.get`, so a stored row without them raised KeyError out of
+    `get_evaluation` — and out of §6.3's moment, which would 500 instead of asking."""
+    store.insert_evaluation(
+        conn, evaluation_id="eval_before", subject_title="Colombia v0", verdict="revise",
+        summary="Written before fixes were required.",
+        findings=[{"severity": "blocking", "finding": "No posting dates"}],
+        resolved=[], closest_precedent=None, approve_if="Dates.", evidence=None,
+        provenance=None, campaign_id=None, cited_ids=[], predictions=None)
+
+    read_back = core.get_evaluation(conn, evaluation_id="eval_before")
+    assert read_back["verdict"] == "revise"
+    # No fix, so no tick-off line: an item reading `fix: None` is a checkbox with no text.
+    assert "exit_checklist" not in read_back
+
+
+def test_the_handoff_is_absent_rather_than_empty_and_capped(conn, peru):
+    """The same absent-vs-empty rule the response follows, and the same cap `open_findings`
+    has — a second uncapped copy of every finding under another key puts back the quiz the
+    cap exists to prevent."""
+    v1 = core.ingest_campaign(conn, title="Colombia v1", detail="Seeds four.")["campaign_id"]
+    core.save_evaluation(conn, campaign_id=v1, **_evaluation(
+        peru, verdict="approve", approve_if=None, findings=[]))
+    approved = core.ingest_campaign(conn, title="Colombia v2", supersedes=v1,
+                                    detail="Seeds one.")
+    assert "exit_checklist" not in approved["earlier_judgment"]
+    assert "approve_if" not in approved["earlier_judgment"]
+
+    v3 = core.ingest_campaign(conn, title="Chile v1", detail="Seeds four.")["campaign_id"]
+    core.save_evaluation(conn, campaign_id=v3, **_evaluation(peru, findings=[
+        _finding(peru, finding=f"Problem {n}", kind="missing_information", departure=None,
+                 precedent=None, fix=f"Fix {n}") for n in range(6)]))
+    v4 = core.ingest_campaign(conn, title="Chile v2", supersedes=v3, detail="Seeds one.")
+
+    loop = v4["earlier_judgment"]
+    assert len(loop["exit_checklist"]) == core._MAX_EARLIER_FINDINGS
+    assert loop["exit_checklist_total"] == 6
