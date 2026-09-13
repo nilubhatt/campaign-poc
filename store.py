@@ -1247,7 +1247,16 @@ def campaigns_with_actual_metrics(conn) -> set:
     Distinct from `has_metrics`, which counts any row including a `predicted` forecast — and
     a forecast is the opposite of a measured outcome, being the thing reconciliation later
     scores against the actuals (§5.3).
+
+    Empty rather than an exception on a database with no `metrics` table. Guarding here
+    rather than at each call site because three save-path functions have now crashed on an
+    upgraded v0.2.0 database in turn (§6.1's `text_on_file`, §6.4's disconfirming search,
+    §6.6's strength line) and §5.3's `missing_input_for_citations` was doing it too, unnoticed,
+    because the legacy tests happened to cite nothing. A shared reader is the right place to
+    stop a shared failure.
     """
+    if not _columns(conn, "metrics"):
+        return set()
     return {r["campaign_id"] for r in conn.execute(
         "SELECT DISTINCT campaign_id FROM metrics WHERE metric_type = 'actual'").fetchall()}
 

@@ -911,12 +911,42 @@ def _how_to_say_it(by_class: dict, findings: list) -> str:
 _EVIDENCE_STRENGTH = {
     "no_precedent": "It cites no past campaign at all, so it is an opinion about the brief "
                     "and should be said as one.",
-    "single_example": "That is one campaign, or records nobody measured. One example is a "
-                      "story, not a pattern.",
-    "unmeasured": "None of them has measured results, so every comparison is to what was "
+    "single_example": "One example is a story, not a pattern.",
+    "unmeasured": "None of them has recorded results, so every comparison is to what was "
                   "planned rather than what happened.",
-    "measured": "Several of them have measured results behind them.",
+    "partly_measured": "Some of them have recorded results and some do not, so the judgment "
+                       "is part evidence and part proposal.",
+    "measured": "All of them have recorded results behind them.",
 }
+
+
+def _dominant(scored: list) -> Optional[str]:
+    """Is one cited record carrying this judgment? (§6.6)
+
+    "When one match dominates, say so." A judgment resting on six records where one is doing
+    all the work is not a judgment resting on six records — and the arithmetic has to be a
+    GAP rather than a rank, or the top of every list "dominates".
+
+    Its own function because the two thresholds mask each other in any realistic fixture: a
+    library where the gap is large enough to matter usually has a top score above the floor
+    too, so a test that exercises one leaves the other free to be deleted. Both mutations
+    survived the whole suite until this was pulled out and given explicit numbers.
+
+    `scored` is (similarity, campaign_id) worst-last, and holds ONLY records that were
+    actually scored — a record outside the scan has no similarity, and letting it stand in at
+    zero would make "far nearer than anything else cited" a statement about the retrieval
+    window rather than about the evidence.
+    """
+    if len(scored) < 2:
+        return None
+    # The floor: a top match that resembles nothing cannot dominate. Four records all scoring
+    # zero have a gap of zero between them, but the reason to say nothing there is that none
+    # of them is close, not that they are close to each other.
+    if scored[0][0] < _DOMINANCE_FLOOR:
+        return None
+    if (scored[0][0] - scored[1][0]) < _DOMINANCE_GAP:
+        return None
+    return scored[0][1]
 
 
 def _evidence_strength(conn, *, cited_ids: Optional[list], text: str) -> dict:
@@ -943,30 +973,57 @@ def _evidence_strength(conn, *, cited_ids: Optional[list], text: str) -> dict:
         record = store.get_campaign(conn, cid)
         (records if record else unresolved).append(record or cid)
     concluded = [r for r in records if r.get("status") == "concluded"]
+    # TWO different things, and conflating them is what made this field contradict itself out
+    # loud. `with_results` is actual metric rows, which is what `coverage` and `readiness`
+    # mean by measured. `verified` is a performance VERDICT somebody stood behind, which is
+    # what the review means by "verified rather than stated performance". Five concluded
+    # campaigns with metrics and no performance tags were reported as "none of them has
+    # measured results" while `coverage` called the same five `measured` — D88's drift, and
+    # the strength ladder is now built on the first while still reporting the second.
+    # `campaigns_with_actual_metrics` returns an empty set on a database with no `metrics`
+    # table. Guarded there rather than here: this is the THIRD save-path function to crash on
+    # an upgraded v0.2.0 database, and §5.3 was doing it too — unnoticed, because the legacy
+    # tests happened to cite nothing.
+    measured_ids = store.campaigns_with_actual_metrics(conn)
+    with_results = [r for r in records if r["id"] in measured_ids]
     verified = [r for r in records
                 if {t.get("value") for t in (r.get("tags") or [])
                     if t.get("source") == "verified"} & {"performed_well", "underperformed"}]
 
-    dominated_by, top_similarity = None, None
+    dominated_by, top_similarity, similarity_checked = None, None, True
     if records:
         try:
-            ranked = find_similar(conn, text=text, top_k=len(records) + 5, full_detail=False)
-        except (ValueError, embedding.Unavailable):
+            # Wide enough that a cited record is scored unless it is genuinely far away. The
+            # first version asked for `len(records) + 5` of the WHOLE library, so a cited
+            # record ranked eleventh scored 0.0 — reported as a real similarity, and standing
+            # in for the runner-up in the dominance gap, which then measured "far nearer than
+            # anything else cited" against records that were simply never retrieved.
+            ranked = find_similar(conn, text=text, top_k=_SIMILARITY_SCAN, full_detail=False)
+        except embedding.Unavailable:
+            # NOT swallowed into a score. `Unavailable` is a `ValueError`, and catching it
+            # with one reported `top_similarity: 0.0` — indistinguishable from "dissimilar" —
+            # in the same response where §6.4 correctly said `could_not_check`. That is the
+            # collapse §6.4 exists to prevent, reintroduced 240 lines below it.
+            ranked, similarity_checked = [], False
+        except ValueError:
             ranked = []
         scores = {m["campaign_id"]: m["similarity"] for m in ranked}
-        mine = sorted(((scores.get(r["id"], 0.0), r["id"]) for r in records), reverse=True)
+        # Only records that were actually scored. A record outside the scan has NO similarity,
+        # which is not the same as a similarity of zero, and the difference decides whether
+        # "one match is carrying this" is a statement about the evidence or about the window.
+        mine = sorted(((scores[r["id"]], r["id"]) for r in records if r["id"] in scores),
+                      reverse=True)
         top_similarity = mine[0][0] if mine else None
-        # "When one match dominates, say so." A judgment resting on six records where one is
-        # doing all the work is not a judgment resting on six records — and the arithmetic has
-        # to be a gap rather than a rank, or the top of every list "dominates".
-        if len(mine) > 1 and mine[0][0] >= _DOMINANCE_FLOOR and (
-                mine[0][0] - mine[1][0]) >= _DOMINANCE_GAP:
-            dominated_by = mine[0][1]
+        dominated_by = _dominant(mine)
 
     if not records:
         strength = "no_precedent"
-    elif len(records) < 2 or not verified:
-        strength = "single_example" if len(records) < 2 or not concluded else "unmeasured"
+    elif len(records) < 2:
+        strength = "single_example"
+    elif not with_results:
+        strength = "unmeasured"
+    elif len(with_results) < len(records):
+        strength = "partly_measured"
     else:
         strength = "measured"
     what = _EVIDENCE_STRENGTH[strength]
@@ -974,11 +1031,16 @@ def _evidence_strength(conn, *, cited_ids: Optional[list], text: str) -> dict:
         what += (" And one of them is carrying it: the closest match is far nearer this brief "
                  "than anything else cited, so the judgment is effectively resting on that "
                  "one record.")
+    if not similarity_checked:
+        what += (" How close any of them is to this brief could not be checked — the "
+                 "similarity search did not run.")
     return {
         "precedents": len(records),
         "concluded": len(concluded),
+        "with_results": len(with_results),
         "verified": len(verified),
         "top_similarity": top_similarity,
+        "similarity_checked": similarity_checked,
         "dominated_by": dominated_by,
         # An id that resolves to no record cannot be evidence, and counting it would inflate
         # the one number this item exists to make honest. §6.1 verifies the precedent on a
@@ -1038,9 +1100,11 @@ def _say_the_evidence_strength(evidence: dict) -> str:
     the verdict has already landed.
     """
     line = (f" This judgment rests on {evidence['precedents']} cited campaign(s), "
-            f"{evidence['concluded']} concluded, {evidence['verified']} with measured "
-            f"performance. {evidence['what_it_means']}")
-    if evidence["strength"] in ("no_precedent", "single_example") or evidence["dominated_by"]:
+            f"{evidence['concluded']} concluded, {evidence['with_results']} with recorded "
+            f"results, {evidence['verified']} with a measured performance verdict behind "
+            f"them. {evidence['what_it_means']}")
+    if (evidence["strength"] in ("no_precedent", "single_example", "unmeasured")
+            or evidence["dominated_by"] or not evidence["similarity_checked"]):
         line += (" Say how much this rests on BEFORE giving the verdict — afterwards the "
                  "verdict has already landed and the caveat reads as hedging.")
     if evidence["unresolved_citations"]:
@@ -1102,6 +1166,10 @@ _DISCONFIRMING_FLOOR = 0.25
 # "When one match dominates, say so" — a gap, not a rank, or the top of every list dominates.
 _DOMINANCE_FLOOR = 0.2
 _DOMINANCE_GAP = 0.15
+# How far down the library to look when scoring the records a judgment cited. Wide, because
+# the question is "how close is THIS cited record", not "what are the nearest records" — and a
+# cited record that falls outside the scan is reported as unscored rather than as zero.
+_SIMILARITY_SCAN = 200
 
 
 def _pole_search(conn, *, tag: str, text: Optional[str] = None,

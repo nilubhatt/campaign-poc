@@ -1587,6 +1587,32 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       `cited_ids`, which the schema has held all along with nothing reading it. `None` rather
       than 1.0 when nothing has been judged — zero judgments is not "one record carries
       everything", and that is the same distinction §6.4 needed separate codes for.
+      **From review, and the first finding is §6.4's own lesson broken 240 lines below it.**
+      `embedding.Unavailable` is a `ValueError`, and catching it with one reported
+      `top_similarity: 0.0` — indistinguishable from "dissimilar" — in the same response where
+      §6.4 correctly said `could_not_check`. It reports `similarity_checked: false` now.
+      *The ladder's words outran its counts.* It branched on verified TAGS while the sentence
+      claimed measured RESULTS, so five concluded campaigns with real metric rows were told
+      "none of them has measured results" while `coverage` called the same five `measured` —
+      D88's drift, contradicting itself in adjacent fields. The two are now counted
+      separately (`with_results` and `verified`) because both are real and they are not the
+      same number, and the ladder is built on the first. And five unmeasured briefs came back
+      `single_example`, identical to one brief: the review's own complaint, one rung down,
+      inside the item written to fix it. `unmeasured` and `partly_measured` separate them.
+      *`top_similarity` was 0.0 for any cited record outside the retrieval window,* so "far
+      nearer this brief than anything else cited" could be true only because the others were
+      never retrieved. Unscored records are excluded rather than floored at zero.
+      *And the two dominance thresholds masked each other.* Deleting either left the whole
+      suite green, because in any realistic fixture a large gap comes with a top score above
+      the floor. Pulling the decision into `_dominant` and testing it with explicit numbers
+      killed both — and the first attempt at the floor case still had a gap under the
+      threshold, so the gap refused it and the floor was free to be deleted again.
+      Three things found on the way out and tracked, not fixed here: D89 (the migration adds
+      three campaign columns while the readers assume the whole schema), D90 (the same string
+      embedded twice per save), D91 (`coverage` scans the evaluations table once per cell).
+      One fixed on the way out: `campaigns_with_actual_metrics` now returns empty rather than
+      raising on a database with no `metrics` table — §5.3 had been crashing on an upgraded
+      database too, unnoticed, because the legacy tests happened to cite nothing.
 
 ## Phase 7 — Consistency across users (ideas 1–8)
 
