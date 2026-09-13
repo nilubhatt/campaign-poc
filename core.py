@@ -967,10 +967,16 @@ def _mixed_model_warning(conn) -> list:
                f"models ({', '.join(sorted(models))})",
         affects="this evidence package and every similarity in it",
         remedy="re-index the library so every vector comes from one model",
-        next_step="run reembed to rebuild the index with the current model")]
+        # NOT "run reembed": there is no such tool. `finish_indexing` is the one that exists,
+        # and naming a gesture the user cannot perform is the failure L5 records about the
+        # Windows installer — a remedy nobody can follow is worse than none, because it moves
+        # the blame to them.
+        next_step="there is no one-step re-index yet; re-upload the affected records, or "
+                  "call finish_indexing after clearing the index")]
 
 
-def _window_check(conn, retrieval: Optional[str], cited_ids: Optional[list]) -> dict:
+def _window_check(conn, retrieval: Optional[str], cited_ids: Optional[list], *,
+                  subject_title: str, campaign_id: Optional[str]) -> dict:
     """Was each cited record in the evidence this judgment was actually given? (D77, §7.2)
 
     §6.1 checks that the record contains the quote. This checks that the record was in front
@@ -990,13 +996,38 @@ def _window_check(conn, retrieval: Optional[str], cited_ids: Optional[list]) -> 
         raise ValueError(
             f"retrieval {retrieval!r} is not a receipt this server issued. It comes back from "
             f"prepare_evaluation as `retrieval.receipt`; pass that value or omit it.")
+    # Bound to its subject. Unbound, a receipt taken for one brief laundered any citation
+    # into `from_the_window` for a different brief — and stamped a server-`computed` closest
+    # precedent onto a subject it was never about. The receipt's whole claim is "this evidence
+    # was in front of the reasoner FOR THIS BRIEF", and half of that was unchecked.
+    if campaign_id and receipt.get("campaign_id") and receipt["campaign_id"] != campaign_id:
+        raise ValueError(
+            f"retrieval {retrieval!r} was taken for campaign {receipt['campaign_id']!r} and "
+            f"this judgment is about {campaign_id!r}. A receipt says which evidence was in "
+            f"front of you for a particular brief; using another brief's receipt says "
+            f"nothing about this one.")
+    if not campaign_id and receipt.get("subject_title") != subject_title:
+        raise ValueError(
+            f"retrieval {retrieval!r} was taken for {receipt.get('subject_title')!r} and this "
+            f"judgment is about {subject_title!r}. Call prepare_evaluation for the brief you "
+            f"are judging and pass the receipt it returns.")
+
     shown = set(receipt["campaign_ids"])
     cited = list(dict.fromkeys(cited_ids or []))
+    # A snapshot ages. A record superseded or deleted since the window was taken was in front
+    # of the reasoner and is no longer evidence anybody can reach, and reporting it as plain
+    # `from_the_window` would let the server assert as current a precedent its own search
+    # would not return.
+    superseded = store.get_superseded_campaign_ids(conn)
+    gone = [c for c in cited if c in shown and store.get_campaign(conn, c) is None]
+    stale = [c for c in cited if c in shown and c in superseded]
     return {
         "window": "recorded",
         "retrieval_id": retrieval,
         "from_the_window": [c for c in cited if c in shown],
         "outside_the_window": [c for c in cited if c not in shown],
+        **({"superseded_since_retrieval": stale} if stale else {}),
+        **({"deleted_since_retrieval": gone} if gone else {}),
     }
 
 
@@ -1233,9 +1264,16 @@ _SIMILARITY_SCAN = 200
 # for twenty gets a different evidence package from one who asks for three, and neither of
 # them chose the brief".
 _PINNED_TOP_K = 5
+# Which filters say WHICH BRIEF this is. The subject record answers these, and a caller
+# passing one alongside `campaign_id` is describing a different subject. Everything else
+# narrows within the subject and stays the caller's, recorded on the receipt.
+# `markets` is here as well as `market`: a subject whose activation spanned several countries
+# carries the list and not the single value, and deriving nothing for it meant two records
+# describing one brief retrieved different evidence depending on which field was filled in.
+_SUBJECT_FILTERS = ("market", "region", "collection", "markets")
 
 
-def embedding_model_id() -> str:
+def embedding_model_id(space: str = "campaign") -> str:
     """Which model is producing vectors right now, as one string.
 
     Recorded on every vector so that changing the embedder is a visible migration rather than
@@ -1243,6 +1281,9 @@ def embedding_model_id() -> str:
     two models are not comparable, and ranking across them is arithmetic on incompatible
     numbers.
     """
+    if space == "asset":
+        return (f"clip/{config.CLIP_MODEL_NAME}" if config.CLIP_PROVIDER != "hash"
+                else "hash")
     provider = config.EMBED_PROVIDER
     if provider == "ollama":
         return f"ollama/{config.OLLAMA_EMBED_MODEL}"
@@ -1252,9 +1293,15 @@ def embedding_model_id() -> str:
 
 
 def _add_vector(conn, vector_id: str, vec: list, *, space: str = "campaign") -> None:
-    """`vectorstore.add`, plus which model made it. One function so the two cannot drift."""
+    """`vectorstore.add`, plus which model made it. One function so the two cannot drift.
+
+    The model recorded is the one for THIS space. An asset vector comes from CLIP and a chunk
+    vector from the text embedder, and stamping the text model on both made the provenance
+    false for every image — and would have reported "mixed models" the moment the text
+    embedder changed, on the strength of asset rows that had nothing to do with it.
+    """
     vectorstore.add(conn, vector_id, vec, space=space)
-    store.record_vector_model(conn, vector_id, embedding_model_id())
+    store.record_vector_model(conn, vector_id, embedding_model_id(space), space=space)
 
 
 def _pole_search(conn, *, tag: str, text: Optional[str] = None,
@@ -1899,20 +1946,28 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         query_basis=query_basis, cited_ids=cited_ids, by_class=by_class,
         subject_campaign_id=(campaign_id if campaign_id and subject_record
                              else (receipt or {}).get("campaign_id")))
-    window = _window_check(conn, retrieval, cited_ids)
+    window = _window_check(conn, retrieval, cited_ids, subject_title=subject_title,
+                           campaign_id=campaign_id)
     # D8/§7.2: whichever record the server ranked first IS the closest precedent, and it was
     # previously whatever the model asserted — a claim about which record is nearest, made by
     # the party that did not do the ranking. With a receipt the server knows; without one it
     # cannot compute what it did not retrieve, so the model may still name one and it is not
     # marked computed.
-    if receipt and receipt["campaign_ids"]:
+    live = [c for c in (receipt["campaign_ids"] if receipt else [])
+            if store.get_campaign(conn, c) is not None
+            and c not in store.get_superseded_campaign_ids(conn)]
+    if receipt and live:
         if closest_precedent:
             raise ValueError(
                 "closest_precedent is the server's when you pass a `retrieval` receipt: it "
                 "is the top of the window the server ranked, and a claim about which record "
                 "is nearest, made by the party that did not do the ranking, is not a "
                 "measure. Send the receipt and it is filled in.")
-        closest_precedent = {"campaign_id": receipt["campaign_ids"][0], "basis": "computed",
+        # The first record from the window that a search would still return today. Taking
+        # `[0]` unconditionally let the server assert as a computed fact a precedent that had
+        # since been deleted or superseded — while `unresolved_citations` in the same evidence
+        # block named the same id as missing.
+        closest_precedent = {"campaign_id": live[0], "basis": "computed",
                              "from": "retrieval_window"}
     else:
         closest_precedent = _clean_closest_precedent(conn, closest_precedent)
@@ -4024,6 +4079,7 @@ def _reindex_if_content_changed(conn, campaign_id: str, fields: dict) -> dict:
         "SELECT id FROM campaign_chunks WHERE campaign_id = ? AND kind = 'body'",
         (campaign_id,)).fetchall()]
     vectorstore.delete_many(conn, old_ids)
+    store.forget_vector_models(conn, old_ids)
     conn.execute("DELETE FROM campaign_chunks WHERE campaign_id = ? AND kind = 'body'",
                  (campaign_id,))
     conn.commit()
@@ -4156,10 +4212,14 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
     campaigns WITH their outcomes. full_detail defaults to True here (unlike find_similar) —
     an actual judgment over a short evidence list shouldn't be working from trimmed briefs.
     Claude reads this, works out its findings citing specific
-    priors, then calls save_evaluation. This tool does NOT itself judge. Optionally narrow
-    to structured criteria first (§6.2), e.g. region="APAC" to only weigh APAC precedent.
-    Pass a {"value": ..., "source": "verified"} tag to weigh only precedent whose matching
-    performance claim is backed by real metric data, not a stated impression.
+    priors, then calls save_evaluation. This tool does NOT itself judge.
+
+    §7.2 split the filters in two. `market`, `region`, `collection` and `markets` say WHICH
+    BRIEF this is: with a `campaign_id` the record answers them and passing one is refused,
+    because it asks for evidence about a different subject. `tags`, `status` and `record_type`
+    narrow WITHIN the subject and stay yours — a {"value": ..., "source": "verified"} tag
+    still weighs only precedent backed by real metric data rather than a stated impression.
+    Every filter used is recorded on the receipt, so the choice is reproducible.
     """
     # §7.2. "The server extracts the query from the source file, not from the conversation.
     # Same deck in, same chunks out."
@@ -4174,18 +4234,28 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
             f"the brief. The server pins it at {_PINNED_TOP_K}.")
     subject = store.get_campaign(conn, campaign_id) if campaign_id else None
     if subject:
-        if caller_filters:
+        # Refusing EVERY caller filter was too broad, and it removed a capability the
+        # docstring documents: "weigh only precedent whose performance claim is verified" is a
+        # deliberate narrowing somebody asks for, not the model quietly choosing a scope. The
+        # line is what the filter DOES. `market`, `region` and `collection` say which brief
+        # this is, and the record already answers that — a caller overriding them is
+        # describing a different subject. `tags`, `status` and `record_type` narrow within it,
+        # and every one of them is recorded on the receipt, so the choice is reproducible
+        # rather than invisible, which was the actual complaint.
+        overriding = sorted(set(caller_filters) & set(_SUBJECT_FILTERS))
+        if overriding:
             raise ValueError(
-                f"filters are derived from the subject record when `campaign_id` is given — "
-                f"{', '.join(sorted(caller_filters))} came from the caller. Each choice "
-                f"changes the evidence package, and a filter the model picked is a filter "
-                f"nobody can see it picked. Drop them, or omit `campaign_id` and own the "
-                f"choice explicitly.")
+                f"{', '.join(overriding)} describes which brief this is, and the subject "
+                f"record already answers that — passing it alongside `campaign_id` asks for "
+                f"evidence about a different subject. Narrow within the subject with `tags`, "
+                f"`status` or `record_type` instead, or omit `campaign_id` and own the whole "
+                f"choice.")
         # The record's OWN attributes: the same subject retrieves the same evidence whoever
         # is describing it, which is the acceptance test for this whole item.
-        filters = {k: subject[k] for k in ("market", "region", "collection")
-                   if subject.get(k)}
-        filters_from = "subject_record"
+        filters = {k: subject[k] for k in _SUBJECT_FILTERS if subject.get(k)}
+        narrowing = {k: v for k, v in caller_filters.items() if k not in _SUBJECT_FILTERS}
+        filters.update(narrowing)
+        filters_from = "subject_record+caller" if narrowing else "subject_record"
         query_basis = "subject_record"
         query_text = None
     else:

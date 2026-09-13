@@ -1728,6 +1728,32 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       marketer who corrects a brief and then cannot find it is looking at the same bug from
       the other end. Content edits re-index; a status or tag change does not, because
       re-embedding for one would make every bulk edit a re-index of the library.
+      **From review, and the first finding hollows out the item's headline feature.** *The
+      receipt was not bound to its subject.* A receipt taken for one brief laundered any
+      citation into `from_the_window` for a DIFFERENT brief, and stamped a server-`computed`
+      closest precedent onto a subject it was never about. The receipt's whole claim is "this
+      evidence was in front of the reasoner for this brief", and half of it was unchecked.
+      *A snapshot ages.* `closest_precedent` took the top of the window unconditionally, so it
+      could assert as a computed fact a record since deleted or superseded — while
+      `unresolved_citations` in the same block named the same id as missing. It now takes the
+      first record a search would still return, and `superseded_since_retrieval` /
+      `deleted_since_retrieval` say what changed underneath.
+      *Two of the three tie-breaks were untested,* which is worth recording because the commit
+      message boasted about all three: the one tie test had three records, so the rollup alone
+      fixed their order and the two sorts underneath could be deleted with the suite green.
+      *Provenance outlived its vectors, and asset vectors carried the text model's name.*
+      After a real migration — delete, re-embed — the old model would be reported forever,
+      leaving a permanent "this library is mixed" notice on a library that is not; and a text
+      embedder change would have flagged CLIP vectors that had nothing to do with it.
+      *The remedy named a tool that does not exist* ("run reembed"), which is L5's lesson: a
+      remedy nobody can follow is worse than none, because it moves the blame to them.
+      **And one design decision was simply too broad.** Refusing every caller filter removed a
+      capability the docstring documents — "weigh only precedent whose performance claim is
+      verified" is a deliberate narrowing somebody asks for, not the model quietly choosing a
+      scope. The line is what the filter DOES: `market`, `region`, `collection` and `markets`
+      say which brief this is and come from the record; `tags`, `status` and `record_type`
+      narrow within it and stay the caller's, recorded on the receipt so the choice is
+      reproducible rather than invisible — which was the actual complaint.
 - [x] **7.3 Enforce the output shape server-side** — reject writes missing a precedent quote
       or exceeding caps, rather than accepting and hoping. *Caps done by 2.4; the
       missing-quote half done by 6.1, which also verifies the quote rather than only

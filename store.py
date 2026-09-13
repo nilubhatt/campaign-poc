@@ -131,6 +131,9 @@ CREATE TABLE IF NOT EXISTS vector_provenance (
     vector_id     TEXT PRIMARY KEY,
     model         TEXT NOT NULL,   -- §7.2: "a model upgrade is a visible migration rather
                                     -- than a silent re-ranking"
+    space         TEXT NOT NULL DEFAULT 'campaign',  -- campaign | asset: CLIP and the text
+                                    -- embedder are different models by design, so two
+                                    -- entries across spaces is normal, not a mixed index
     created_at    REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chunks_campaign_idx   ON campaign_chunks(campaign_id);
@@ -1269,7 +1272,7 @@ def get_evaluation(conn, evaluation_id: str) -> Optional[dict]:
     return d
 
 
-def record_vector_model(conn, vector_id: str, model: str) -> None:
+def record_vector_model(conn, vector_id: str, model: str, *, space: str = "campaign") -> None:
     """Which embedding model produced this vector (§7.2).
 
     "So a model upgrade is a visible migration rather than a silent re-ranking." Without it,
@@ -1279,8 +1282,23 @@ def record_vector_model(conn, vector_id: str, model: str) -> None:
     """
     if not _columns(conn, "vector_provenance"):
         return
-    conn.execute("INSERT OR REPLACE INTO vector_provenance (vector_id, model, created_at) "
-                 "VALUES (?,?,?)", (vector_id, model, _now()))
+    conn.execute("INSERT OR REPLACE INTO vector_provenance (vector_id, model, space, "
+                 "created_at) VALUES (?,?,?,?)", (vector_id, model, space, _now()))
+    conn.commit()
+
+
+def forget_vector_models(conn, vector_ids: list) -> None:
+    """Drop provenance for vectors that no longer exist.
+
+    Without this the rows outlive the vectors, so `embedding_models` reports a model that
+    nothing in the index was produced by — and after a real migration (delete, re-embed) the
+    old model would be reported forever, leaving a permanent "this library is mixed" notice
+    on a library that is not.
+    """
+    if not vector_ids or not _columns(conn, "vector_provenance"):
+        return
+    conn.executemany("DELETE FROM vector_provenance WHERE vector_id = ?",
+                     [(v,) for v in vector_ids])
     conn.commit()
 
 
@@ -1291,12 +1309,20 @@ def set_embedding_model(conn, model: str) -> None:
     conn.commit()
 
 
-def embedding_models(conn) -> set:
-    """Every model that produced a vector currently in the library."""
-    if not _columns(conn, "vector_provenance"):
+def embedding_models(conn, space: str = "campaign") -> set:
+    """Every model that produced a vector currently in the library, within one space.
+
+    Per space, because CLIP produces the image vectors and the text embedder the chunk ones:
+    two entries across both spaces is the normal state, not a mixed index.
+    """
+    columns = _columns(conn, "vector_provenance")
+    if not columns:
         return set()
-    return {r["model"] for r in
-            conn.execute("SELECT DISTINCT model FROM vector_provenance").fetchall()}
+    if "space" not in columns:
+        return {r["model"] for r in
+                conn.execute("SELECT DISTINCT model FROM vector_provenance").fetchall()}
+    return {r["model"] for r in conn.execute(
+        "SELECT DISTINCT model FROM vector_provenance WHERE space = ?", (space,)).fetchall()}
 
 
 def insert_retrieval(conn, *, subject_title, campaign_id, query, filters, top_k,

@@ -697,9 +697,14 @@ def prepare_evaluation(subject_title: str, proposal_text: str,
     everything from it** — the query is the record's own text and the filters are its own
     attributes, so the same subject retrieves the same evidence however you describe it. That
     is the point: a 200-word summary and a 2,000-word one retrieve different evidence from the
-    same deck, and different evidence is a different verdict. With a `campaign_id` the filter
-    arguments are refused, because a filter you chose is a filter nobody can see you chose.
-    Without one they are yours, and `retrieval.filters_from` records that.
+    same deck, and different evidence is a different verdict.
+
+    Filters split in two. `market`, `region`, `collection` and `markets` say WHICH BRIEF this
+    is, so with a `campaign_id` they come from the record and passing one is refused — it asks
+    for evidence about a different subject. `tags`, `status` and `record_type` narrow WITHIN
+    the subject and stay yours: "weigh only precedent whose performance is verified" is a
+    deliberate narrowing, not a scope chosen quietly. Everything used is recorded on the
+    receipt and in `retrieval.filters_from`.
 
     `top_k` is the server's. A judgment resting on three precedents and one resting on twenty
     are different judgments, and neither number is a fact about the brief.

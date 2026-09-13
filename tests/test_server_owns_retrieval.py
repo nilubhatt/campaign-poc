@@ -363,3 +363,260 @@ def test_the_disconfirming_search_uses_the_subject_the_server_retrieved_for(conn
                    "finding": "No end date", "fix": "Add one"}])
 
     assert saved["disconfirming"]["query"] == "retrieval_receipt"
+
+
+# ── review round: the receipt was launderable ───────────────────────────────
+
+def test_a_receipt_taken_for_another_brief_is_refused(conn, library):
+    """The receipt's whole claim is "this evidence was in front of the reasoner FOR THIS
+    BRIEF", and half of it was unchecked. Unbound, a receipt taken for one subject laundered
+    any citation into `from_the_window` for a different subject — and stamped a
+    server-`computed` closest precedent onto a brief it was never about."""
+    a = core.ingest_campaign(conn, title="Colombia", detail="A launch.")["campaign_id"]
+    b = core.ingest_campaign(conn, title="Chile", detail="A launch.")["campaign_id"]
+    package = core.prepare_evaluation(conn, subject_title="Colombia", proposal_text="x",
+                                      campaign_id=a)
+
+    with pytest.raises(ValueError) as e:
+        core.save_evaluation(
+            conn, subject_title="Chile", campaign_id=b, verdict="revise",
+            summary="A stretch.", approve_if="Fixed.",
+            retrieval=package["retrieval"]["receipt"],
+            findings=[{"severity": "should_fix", "kind": "missing_information",
+                       "finding": "No end date", "fix": "Add one"}])
+    assert a in str(e.value) and b in str(e.value)
+
+
+def test_a_receipt_for_a_different_unstored_subject_is_refused(conn, library):
+    package = core.prepare_evaluation(conn, subject_title="Colombia v1",
+                                      proposal_text="A launch.")
+    with pytest.raises(ValueError) as e:
+        core.save_evaluation(
+            conn, subject_title="Something else", verdict="revise", summary="A stretch.",
+            approve_if="Fixed.", retrieval=package["retrieval"]["receipt"],
+            findings=[{"severity": "should_fix", "kind": "missing_information",
+                       "finding": "No end date", "fix": "Add one"}])
+    assert "Something else" in str(e.value)
+
+
+def test_a_record_replaced_since_the_window_was_taken_is_named(conn, library):
+    """A snapshot ages. A record superseded since the window was taken WAS in front of the
+    reasoner and is no longer evidence anybody can reach, and reporting it as plain
+    `from_the_window` lets the server present as current a precedent its own search would no
+    longer return."""
+    package = core.prepare_evaluation(conn, subject_title="Colombia v1",
+                                      proposal_text="A creator-led launch.")
+    top = package["evidence"][0]["campaign_id"]
+    core.ingest_campaign(conn, title="Replacement", supersedes=top, detail="A launch.")
+
+    saved = core.save_evaluation(
+        conn, subject_title="Colombia v1", verdict="revise", summary="A stretch.",
+        approve_if="Fixed.", retrieval=package["retrieval"]["receipt"], cited_ids=[top],
+        findings=[{"severity": "should_fix", "kind": "missing_information",
+                   "finding": "No end date", "fix": "Add one"}])
+
+    assert saved["evidence"]["superseded_since_retrieval"] == [top]
+    assert saved["closest_precedent"]["campaign_id"] != top, \
+        "and it is not asserted as the computed closest precedent"
+
+
+def test_a_record_deleted_since_the_window_was_taken_is_named(conn, library):
+    package = core.prepare_evaluation(conn, subject_title="Colombia v1",
+                                      proposal_text="A creator-led launch.")
+    top = package["evidence"][0]["campaign_id"]
+    store.delete_campaign(conn, top)
+
+    saved = core.save_evaluation(
+        conn, subject_title="Colombia v1", verdict="revise", summary="A stretch.",
+        approve_if="Fixed.", retrieval=package["retrieval"]["receipt"], cited_ids=[top],
+        findings=[{"severity": "should_fix", "kind": "missing_information",
+                   "finding": "No end date", "fix": "Add one"}])
+
+    assert saved["evidence"]["deleted_since_retrieval"] == [top]
+
+
+# ── the tie-break, at each of the three levels ──────────────────────────────
+
+def test_the_vector_search_breaks_ties_the_same_way(conn):
+    """Only the rollup was covered, because the one tie test had three records and the rollup
+    alone fixed their order. Two of the three sorts were unprotected — and the ANN index is
+    the one that returns equal distances in storage order."""
+    import vectorstore
+
+    vectorstore.init(conn, space="tie", dim=2)
+    for vid in ("z_id", "a_id", "m_id"):
+        vectorstore.add(conn, vid, [1.0, 0.0], space="tie", dim=2)
+
+    out = vectorstore.search(conn, [1.0, 0.0], top_k=3, space="tie")
+    assert [vid for vid, _ in out] == ["a_id", "m_id", "z_id"]
+
+
+def test_the_brute_force_ranker_breaks_ties_the_same_way():
+    import embedding
+
+    ranked = embedding.rank([1.0, 0.0], [("z", [1.0, 0.0]), ("a", [1.0, 0.0]),
+                                         ("m", [1.0, 0.0])], top_k=3)
+    assert [cid for cid, _ in ranked] == ["a", "m", "z"]
+
+
+# ── provenance follows the vectors it describes ─────────────────────────────
+
+def test_an_image_vector_is_not_labelled_with_the_text_model(conn):
+    """CLIP produces the image vectors and the text embedder the chunk ones. Stamping the
+    text model on both made the provenance false for every image — and would have reported
+    "mixed models" the moment the text embedder changed, on the strength of asset rows that
+    had nothing to do with it."""
+    assert core.embedding_model_id("campaign") != core.embedding_model_id("asset") or \
+        core.embedding_model_id("asset") == "hash"
+    core.ingest_campaign(conn, title="Peru", detail="A launch.")
+    assert store.embedding_models(conn, "asset") == set()
+
+
+def test_provenance_does_not_outlive_the_vectors_it_describes(conn):
+    """After a real migration — delete, then re-embed — the old model would be reported
+    forever, leaving a permanent "this library is mixed" notice on a library that is not."""
+    cid = core.ingest_campaign(conn, title="Peru",
+                               detail="A soap opera placement.")["campaign_id"]
+    store.set_embedding_model(conn, "old-model")
+
+    core.update_campaign(conn, cid, detail="A creator-led seeding.")
+
+    assert store.embedding_models(conn) == {core.embedding_model_id()}
+
+
+# ── narrowing within a subject stays possible ───────────────────────────────
+
+def test_a_caller_may_still_narrow_within_the_subject(conn, library):
+    """Refusing every filter removed a capability the docstring documents: "weigh only
+    precedent whose performance claim is verified" is a deliberate narrowing somebody asks
+    for, not the model quietly choosing a scope. The line is what the filter DOES."""
+    subject = core.ingest_campaign(conn, title="Colombia v1", market="LATAM",
+                                   detail="A launch.")["campaign_id"]
+
+    package = core.prepare_evaluation(conn, subject_title="Colombia v1", proposal_text="x",
+                                      campaign_id=subject, status="concluded")
+
+    assert package["retrieval"]["filters"] == {"market": "LATAM", "status": "concluded"}
+    assert package["retrieval"]["filters_from"] == "subject_record+caller"
+    # And it is on the receipt, so the choice is reproducible rather than invisible.
+    assert store.get_retrieval(conn, package["retrieval"]["receipt"])["filters"] == \
+        {"market": "LATAM", "status": "concluded"}
+
+
+def test_a_multi_market_subject_derives_its_markets(conn, library):
+    """A subject whose activation spanned several countries carries `markets` and not
+    `market`, and deriving nothing for it meant two records describing one brief retrieved
+    different evidence depending on which field was filled in."""
+    subject = core.ingest_campaign(conn, title="Colombia v1", markets=["Peru", "Chile"],
+                                   detail="A launch.")["campaign_id"]
+
+    package = core.prepare_evaluation(conn, subject_title="Colombia v1", proposal_text="x",
+                                      campaign_id=subject)
+    assert package["retrieval"]["filters"]["markets"] == ["Peru", "Chile"]
+
+
+def test_the_remedy_names_something_that_exists(conn):
+    """L5's lesson: a remedy nobody can follow is worse than none, because it moves the blame
+    to them. The notice said "run reembed", and there is no such tool."""
+    core.ingest_campaign(conn, title="Peru", detail="A launch.")
+    store.set_embedding_model(conn, "other-model")
+    core.ingest_campaign(conn, title="Chile", detail="A launch.")
+
+    import asyncio
+    import mcp_server
+    tools = {t.name for t in mcp_server.mcp._tool_manager.list_tools()}
+
+    warning = [w for w in core.prepare_evaluation(
+        conn, subject_title="X", proposal_text="A launch.")["warnings"]
+        if w["code"] == "mixed_embedding_models"][0]
+    assert "reembed" not in warning["next_step"]
+    named = [t for t in tools if t in warning["next_step"]]
+    assert named, f"the next step names no tool that exists: {warning['next_step']!r}"
+    assert asyncio
+
+
+def test_the_model_recorded_for_an_image_vector_is_the_image_model(conn, monkeypatch):
+    """Both providers are `hash` under test, so a fixture cannot tell them apart — the
+    identity function is what has to be pinned. Stamping the text model on CLIP vectors made
+    the provenance false for every image and would have reported "mixed models" the moment
+    the text embedder changed."""
+    import config
+
+    monkeypatch.setattr(config, "EMBED_PROVIDER", "ollama")
+    monkeypatch.setattr(config, "OLLAMA_EMBED_MODEL", "nomic-embed-text")
+    monkeypatch.setattr(config, "CLIP_PROVIDER", "openclip")
+    monkeypatch.setattr(config, "CLIP_MODEL_NAME", "ViT-B-32-quickgelu")
+
+    assert core.embedding_model_id("campaign") == "ollama/nomic-embed-text"
+    assert core.embedding_model_id("asset") == "clip/ViT-B-32-quickgelu"
+
+    # And the identity has to reach the row. Asserting the function alone left `_add_vector`
+    # free to record the text model for an image, which is where the bug actually was.
+    import vectorstore
+    vectorstore.init(conn, space="asset")
+    core._add_vector(conn, "asset_1", [0.0] * config.CLIP_EMBED_DIM, space="asset")
+
+    assert store.embedding_models(conn, "asset") == {"clip/ViT-B-32-quickgelu"}
+    assert store.embedding_models(conn, "campaign") == set()
+
+
+def test_a_subject_with_a_region_and_no_market_still_derives_a_filter(conn):
+    """`region` was in the tuple and nothing exercised it, so removing it passed everything.
+    A subject filed by region and one filed by market are the same kind of record."""
+    core.ingest_campaign(conn, title="Peru", region="LATAM", detail="A launch in LATAM.")
+    core.ingest_campaign(conn, title="Jakarta", region="SEA", detail="A launch in SEA.")
+    subject = core.ingest_campaign(conn, title="Colombia v1", region="LATAM",
+                                   detail="A launch in LATAM.")["campaign_id"]
+
+    package = core.prepare_evaluation(conn, subject_title="Colombia v1", proposal_text="x",
+                                      campaign_id=subject)
+
+    assert package["retrieval"]["filters"] == {"region": "LATAM"}
+    assert [e["title"] for e in package["evidence"]] == ["Peru"]
+
+
+def test_a_receipt_naming_a_record_drives_the_disconfirming_search(conn):
+    """The receipt path was only covered for a subject with no record at all, so the branch
+    that reads the receipt's `campaign_id` could be deleted with the suite still green."""
+    # A campaign that resembles the SUBJECT and performed well — the disconfirming case for
+    # a revise. It shares no words with the summary below, so it is reachable only if the
+    # search used the subject the receipt names.
+    contradicting = core.ingest_campaign(
+        conn, title="Mexico launch", status="concluded",
+        detail="A creator-led launch with four colourways.")["campaign_id"]
+    core.add_metrics(conn, campaign_id=contradicting, detail="CTR 3.4 percent, above.")
+    store.update_campaign(conn, contradicting,
+                          tags=[{"value": "performed_well", "source": "verified"}])
+    subject = core.ingest_campaign(
+        conn, title="Colombia v1",
+        detail="A creator-led launch with four colourways.")["campaign_id"]
+    package = core.prepare_evaluation(conn, subject_title="Colombia v1", proposal_text="x",
+                                      campaign_id=subject)
+
+    saved = core.save_evaluation(
+        conn, subject_title="Colombia v1", verdict="revise", summary="Budget looks thin.",
+        approve_if="Fixed.", retrieval=package["retrieval"]["receipt"],
+        findings=[{"severity": "should_fix", "kind": "missing_information",
+                   "finding": "No end date", "fix": "Add one"}])
+
+    # No `campaign_id` on the save, so the subject can only have come from the receipt.
+    assert saved["disconfirming"]["query"] == "retrieval_receipt"
+    # And the SEARCH has to have used it. Asserting the label alone left the branch that
+    # actually passes the subject free to be deleted: the query would still say
+    # `retrieval_receipt` while searching on "Colombia v1\nBudget looks thin." — which is the
+    # judgment's own prose, the exact thing D86 was about.
+    assert saved["disconfirming"]["code"] == "contradicting_precedent", saved["disconfirming"]
+    assert contradicting in saved["disconfirming"]["uncited"]
+
+
+def test_the_window_is_five_records_not_whatever_the_constant_says(conn):
+    """Asserting against `_PINNED_TOP_K` follows the constant wherever it goes, so changing
+    it kept the suite green — the test was a mirror rather than a check."""
+    for n in range(8):
+        core.ingest_campaign(conn, title=f"Launch {n}",
+                             detail="A creator-led launch with four colourways.")
+
+    package = core.prepare_evaluation(conn, subject_title="X",
+                                      proposal_text="A creator-led launch.")
+    assert len(package["evidence"]) == 5
+    assert package["retrieval"]["top_k"] == 5
