@@ -25,64 +25,9 @@ import store
 # know to make (§3.2, defect 10). The restart sentence is here for the same reason: the
 # reviewer lost time to a rebuilt server whose old schema the client was still holding, and
 # closing the window does not stop the server.
-# §7.4. The evaluation procedure, written ONCE and referenced twice: in the server-level
-# `instructions` (a system prompt every client surfaces, which most servers leave empty) and
-# in `prepare_evaluation`'s own description. Not two copies that agree today — this project
-# has watched a hand-maintained copy drift four separate times, and a procedure whose two
-# halves disagree is worse than one that lives in a single place, because each reader is
-# confident and they are not reading the same thing.
-#
-# What it does NOT contain is as deliberate as what it does. The review asks for "the
-# scorecard's six criteria"; those belong to the customer's rulebook, which §12.1 has not
-# built, and hard-coding one customer's rubric into a product that ships generic is the thing
-# the product owner ruled out. It says so rather than omitting it silently.
-EVALUATION_PROCEDURE = """\
-HOW TO JUDGE A BRIEF. Every user of this library gets this same procedure; following it is
-what makes two people's judgments of one brief comparable.
-
-1. Call `prepare_evaluation`, passing `campaign_id` if the brief is already a record — the
-   server then derives the query and filters from the record, so the same subject retrieves
-   the same evidence however you describe it. Read it before writing anything. `computed`
-   holds facts the server established by reading the brief (dates, budget, engagement rates,
-   channels named, calendar contradictions): do not re-derive them, and dispute one only by
-   quoting the `evidence` it carries. `outcomes` splits precedent into what WORKED and what
-   did not, by measured result.
-2. Reason about what is genuinely judgment: precedent fit, premise disagreements, whether a
-   difference is an improvement. Weight concluded campaigns over proposed, and `verified`
-   performance over `stated` — a stated claim is somebody's impression.
-3. Call `save_evaluation`, passing `retrieval` (the receipt from step 1) so the server can
-   record which of your citations it had actually shown you.
-
-EVERY FINDING CITES SOMETHING IT CAN QUOTE. A precedent carries a `quote` from the record it
-names and the server checks it is really there; paraphrase is refused. Mark the LAYER: `body`
-is what the deck says, `commentary` is what somebody said ABOUT it. Quoting a reviewer's
-objection is often the best evidence there is — storing it unmarked says the deck claimed it,
-which is false.
-
-TWO CLASSES OF FINDING, AND THEY ARE NOT THE SAME KIND OF STATEMENT.
-  `guardrail_breach`     — a rule the customer wrote was broken. Cite the rule. NOT DEBATABLE:
-                           state it, never soften it into a question, and never a `note`.
-  `precedent_departure`  — done differently from a campaign on file. Cite the campaign, and
-                           say which way it departs: `regression`, `unexplained`, or
-                           `possible_improvement`. Debatable by design — ask, do not instruct.
-  `missing_information` / `internal_contradiction` — claims about the brief in front of you.
-                           They need no citation; do not go looking for one to satisfy a shape.
-
-THE SERVER ARGUES WITH YOU. After you save it searches for precedent CONTRADICTING your
-verdict and returns `disconfirming`. Read the `code`, not the absence of rows: "could not be
-checked" and "nothing came back" are opposite conclusions. If it found something you did not
-cite, say so before the verdict. `evidence` counts what the judgment rests on — give that
-before the verdict too, because afterwards a caveat reads as hedging.
-
-OUTPUT CONTRACT. `verdict` (approve / revise / reject), a one-line `summary`, one short
-finding per problem with `severity`, `kind`, and a `fix` if above a note. A `revise` carries
-`approve_if`: the change that would make it an approve. An `approve` and a `reject` may not.
-Say the verdict, the summary and what has to change; the reasoning is in `get_evaluation`.
-
-NOT YET IN THIS PROCEDURE: the customer's scorecard criteria and guardrail list. They belong
-in a versioned rulebook shipping with the product (§12.1). Until then, guidelines here are
-ordinary records retrieved by similarity — cite them when they are retrieved, and never claim
-a rule was checked when it simply was not returned."""
+# §7.4/§7.5: the evaluation procedure lives in `core` so the note that ships WITH the
+# evidence can carry the same object. One procedure, three places that reference it.
+EVALUATION_PROCEDURE = core.EVALUATION_PROCEDURE
 
 
 INSTRUCTIONS = f"""Campaign Intelligence {config.VERSION_FULL} — a marketing team's own

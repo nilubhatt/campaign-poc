@@ -1787,8 +1787,25 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       is "the highest-leverage prompt real estate the product has", so it is deliberately
       generous; what the ceiling catches is the accretion that turns a procedure into a
       manual, by forcing every future addition to displace something.
-- [ ] **7.5 Ship the procedure with the evidence** — `prepare_evaluation`'s `note` carries
+- [x] **7.5 Ship the procedure with the evidence** — `prepare_evaluation`'s `note` carries
       the pinned rulebook, computed facts, required output schema and weighting rules.
+      **The argument is about WHEN, not what.** §7.4 put the procedure where it loads once; a
+      rule read at connect time has been competing with an hour of conversation by the moment
+      it matters, which is when the model is holding the evidence and about to judge.
+      **The note carries the same constant, not a summary of it.** Summarising would produce a
+      second, shorter procedure — and §7.4's whole point was that two versions of one
+      procedure is the drift this project has watched four times. The procedure moved into
+      `core` so the note can reference the same object; it is now written once and referenced
+      from three places, and the once-only test scans every module rather than the one that
+      happens to hold it.
+      **What goes first is what cannot be static:** the rulebook version in force and THIS
+      brief's computed facts, each with what it means. A model reads a long field from the
+      top, and the procedure is the half it has already been given.
+      **The rulebook line is the honest gap.** §12.1 has not built one, so "the rulebook at
+      its pinned version" is a version of nothing — and it says so rather than omitting the
+      line, because a judgment made with no rulebook is a different judgment from one made
+      under a rulebook that happened to say nothing. §7.6 stamps it onto the record so the two
+      can be told apart later.
 - [ ] **7.6 Stamp every verdict** with `rulebook_version`, `server_version`,
       `embedding_model`, `model_id`, and retrieved ids + similarities.
 - [ ] **7.7 Golden set + agreement measurement** — verdict agreement and finding recall, three

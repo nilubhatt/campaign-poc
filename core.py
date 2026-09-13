@@ -950,6 +950,32 @@ def _dominant(scored: list) -> Optional[str]:
     return scored[0][1]
 
 
+def _contract_for_this_brief(computed: dict) -> str:
+    """The part of the contract that cannot be static (§7.5).
+
+    §7.4 put the procedure where it loads once. The review's argument for repeating it here
+    is about WHEN rather than what: "tool descriptions load once, at the start of a session,
+    and compete with everything the user has done since. The moment that matters is when the
+    model is holding the evidence package and about to judge."
+
+    What goes FIRST is what is specific to this brief, because a model reads a long field from
+    the top and the procedure is the half it has already been given. The rulebook version is
+    here even though there is no rulebook: a judgment made with none is a different judgment
+    from one made under a rulebook that happened to say nothing, and §7.6 stamps this onto the
+    record so the two can be told apart later.
+    """
+    lines = [f"RULEBOOK IN FORCE: {RULEBOOK_VERSION}."]
+    said = []
+    for code, fact in computed.items():
+        if fact["status"] in ("absent", "contradicted", "partial", "present"):
+            said.append(f"  {code}: {fact['status']} — {fact['what_it_means']}")
+    if said:
+        lines.append("WHAT THE SERVER ALREADY ESTABLISHED ABOUT THIS BRIEF (do not re-derive; "
+                     "dispute one only by quoting the `evidence` it carries):")
+        lines += said
+    return "\n".join(lines) + "\n\n"
+
+
 def _mixed_model_warning(conn) -> list:
     """Two embedding models in one index (§7.2).
 
@@ -1258,6 +1284,73 @@ _DOMINANCE_GAP = 0.15
 # the question is "how close is THIS cited record", not "what are the nearest records" — and a
 # cited record that falls outside the scan is reported as unscored rather than as zero.
 _SIMILARITY_SCAN = 200
+
+
+# §7.4/§7.5. The evaluation procedure, written ONCE and referenced twice: in the server-level
+# `instructions` (a system prompt every client surfaces, which most servers leave empty) and
+# in `prepare_evaluation`'s own description. Not two copies that agree today — this project
+# has watched a hand-maintained copy drift four separate times, and a procedure whose two
+# halves disagree is worse than one that lives in a single place, because each reader is
+# confident and they are not reading the same thing.
+#
+# What it does NOT contain is as deliberate as what it does. The review asks for "the
+# scorecard's six criteria"; those belong to the customer's rulebook, which §12.1 has not
+# built, and hard-coding one customer's rubric into a product that ships generic is the thing
+# the product owner ruled out. It says so rather than omitting it silently.
+EVALUATION_PROCEDURE = """\
+HOW TO JUDGE A BRIEF. Every user of this library gets this same procedure; following it is
+what makes two people's judgments of one brief comparable.
+
+1. Call `prepare_evaluation`, passing `campaign_id` if the brief is already a record — the
+   server then derives the query and filters from the record, so the same subject retrieves
+   the same evidence however you describe it. Read it before writing anything. `computed`
+   holds facts the server established by reading the brief (dates, budget, engagement rates,
+   channels named, calendar contradictions): do not re-derive them, and dispute one only by
+   quoting the `evidence` it carries. `outcomes` splits precedent into what WORKED and what
+   did not, by measured result.
+2. Reason about what is genuinely judgment: precedent fit, premise disagreements, whether a
+   difference is an improvement. Weight concluded campaigns over proposed, and `verified`
+   performance over `stated` — a stated claim is somebody's impression.
+3. Call `save_evaluation`, passing `retrieval` (the receipt from step 1) so the server can
+   record which of your citations it had actually shown you.
+
+EVERY FINDING CITES SOMETHING IT CAN QUOTE. A precedent carries a `quote` from the record it
+names and the server checks it is really there; paraphrase is refused. Mark the LAYER: `body`
+is what the deck says, `commentary` is what somebody said ABOUT it. Quoting a reviewer's
+objection is often the best evidence there is — storing it unmarked says the deck claimed it,
+which is false.
+
+TWO CLASSES OF FINDING, AND THEY ARE NOT THE SAME KIND OF STATEMENT.
+  `guardrail_breach`     — a rule the customer wrote was broken. Cite the rule. NOT DEBATABLE:
+                           state it, never soften it into a question, and never a `note`.
+  `precedent_departure`  — done differently from a campaign on file. Cite the campaign, and
+                           say which way it departs: `regression`, `unexplained`, or
+                           `possible_improvement`. Debatable by design — ask, do not instruct.
+  `missing_information` / `internal_contradiction` — claims about the brief in front of you.
+                           They need no citation; do not go looking for one to satisfy a shape.
+
+THE SERVER ARGUES WITH YOU. After you save it searches for precedent CONTRADICTING your
+verdict and returns `disconfirming`. Read the `code`, not the absence of rows: "could not be
+checked" and "nothing came back" are opposite conclusions. If it found something you did not
+cite, say so before the verdict. `evidence` counts what the judgment rests on — give that
+before the verdict too, because afterwards a caveat reads as hedging.
+
+OUTPUT CONTRACT. `verdict` (approve / revise / reject), a one-line `summary`, one short
+finding per problem with `severity`, `kind`, and a `fix` if above a note. A `revise` carries
+`approve_if`: the change that would make it an approve. An `approve` and a `reject` may not.
+Say the verdict, the summary and what has to change; the reasoning is in `get_evaluation`.
+
+NOT YET IN THIS PROCEDURE: the customer's scorecard criteria and guardrail list. They belong
+in a versioned rulebook shipping with the product (§12.1). Until then, guidelines here are
+ordinary records retrieved by similarity — cite them when they are retrieved, and never claim
+a rule was checked when it simply was not returned."""
+
+
+# The rulebook this judgment was made under. §12.1 has not built one, and saying which
+# version of nothing is in force beats omitting the line: a judgment made with no
+# rulebook is a different judgment from one made under a rulebook that said nothing,
+# and §7.6 stamps this onto the record so the two can be told apart later.
+RULEBOOK_VERSION = "none (no rulebook ships yet — §12.1)"
 
 
 # §7.2. The caller does not choose how much evidence a judgment rests on: "a caller who asks
@@ -4263,6 +4356,11 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
         query_basis = "caller_text"
         query_text = proposal_text
 
+    # §7.1's checks, hoisted out of the return dict because §7.5's contract reads them: the
+    # note has to say what was found for THIS brief, not restate the rule for finding it.
+    computed = (facts.for_campaign(conn, campaign_id) if campaign_id
+                else facts.compute(proposal_text))
+
     # find_similar, not find_similar_with_context, so the "your library is only partly
     # indexed" warning is added explicitly below rather than inherited — see the note there.
     evidence = find_similar(conn, text=query_text, campaign_id=campaign_id if subject else None,
@@ -4295,7 +4393,7 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
                 "subject is a record and the server will derive the query and the filters "
                 "from it."),
         },
-        "note": (
+        "note": _contract_for_this_brief(computed) + (
             # The vocabulary here has to be the vocabulary save_evaluation accepts. This
             # said "proceed/revise/reject" while the enum takes "approve" — so the prompt
             # that shapes the judgment taught a word the next tool rejects.
@@ -4337,7 +4435,8 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
             "did it\u201d is not a finding until you say whether different is worse here. "
             "Predicted CTR/ROI "
             "ranges go in `predictions`. Weight concluded campaigns (those with metrics) "
-            "most. "
+            "most, and a `verified` performance claim over a `stated` one — a stated claim is "
+            "somebody's impression, and a finding you cannot quote is an opinion. "
             # Said here as well as in save_evaluation's description, because this is the
             # message in front of the model while it is deciding what to write down. A rule
             # it only meets as a rejection afterwards costs a retry every time.
@@ -4345,15 +4444,14 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
             "words are not there, so copy them from the evidence above rather than writing "
             "them from memory — … for anything you leave out. A point you cannot quote is "
             "an observation, and saying it as one is better than a citation that fails."
-        ),
+        ) + "\n\n" + EVALUATION_PROCEDURE,
         "campaigns_with_outcomes": [e["campaign_id"] for e in concluded],
         # §7.1: the two thirds of a real evaluation that were mechanical, run as code so they
         # stop being generated at all. From the RECORD when the subject is one — the same
         # reasoning §6.4 reached about which text a check should run against — and from the
         # body layer either way (D11), because a reviewer's note saying "never mention a
         # competitor budget of 90,000" would otherwise be read as the brief's budget.
-        "computed": (facts.for_campaign(conn, campaign_id) if campaign_id
-                     else facts.compute(proposal_text)),
+        "computed": computed,
         # §6.4's other half, and the half that can actually change a verdict. The save-time
         # search RECORDS overconfidence; by then the judgment is written. What changes the
         # reasoning is seeing both sides while reasoning — so the evidence that worked and

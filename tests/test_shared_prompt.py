@@ -41,14 +41,17 @@ def test_the_server_instructions_and_the_tool_description_are_the_same_text():
     assert PROCEDURE in mcp_server._PREPARE_EVALUATION_DESCRIPTION
 
 
-def test_the_procedure_appears_once_in_the_source():
+def test_the_procedure_appears_once_in_the_whole_codebase():
     """A literal pasted twice would pass the test above and still drift. This one fails if
-    anybody writes the sentences out a second time."""
+    anybody writes the sentences out a second time — anywhere, not just in the file that
+    happens to hold the constant today. §7.5 moved it to `core` and a check scoped to one
+    module would have said nothing."""
     import pathlib
 
-    source = pathlib.Path(mcp_server.__file__).read_text()
+    root = pathlib.Path(mcp_server.__file__).parent
     opening = PROCEDURE.strip().splitlines()[0].strip()
-    assert source.count(opening) == 1, "the procedure is written out more than once"
+    written = {f.name: f.read_text().count(opening) for f in root.glob("*.py")}
+    assert sum(written.values()) == 1, f"the procedure is written out more than once: {written}"
 
 
 # ── what the review asked it to carry ───────────────────────────────────────
