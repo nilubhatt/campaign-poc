@@ -1685,9 +1685,49 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       a wrong fact — the model reading the evidence and seeing the "creator" is an email
       address. It now says to dispute a fact the evidence plainly does not support, naming the
       code and quoting the evidence, rather than deferring to it or silently re-deriving it.
-- [ ] **7.2 Server owns the retrieval query.** Derive from the subject record/file, not
+- [x] **7.2 Server owns the retrieval query.** Derive from the subject record/file, not
       model-authored `proposal_text`; derive filters from the subject's attributes; pin
       `top_k`; stable deterministic tie-breaking; record embedding-model version per vector.
+      **"Same deck in, same chunks out"** is the review's acceptance test and the whole phase
+      in one sentence. Pass `campaign_id` and the query is the record's own text and the
+      filters are its own attributes, so a terse description and a 2,000-word one retrieve
+      the same evidence. Caller filters are REFUSED alongside a `campaign_id` — a filter the
+      model picked is a filter nobody can see it picked — and allowed without one, where
+      there are no attributes to derive from, with `filters_from` recording the difference.
+      `top_k` is pinned: a judgment resting on three precedents and one resting on twenty are
+      different judgments, and neither number is a fact about the brief.
+      **Tie-breaking had to be fixed in three places,** which is the tell that it was never
+      really decided anywhere: the ANN index returns equal distances in storage order, the
+      brute-force fallback sorted on similarity alone, and the campaign-level rollup re-sorted
+      and undid both. Ties break on the campaign id at every level — stable across machines,
+      across an insert, and across the two backends.
+      **The embedding model is recorded per vector,** and two models in one index raises a
+      `degraded` notice: similarities from different models are not comparable, so the ranking
+      the whole evidence package rests on would be arithmetic across incompatible scales.
+      **The receipt is the part that pays for the rest.** §6.1 rejected a receipt as the
+      MECHANISM for verifying a quote (X7) — it answers a weaker question than "does the
+      record contain these words", and it would have put a stateful handshake on a stateless
+      tool. That objection stands for 6.1. Here the server is already doing the retrieval, so
+      writing it down costs one row, and it answers what 6.1 could not: **was this evidence in
+      front of the reasoner at all.**
+      **Closes D77.** A judgment carries `from_the_window` and `outside_the_window`. A cited
+      record that was never retrieved is not shared evidence — the next person judging the
+      same brief will not see it — which is precisely what Phase 7 is about. `not_recorded`
+      rather than a clean result when no receipt is passed, because an absent check reads as a
+      passed one.
+      **Closes D8.** `closest_precedent` is the top of the window when there is a receipt, and
+      marked `computed`; a model-supplied one is then refused. Without a receipt the server
+      cannot compute what it did not retrieve, so the model may still name one and it is not
+      marked computed.
+      **Closes D86.** The disconfirming search reads the subject from the receipt, instead of
+      querying the judgment's own prose and calling the results "precedent resembling this
+      one" — a claim about the brief made from a search over the complaint about it.
+      **Closes D80.** `update_campaign` rewrote `title` and `detail` and left the chunks and
+      vectors alone, so search kept matching the old wording. §6.1 had stopped the stale text
+      being QUOTABLE by reading the row columns; the index itself was still stale, and a
+      marketer who corrects a brief and then cannot find it is looking at the same bug from
+      the other end. Content edits re-index; a status or tag change does not, because
+      re-embedding for one would make every bulk edit a re-index of the library.
 - [x] **7.3 Enforce the output shape server-side** — reject writes missing a precedent quote
       or exceeding caps, rather than accepting and hoping. *Caps done by 2.4; the
       missing-quote half done by 6.1, which also verifies the quote rather than only

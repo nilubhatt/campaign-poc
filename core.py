@@ -273,7 +273,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                 break
             try:
                 vec = clip_embed.embed_image(entry["_path"])
-                vectorstore.add(conn, entry["asset_id"], vec, space="asset")
+                _add_vector(conn, entry["asset_id"], vec, space="asset")
                 store.mark_asset_embedded(conn, entry["asset_id"])
                 entry["visually_embedded"] = True
                 images_embedded += 1
@@ -347,7 +347,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
             # Only the time that is actually left, so no single call can push the handler
             # past its own deadline.
             vec = embedding.embed(text, timeout=remaining)
-            vectorstore.add(conn, chunk_id, vec)
+            _add_vector(conn, chunk_id, vec)
             store.set_chunk_embedded(conn, chunk_id)
             embedded_count += 1
         except Exception as exc:
@@ -950,6 +950,56 @@ def _dominant(scored: list) -> Optional[str]:
     return scored[0][1]
 
 
+def _mixed_model_warning(conn) -> list:
+    """Two embedding models in one index (§7.2).
+
+    "Record the embedding model version on every stored vector so a model upgrade is a
+    visible migration rather than a silent re-ranking." This is the visible part: similarities
+    produced by two different models are not comparable, so a ranking across them is
+    arithmetic on incompatible numbers — and the whole evidence package is that ranking.
+    """
+    models = store.embedding_models(conn)
+    if len(models) < 2:
+        return []
+    return [notices.notice(
+        "mixed_embedding_models",
+        detail=f"vectors in this library were produced by {len(models)} different embedding "
+               f"models ({', '.join(sorted(models))})",
+        affects="this evidence package and every similarity in it",
+        remedy="re-index the library so every vector comes from one model",
+        next_step="run reembed to rebuild the index with the current model")]
+
+
+def _window_check(conn, retrieval: Optional[str], cited_ids: Optional[list]) -> dict:
+    """Was each cited record in the evidence this judgment was actually given? (D77, §7.2)
+
+    §6.1 checks that the record contains the quote. This checks that the record was in front
+    of the reasoner at all, which is a different failure and the one Phase 7 needs: two users
+    judging the same brief should rest on the same evidence, and "the words are somewhere in
+    that record" says nothing about that. It also catches what §6.1's record check cannot —
+    cherry-picking a record retrieval never surfaced, and a record remembered from an earlier
+    session.
+
+    `not_recorded` rather than a clean result when there is no receipt. An absent check reads
+    as a passed one, which is the collapse §6.4 needed separate codes to avoid.
+    """
+    if not retrieval:
+        return {"window": "not_recorded"}
+    receipt = store.get_retrieval(conn, retrieval)
+    if receipt is None:
+        raise ValueError(
+            f"retrieval {retrieval!r} is not a receipt this server issued. It comes back from "
+            f"prepare_evaluation as `retrieval.receipt`; pass that value or omit it.")
+    shown = set(receipt["campaign_ids"])
+    cited = list(dict.fromkeys(cited_ids or []))
+    return {
+        "window": "recorded",
+        "retrieval_id": retrieval,
+        "from_the_window": [c for c in cited if c in shown],
+        "outside_the_window": [c for c in cited if c not in shown],
+    }
+
+
 def _evidence_strength(conn, *, cited_ids: Optional[list], text: str) -> dict:
     """What this judgment rests on, counted by the server (§6.6, D3).
 
@@ -1100,6 +1150,7 @@ def _say_the_evidence_strength(evidence: dict) -> str:
     in the field, and the note says to give the strength BEFORE the verdict, because after it
     the verdict has already landed.
     """
+    outside = evidence.get("outside_the_window") or []
     line = (f" This judgment rests on {evidence['precedents']} cited campaign(s), "
             f"{evidence['concluded']} concluded, {evidence['with_results']} with recorded "
             f"results, {evidence['verified']} with a measured performance verdict behind "
@@ -1108,6 +1159,11 @@ def _say_the_evidence_strength(evidence: dict) -> str:
             or evidence["dominated_by"] or not evidence["similarity_checked"]):
         line += (" Say how much this rests on BEFORE giving the verdict — afterwards the "
                  "verdict has already landed and the caveat reads as hedging.")
+    if outside:
+        line += (f" {len(outside)} of the campaigns cited were NOT in the evidence the server "
+                 f"retrieved for this judgment — see `outside_the_window`. Say where they "
+                 f"came from: a record nobody was shown is not shared evidence, and the next "
+                 f"person judging this brief will not see it.")
     if evidence["unresolved_citations"]:
         line += (f" {len(evidence['unresolved_citations'])} of the ids cited resolve to no "
                  f"record and were not counted.")
@@ -1171,6 +1227,34 @@ _DOMINANCE_GAP = 0.15
 # the question is "how close is THIS cited record", not "what are the nearest records" — and a
 # cited record that falls outside the scan is reported as unscored rather than as zero.
 _SIMILARITY_SCAN = 200
+
+
+# §7.2. The caller does not choose how much evidence a judgment rests on: "a caller who asks
+# for twenty gets a different evidence package from one who asks for three, and neither of
+# them chose the brief".
+_PINNED_TOP_K = 5
+
+
+def embedding_model_id() -> str:
+    """Which model is producing vectors right now, as one string.
+
+    Recorded on every vector so that changing the embedder is a visible migration rather than
+    a silent re-ranking of every judgment the library will ever make — the similarities from
+    two models are not comparable, and ranking across them is arithmetic on incompatible
+    numbers.
+    """
+    provider = config.EMBED_PROVIDER
+    if provider == "ollama":
+        return f"ollama/{config.OLLAMA_EMBED_MODEL}"
+    if provider == "voyage":
+        return f"voyage/{getattr(config, 'VOYAGE_EMBED_MODEL', 'default')}"
+    return provider
+
+
+def _add_vector(conn, vector_id: str, vec: list, *, space: str = "campaign") -> None:
+    """`vectorstore.add`, plus which model made it. One function so the two cannot drift."""
+    vectorstore.add(conn, vector_id, vec, space=space)
+    store.record_vector_model(conn, vector_id, embedding_model_id())
 
 
 def _pole_search(conn, *, tag: str, text: Optional[str] = None,
@@ -1540,7 +1624,8 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
                     approve_if: Optional[str] = None, evidence: Optional[dict] = None,
                     provenance: Optional[dict] = None,
                     campaign_id: Optional[str] = None, cited_ids: Optional[list] = None,
-                    predictions: Optional[dict] = None, trusted: bool = False) -> dict:
+                    predictions: Optional[dict] = None, retrieval: Optional[str] = None,
+                    trusted: bool = False) -> dict:
     """Record a judgment as structured findings rather than an essay (defect 07).
 
     The review's diagnosis was a data-model one, not a prompting one: handed a single
@@ -1568,7 +1653,9 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
     if not summary:
         raise ValueError("summary is required — one line a person can act on")
     approve_if = _bounded(approve_if, "approve_if", _MAX_APPROVE_IF)
-    closest_precedent = _clean_closest_precedent(conn, closest_precedent)
+    # Looked up once, here, because three separate things below need it: the window check,
+    # the closest precedent, and which subject the disconfirming search should run against.
+    receipt = store.get_retrieval(conn, retrieval) if retrieval else None
     # §6.4 is a server fact for the same reason `basis` and `precedent.checked` are: a check
     # the model reports is a claim, and a model asked to find evidence against a verdict it
     # has already reached is marking its own homework.
@@ -1790,9 +1877,19 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
     # not retrieve Mexico. When the subject is a stored record the record's own text is used;
     # when it is not, `query` says so and the wording does not overreach. Making the brief
     # knowable at save time in every case is 7.2's job (D86).
+    # D86: the receipt records which subject the evidence was gathered for, so the check can
+    # use it even when the subject is not a stored record. Without it this searched on the
+    # judgment's own prose and then called the results "precedent resembling this one" — a
+    # claim about the brief made from a search over the complaint about it.
     subject_record = store.get_campaign(conn, campaign_id) if campaign_id else None
     if subject_record:
         subject_text, query_basis = None, "subject_record"
+    elif receipt and receipt.get("campaign_id"):
+        subject_record = store.get_campaign(conn, receipt["campaign_id"])
+        subject_text, query_basis = None, "retrieval_receipt"
+    elif receipt:
+        # No record, but the receipt holds the subject the window was built from.
+        subject_text, query_basis = receipt["subject_title"], "retrieval_receipt"
     else:
         subject_text = "\n".join([subject_title, summary])
         query_basis = "judgment_text"
@@ -1800,11 +1897,30 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         conn, verdict=verdict,
         subject_text=subject_text if subject_text is not None else "",
         query_basis=query_basis, cited_ids=cited_ids, by_class=by_class,
-        subject_campaign_id=campaign_id if subject_record else None)
+        subject_campaign_id=(campaign_id if campaign_id and subject_record
+                             else (receipt or {}).get("campaign_id")))
+    window = _window_check(conn, retrieval, cited_ids)
+    # D8/§7.2: whichever record the server ranked first IS the closest precedent, and it was
+    # previously whatever the model asserted — a claim about which record is nearest, made by
+    # the party that did not do the ranking. With a receipt the server knows; without one it
+    # cannot compute what it did not retrieve, so the model may still name one and it is not
+    # marked computed.
+    if receipt and receipt["campaign_ids"]:
+        if closest_precedent:
+            raise ValueError(
+                "closest_precedent is the server's when you pass a `retrieval` receipt: it "
+                "is the top of the window the server ranked, and a claim about which record "
+                "is nearest, made by the party that did not do the ranking, is not a "
+                "measure. Send the receipt and it is filled in.")
+        closest_precedent = {"campaign_id": receipt["campaign_ids"][0], "basis": "computed",
+                             "from": "retrieval_window"}
+    else:
+        closest_precedent = _clean_closest_precedent(conn, closest_precedent)
     evidence = {
         **_evidence_strength(conn, cited_ids=cited_ids,
                              text="\n".join([subject_title, summary])),
         "disconfirming": disconfirming,
+        **window,
     }
     if missing:
         # §5.3 lives alongside it, and the two are deliberately different questions: this says
@@ -3506,7 +3622,7 @@ def finish_indexing(conn, *, campaign_id: Optional[str] = None) -> dict:
             break
         try:
             vec = embedding.embed(chunk["text"], timeout=remaining_time)
-            vectorstore.add(conn, chunk["id"], vec)
+            _add_vector(conn, chunk["id"], vec)
             store.set_chunk_embedded(conn, chunk["id"])
             sections_indexed += 1
             touched.add(chunk["campaign_id"])
@@ -3534,7 +3650,7 @@ def finish_indexing(conn, *, campaign_id: Optional[str] = None) -> dict:
                         f"the stored image file is missing, so it cannot be indexed; "
                         f"re-upload the deck if its visual matches matter")
                 vec = clip_embed.embed_image(path)
-                vectorstore.add(conn, asset["id"], vec, space="asset")
+                _add_vector(conn, asset["id"], vec, space="asset")
                 store.mark_asset_embedded(conn, asset["id"])
                 images_indexed += 1
                 touched.add(asset["campaign_id"])
@@ -3777,7 +3893,10 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
         if cid is None or cid in superseded_ids or (cid in best and sim <= best[cid][0]):
             continue
         best[cid] = (sim, chunk_id)
-    ranked = sorted(best.items(), key=lambda kv: kv[1][0], reverse=True)[:top_k]
+    # §7.2: the campaign-level rollup re-sorts, so a stable tie-break in the vector search
+    # is undone here unless it is repeated. Equal similarity breaks on the campaign id, which
+    # is the same rule at both levels and stable across machines and across an insert.
+    ranked = sorted(best.items(), key=lambda kv: (-kv[1][0], kv[0]))[:top_k]
 
     evidence = []
     for cid, (sim, chunk_id) in ranked:
@@ -3850,6 +3969,12 @@ def _incompleteness_warnings(conn) -> list[dict]:
         detail=f"{outstanding} unembedded items across {records} campaigns")]
 
 
+# Editing either of these changes what the record SAYS, so the index has to be rebuilt.
+# Everything else on a record is metadata: a status or a tag is not a content change, and
+# re-embedding for one would turn every bulk edit into a re-index of the library.
+_CONTENT_FIELDS = ("title", "detail")
+
+
 def update_campaign(conn, campaign_id: str, **fields) -> dict:
     """`store.update_campaign`, plus §6.3's moment when a supersession is declared LATE.
 
@@ -3861,8 +3986,10 @@ def update_campaign(conn, campaign_id: str, **fields) -> dict:
     """
     if not store.update_campaign(conn, campaign_id, **fields):
         return {"error": f"campaign {campaign_id} not found"}
+    reindexed = _reindex_if_content_changed(conn, campaign_id, fields)
     record = store.get_campaign(conn, campaign_id)
     earlier_judgment = _judgment_to_check(conn, fields.get("supersedes") or None)
+    record = {**record, **reindexed}
     if not earlier_judgment:
         return record
     return {**record, "earlier_judgment": earlier_judgment,
@@ -3870,6 +3997,52 @@ def update_campaign(conn, campaign_id: str, **fields) -> dict:
                 campaign_id=campaign_id, status=record["status"],
                 has_metrics=bool(record["metrics"]),
                 earlier_judgment=earlier_judgment)}
+
+
+def _reindex_if_content_changed(conn, campaign_id: str, fields: dict) -> dict:
+    """Rebuild the chunks and vectors when an edit changed what the record says (D80, §7.2).
+
+    `update_campaign` rewrote `title` and `detail` and left the index alone, so search kept
+    matching the old wording — "same deck in, same chunks out" is false the moment a deck
+    changes and the index does not. §6.1 stopped the stale text being QUOTABLE by verifying
+    against the row columns; nothing had fixed the index itself, and a marketer who corrects a
+    brief and then cannot find it is looking at the same bug from the other end.
+
+    Deliberately not for `deck_text`, which `update_campaign` does not accept: content that
+    large is a re-upload, and the docstring has always said so.
+    """
+    changed = [f for f in _CONTENT_FIELDS if fields.get(f) is not None]
+    if not changed:
+        return {}
+    record = store.get_campaign(conn, campaign_id)
+    summary = "\n\n".join(p for p in (record["title"], record.get("detail")) if p)
+    units = (record.get("deck_text") or "").split("\n\n")
+    texts = chunking.pack(([summary] if summary else []) + [u for u in units if u.strip()])
+    # Commentary is a different layer and was not edited — it is not rebuilt, and its chunks
+    # stay exactly where they were.
+    old_ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM campaign_chunks WHERE campaign_id = ? AND kind = 'body'",
+        (campaign_id,)).fetchall()]
+    vectorstore.delete_many(conn, old_ids)
+    conn.execute("DELETE FROM campaign_chunks WHERE campaign_id = ? AND kind = 'body'",
+                 (campaign_id,))
+    conn.commit()
+    if not texts:
+        store.mark_embedded(conn, campaign_id, False)
+        return {"reindexed": {"fields": changed, "chunks": 0, "embedded": 0}}
+    new_ids = store.insert_chunks(conn, campaign_id, texts)
+    embedded = 0
+    for chunk_id, text in zip(new_ids, texts):
+        try:
+            _add_vector(conn, chunk_id, embedding.embed(text))
+            store.set_chunk_embedded(conn, chunk_id)
+            embedded += 1
+        except Exception:                      # noqa: BLE001
+            # Partial state is a designed outcome here as everywhere else (§2.1): the row is
+            # correct, the index is behind, and `finish_indexing` closes it.
+            break
+    store.mark_embedded(conn, campaign_id, embedded == len(texts))
+    return {"reindexed": {"fields": changed, "chunks": len(texts), "embedded": embedded}}
 
 
 def _judgment_to_check(conn, superseded: Optional[str]) -> Optional[dict]:
@@ -3971,7 +4144,7 @@ def _earlier_version_findings(conn, campaign_id: Optional[str]) -> Optional[dict
     }
 
 
-def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: int = 5,
+def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: Optional[int] = None,
                        record_type: Optional[str] = None, status: Optional[str] = None,
                        tags: Optional[Union[str, dict, list]] = None, match_all_tags: bool = False,
                        region: Optional[str] = None, market: Optional[str] = None,
@@ -3988,17 +4161,70 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
     Pass a {"value": ..., "source": "verified"} tag to weigh only precedent whose matching
     performance claim is backed by real metric data, not a stated impression.
     """
+    # §7.2. "The server extracts the query from the source file, not from the conversation.
+    # Same deck in, same chunks out."
+    caller_filters = {k: v for k, v in (("record_type", record_type), ("status", status),
+                                        ("tags", tags), ("region", region),
+                                        ("market", market), ("markets", markets),
+                                        ("collection", collection)) if v}
+    if top_k is not None:
+        raise ValueError(
+            f"top_k is not the caller's to choose: a judgment resting on 3 precedents and "
+            f"one resting on 20 are different judgments, and neither number is a fact about "
+            f"the brief. The server pins it at {_PINNED_TOP_K}.")
+    subject = store.get_campaign(conn, campaign_id) if campaign_id else None
+    if subject:
+        if caller_filters:
+            raise ValueError(
+                f"filters are derived from the subject record when `campaign_id` is given — "
+                f"{', '.join(sorted(caller_filters))} came from the caller. Each choice "
+                f"changes the evidence package, and a filter the model picked is a filter "
+                f"nobody can see it picked. Drop them, or omit `campaign_id` and own the "
+                f"choice explicitly.")
+        # The record's OWN attributes: the same subject retrieves the same evidence whoever
+        # is describing it, which is the acceptance test for this whole item.
+        filters = {k: subject[k] for k in ("market", "region", "collection")
+                   if subject.get(k)}
+        filters_from = "subject_record"
+        query_basis = "subject_record"
+        query_text = None
+    else:
+        filters, filters_from = caller_filters, ("caller" if caller_filters else "none")
+        query_basis = "caller_text"
+        query_text = proposal_text
+
     # find_similar, not find_similar_with_context, so the "your library is only partly
     # indexed" warning is added explicitly below rather than inherited — see the note there.
-    evidence = find_similar(conn, text=proposal_text, top_k=top_k, record_type=record_type,
-                            status=status, tags=tags, match_all_tags=match_all_tags,
-                            region=region, market=market, markets=markets,
-                            collection=collection, full_detail=full_detail)
+    evidence = find_similar(conn, text=query_text, campaign_id=campaign_id if subject else None,
+                            top_k=_PINNED_TOP_K, full_detail=full_detail, **filters)
     concluded = [e for e in evidence if e["metrics"]]
     return {
         "subject_title": subject_title,
         "evidence_count": len(evidence),
         "evidence": evidence,
+        # §7.2: what was retrieved, how, and a receipt so a later judgment can be checked
+        # against the window it was actually given (D77).
+        "retrieval": {
+            "query": query_basis,
+            "filters": filters,
+            "filters_from": filters_from,
+            "top_k": _PINNED_TOP_K,
+            "embedding_model": embedding_model_id(),
+            "receipt": store.insert_retrieval(
+                conn, subject_title=subject_title,
+                campaign_id=campaign_id if subject else None, query=query_basis,
+                filters=filters, top_k=_PINNED_TOP_K,
+                campaign_ids=[e["campaign_id"] for e in evidence],
+                embedding_model=embedding_model_id()),
+            "what_it_means": (
+                "The query was this record's own text, so the same subject retrieves the "
+                "same evidence however it is described."
+                if query_basis == "subject_record" else
+                "The query was the text you passed, so a different description of the same "
+                "brief would retrieve different evidence. Pass `campaign_id` once the "
+                "subject is a record and the server will derive the query and the filters "
+                "from it."),
+        },
         "note": (
             # The vocabulary here has to be the vocabulary save_evaluation accepts. This
             # said "proceed/revise/reject" while the enum takes "approve" — so the prompt
@@ -4084,7 +4310,7 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
         # nothing about it: find_similar_campaigns warns, and this — a verdict about to be
         # saved against this evidence — did not. "How many precedents did this rest on" is
         # the wrong number when records are missing from the search entirely (§6.6).
-        "warnings": _incompleteness_warnings(conn),
+        "warnings": _incompleteness_warnings(conn) + _mixed_model_warning(conn),
     }
 
 
@@ -4193,7 +4419,7 @@ def _store_and_fingerprint_image(conn, campaign_id: str, stored_name: str) -> di
     visually_embedded = False
     try:
         vec = clip_embed.embed_image(full_path)
-        vectorstore.add(conn, aid, vec, space="asset")
+        _add_vector(conn, aid, vec, space="asset")
         store.mark_asset_embedded(conn, aid)
         visually_embedded = True
     except Exception as exc:

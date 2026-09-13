@@ -157,7 +157,11 @@ def rank(query_vec: list[float], candidates: list[tuple[str, list[float]]],
         for cid, vec in candidates
         if cid not in exclude
     ]
-    scored.sort(key=lambda t: t[1], reverse=True)
+    # §7.2: "make tie-breaking on equal similarity stable and deterministic". Three identical
+    # decks score identically, and whichever order the rows happened to come back in became
+    # the evidence order — which is also what `closest_precedent` points at. Sorting by id
+    # within a tie makes the same library return the same package every time, on any machine.
+    scored.sort(key=lambda t: (-t[1], t[0]))
     return scored[:top_k]
 
 

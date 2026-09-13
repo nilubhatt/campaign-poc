@@ -127,6 +127,10 @@ def search(conn: sqlite3.Connection, query_vec: list[float], *, top_k: int = 5,
             (_pack(query_vec), k),
         ).fetchall()
         out = [(r["vector_id"], 1.0 - r["distance"]) for r in rows if r["vector_id"] not in exclude]
+        # §7.2: equal distances come back from the ANN index in whatever order it stored
+        # them, which is not stable across machines or across an insert. Sorting by id within
+        # a tie makes the same library return the same evidence package every time.
+        out.sort(key=lambda t: (-t[1], t[0]))
         return out[:top_k]
 
     # fallback: brute-force cosine

@@ -162,15 +162,21 @@ def test_a_judgment_says_what_would_most_change_it(conn):
 def test_the_line_is_about_the_evidence_cited_not_the_library(conn):
     """A library that is 90% measured can still produce a judgment resting entirely on the
     unmeasured 10%. The line is about THIS verdict."""
+    # §7.2 pinned `top_k`, so a caller can no longer narrow the window to force this. The
+    # claim was always about the evidence CITED rather than retrieved, so it is now made
+    # against the judgment itself, which is where "cited" actually exists.
     for i in range(9):
         _with_results(conn, f"Measured {i}", detail="soap opera product placement")
-    _concluded(conn, "Unmeasured seeding", detail="influencer seeding in Colombia")
+    unmeasured = _concluded(conn, "Unmeasured seeding",
+                            detail="influencer seeding in Colombia")
 
-    packaged = core.prepare_evaluation(conn, subject_title="New seeding",
-                                       proposal_text="influencer seeding in Colombia",
-                                       top_k=1)
+    saved = core.save_evaluation(
+        conn, subject_title="New seeding", verdict="revise", summary="A stretch.",
+        approve_if="It is fixed.", cited_ids=[unmeasured],
+        findings=[{"severity": "should_fix", "kind": "missing_information",
+                   "finding": "No end date", "fix": "Add one"}])
 
-    assert packaged["most_valuable_missing_input"]["code"] == "no_measured_precedent"
+    assert saved["most_valuable_missing_input"]["code"] == "no_measured_precedent"
 
 
 def test_a_judgment_on_measured_precedent_asks_for_nothing(conn):

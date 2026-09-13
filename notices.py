@@ -43,6 +43,18 @@ SCOPES = ("machine", "record", "call")
 
 # code -> (severity, scope, affects, remedy, next_step)
 _REGISTRY: dict[str, tuple] = {
+    # §7.2. Two embedding models in one index means the similarity numbers are not
+    # comparable, so the ranking the whole evidence package rests on is arithmetic across
+    # incompatible scales. Degraded rather than blocked: the search still returns records,
+    # and they are still roughly the right ones — it is the ORDER that is unsound, which is
+    # exactly the kind of quiet wrongness this registry exists to say out loud.
+    "mixed_embedding_models": (
+        "degraded", "machine",
+        "This library was indexed by more than one embedding model, so the ranking of "
+        "search results is not reliable — the scores from two models are not on the same "
+        "scale. Results are still roughly right; their order is not.",
+        "Re-index the library so every record is embedded by the current model.",
+        "Say it once per session, not per search. Offer reembed."),
     # ── the review's own example ──
     # The registry supplies no remedy text for the vision model: clip_embed.WeightsResolution
     # already works out the right one per cause (bundled copy absent, configured path wrong,

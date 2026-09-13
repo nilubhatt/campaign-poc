@@ -116,6 +116,23 @@ CREATE TABLE IF NOT EXISTS reconciliations (
     comparison    TEXT NOT NULL,   -- Claude's prediction-vs-actual reconciliation + lesson learned
     created_at    REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS retrievals (
+    id            TEXT PRIMARY KEY,
+    subject_title TEXT,
+    campaign_id   TEXT,            -- the subject record, when there was one
+    query         TEXT NOT NULL,   -- subject_record | caller_text: what was embedded (§7.2)
+    filters       TEXT,            -- JSON, and where they came from
+    top_k         INTEGER NOT NULL,
+    campaign_ids  TEXT NOT NULL,   -- JSON list, in the order they were returned
+    embedding_model TEXT,          -- so a re-ranking after a model change is visible
+    created_at    REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS vector_provenance (
+    vector_id     TEXT PRIMARY KEY,
+    model         TEXT NOT NULL,   -- §7.2: "a model upgrade is a visible migration rather
+                                    -- than a silent re-ranking"
+    created_at    REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS chunks_campaign_idx   ON campaign_chunks(campaign_id);
 CREATE INDEX IF NOT EXISTS assets_campaign_idx   ON assets(campaign_id);
 CREATE INDEX IF NOT EXISTS metrics_campaign_idx ON metrics(campaign_id);
@@ -173,6 +190,17 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     if existing and "commentary_checked" not in existing:
         conn.execute("ALTER TABLE campaigns ADD COLUMN commentary_checked INTEGER NOT NULL "
                      "DEFAULT 0")
+    # §7.2's two new tables. `_SCHEMA` creates them on a fresh install and on any upgrade
+    # that runs `init_db`; this is here so a caller that only migrates still gets them, which
+    # is how every legacy test in this suite reaches the save path.
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS retrievals (
+            id TEXT PRIMARY KEY, subject_title TEXT, campaign_id TEXT, query TEXT NOT NULL,
+            filters TEXT, top_k INTEGER NOT NULL, campaign_ids TEXT NOT NULL,
+            embedding_model TEXT, created_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS vector_provenance (
+            vector_id TEXT PRIMARY KEY, model TEXT NOT NULL, created_at REAL NOT NULL);
+    """)
     chunk_columns = _columns(conn, "campaign_chunks")
     if chunk_columns and "kind" not in chunk_columns:
         # Existing chunks are all deck body — the only kind that existed before §2.5.
@@ -1238,6 +1266,68 @@ def get_evaluation(conn, evaluation_id: str) -> Optional[dict]:
     d["reconciliations"] = [dict(r) for r in conn.execute(
         "SELECT * FROM reconciliations WHERE evaluation_id = ? ORDER BY created_at", (evaluation_id,)
     ).fetchall()]
+    return d
+
+
+def record_vector_model(conn, vector_id: str, model: str) -> None:
+    """Which embedding model produced this vector (§7.2).
+
+    "So a model upgrade is a visible migration rather than a silent re-ranking." Without it,
+    changing the embedder re-ranks every judgment the library will ever make and nothing says
+    so — the similarities from two models are not comparable, and ranking across them is
+    arithmetic on incompatible numbers.
+    """
+    if not _columns(conn, "vector_provenance"):
+        return
+    conn.execute("INSERT OR REPLACE INTO vector_provenance (vector_id, model, created_at) "
+                 "VALUES (?,?,?)", (vector_id, model, _now()))
+    conn.commit()
+
+
+def set_embedding_model(conn, model: str) -> None:
+    """Test seam: pretend the next vectors come from a different model, so the
+    mixed-index warning can be exercised without swapping embedders."""
+    conn.execute("UPDATE vector_provenance SET model = ?", (model,))
+    conn.commit()
+
+
+def embedding_models(conn) -> set:
+    """Every model that produced a vector currently in the library."""
+    if not _columns(conn, "vector_provenance"):
+        return set()
+    return {r["model"] for r in
+            conn.execute("SELECT DISTINCT model FROM vector_provenance").fetchall()}
+
+
+def insert_retrieval(conn, *, subject_title, campaign_id, query, filters, top_k,
+                     campaign_ids, embedding_model) -> str:
+    """Write down what the server retrieved (§7.2).
+
+    §6.1 rejected a receipt as the mechanism for verifying a QUOTE (X7): it answers a weaker
+    question than "does the cited record contain these words", and it would have put a
+    stateful handshake on a stateless tool. That objection stands for 6.1. Here the server is
+    already doing the retrieval, so writing it down costs one row — and it answers the
+    question 6.1 could not reach: was this record in front of the reasoner at all (D77).
+    """
+    rid = _id("ret")
+    conn.execute(
+        "INSERT INTO retrievals (id, subject_title, campaign_id, query, filters, top_k, "
+        "campaign_ids, embedding_model, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (rid, subject_title, campaign_id, query, json.dumps(filters or {}), top_k,
+         json.dumps(list(campaign_ids)), embedding_model, _now()))
+    conn.commit()
+    return rid
+
+
+def get_retrieval(conn, retrieval_id: str) -> Optional[dict]:
+    if not _columns(conn, "retrievals"):
+        return None
+    row = conn.execute("SELECT * FROM retrievals WHERE id = ?", (retrieval_id,)).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["campaign_ids"] = json.loads(d["campaign_ids"] or "[]")
+    d["filters"] = json.loads(d["filters"] or "{}")
     return d
 
 

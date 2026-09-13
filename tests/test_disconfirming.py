@@ -491,8 +491,8 @@ def test_the_poles_reach_past_what_was_already_retrieved(conn):
     store.update_campaign(conn, measured,
                           tags=[{"value": "performed_well", "source": "verified"}])
 
-    package = core.prepare_evaluation(conn, subject_title="Colombia v1", proposal_text=body,
-                                      top_k=5)
+    # §7.2 pinned top_k at 5 and refuses a caller's choice; this used to pass it explicitly.
+    package = core.prepare_evaluation(conn, subject_title="Colombia v1", proposal_text=body)
 
     worked = package["outcomes"]["worked"]
     assert [r["campaign_id"] for r in worked] == [measured], \

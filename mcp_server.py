@@ -660,7 +660,8 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
 
 @mcp.tool()
 @_catch_value_errors
-def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
+def prepare_evaluation(subject_title: str, proposal_text: str,
+                       campaign_id: Optional[str] = None, top_k: Optional[int] = None,
                        record_type: Optional[RecordType] = None, status: Optional[Status] = None,
                        tags: Optional[Union[TagInput, list[TagInput]]] = None,
                        match_all_tags: bool = False,
@@ -692,6 +693,22 @@ def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
     aside — "this rests on three campaigns, none of which has measured results" is context
     the user needs in order to know how much to trust what follows.
 
+    **Pass `campaign_id` when the subject is already a record, and the server derives
+    everything from it** — the query is the record's own text and the filters are its own
+    attributes, so the same subject retrieves the same evidence however you describe it. That
+    is the point: a 200-word summary and a 2,000-word one retrieve different evidence from the
+    same deck, and different evidence is a different verdict. With a `campaign_id` the filter
+    arguments are refused, because a filter you chose is a filter nobody can see you chose.
+    Without one they are yours, and `retrieval.filters_from` records that.
+
+    `top_k` is the server's. A judgment resting on three precedents and one resting on twenty
+    are different judgments, and neither number is a fact about the brief.
+
+    `retrieval.receipt` comes back with the package. Pass it to `save_evaluation` as
+    `retrieval` and the server records which of your citations were in the evidence it gave
+    you — a record you cite that was never retrieved is not shared evidence, and the next
+    person judging this brief will not see it.
+
     Read it, then call save_evaluation with a verdict (approve / revise / reject), a
     one-line summary and one short finding per problem, CITING specific campaign_ids. When a
     finding quotes a `commentary` row, set that precedent's `layer: "commentary"` and carry
@@ -701,6 +718,7 @@ def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
     try:
         return core.prepare_evaluation(conn, subject_title=subject_title,
                                        proposal_text=proposal_text, top_k=top_k,
+                                       campaign_id=campaign_id,
                                        record_type=record_type, status=status, tags=tags,
                                        match_all_tags=match_all_tags, region=region,
                                        market=market, markets=markets, collection=collection,
@@ -718,7 +736,8 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
                     approve_if: Optional[str] = None,
                     cited_ids: Optional[list] = None,
                     predictions: Optional[dict] = None,
-                    campaign_id: Optional[str] = None) -> dict:
+                    campaign_id: Optional[str] = None,
+                    retrieval: Optional[str] = None) -> dict:
     """Persist your judgment as structured findings, not prose.
 
     Write ONE finding per problem. Each is a short line naming the problem (<=120 chars),
@@ -866,7 +885,7 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
             conn, subject_title=subject_title, verdict=verdict, summary=summary,
             findings=findings, resolved=resolved, closest_precedent=closest_precedent,
             approve_if=approve_if, campaign_id=campaign_id, cited_ids=cited_ids,
-            predictions=predictions)
+            predictions=predictions, retrieval=retrieval)
     finally:
         conn.close()
 
