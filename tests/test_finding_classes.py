@@ -51,7 +51,7 @@ def library(conn):
 
 def _breach(**over):
     base = {"severity": "blocking", "kind": "guardrail_breach",
-            "finding": "Uses AI-generated imagery",
+            "finding": "Uses AI-generated imagery", "fix": "Use approved assets",
             "precedent": {"rule_id": None, "quote": "No AI-generated imagery"}}
     base.update(over)
     return base
@@ -59,17 +59,25 @@ def _breach(**over):
 
 def _departure(**over):
     base = {"severity": "should_fix", "kind": "precedent_departure",
-            "departure": "unexplained",
+            "departure": "unexplained", "fix": "Seed one colourway",
             "finding": "Seeds four colourways where Peru used one",
             "precedent": {"campaign_id": None, "quote": "Seeded one colourway per creator"}}
     base.update(over)
+    # §6.2 refuses a `fix` on a possible improvement; §6.5 requires one above a note. The two
+    # rules meet exactly here, and a note needs neither.
+    if base.get("severity") == "note" or base.get("departure") == "possible_improvement":
+        base.pop("fix", None)
     return base
 
 
 def _evaluation(*findings, **over):
     base = {"subject_title": "Colombia v2", "verdict": "revise",
-            "summary": "Two things to settle.", "findings": list(findings)}
+            # §6.5: a revise says what would end it; an approve may not.
+            "approve_if": "Both are settled.", "findings": list(findings)}
+    base["summary"] = "Two things to settle."
     base.update(over)
+    if base.get("verdict") != "revise":
+        base.pop("approve_if", None)
     return base
 
 
@@ -90,7 +98,7 @@ def test_a_finding_has_to_say_which_kind_it_is(conn, library):
     escape and it went into the tracker as the cheaper half of D78."""
     with pytest.raises(ValueError) as e:
         core.save_evaluation(conn, **_evaluation(
-            {"severity": "blocking", "finding": "Something is wrong"}))
+            {"severity": "blocking", "fix": "Change it", "finding": "Something is wrong"}))
     message = str(e.value)
     assert "kind" in message
     for kind in ("guardrail_breach", "precedent_departure", "missing_information",
@@ -105,8 +113,8 @@ def test_the_requirement_reaches_the_model_over_the_protocol(conn, library):
     async def call():
         import mcp_server
         result = await mcp_server.mcp.call_tool("save_evaluation", {
-            "subject_title": "Colombia v2", "verdict": "revise", "summary": "Something.",
-            "findings": [{"severity": "blocking", "finding": "Something is wrong"}]})
+            "subject_title": "Colombia v2", "verdict": "revise", "approve_if": "It is fixed.", "summary": "Something.",
+            "findings": [{"severity": "blocking", "fix": "Change it", "finding": "Something is wrong"}]})
         return json.loads(result.content[0].text)
 
     refused = asyncio.run(call())
@@ -182,7 +190,7 @@ def test_the_response_separates_what_is_settled_from_what_is_arguable(conn, libr
     result = core.save_evaluation(conn, **_evaluation(
         _wire(_breach(), library),
         _wire(_departure(), library),
-        {"severity": "should_fix", "kind": "missing_information",
+        {"severity": "should_fix", "fix": "Change it", "kind": "missing_information",
          "finding": "No end date on the flighting table"}))
 
     assert result["by_class"] == {"not_debatable": 1, "debatable": 1, "about_the_brief": 1}
@@ -263,8 +271,11 @@ def test_an_improvement_cannot_smuggle_the_reversal_into_the_fix(conn, library):
     something, so the same reversal arrives in the other field."""
     with pytest.raises(ValueError) as e:
         core.save_evaluation(conn, **_evaluation(
-            _wire(_departure(departure="possible_improvement", severity="note",
-                             fix="Change it back to one colourway"), library)))
+            {**_wire(_departure(departure="possible_improvement", severity="note"), library),
+             "fix": "Change it back to one colourway"},
+            # A second finding, so the refusal is about the `fix` and not about a revise
+            # carrying nothing above a note.
+            _wire(_breach(), library)))
     assert "fix" in str(e.value)
 
 
@@ -275,7 +286,7 @@ def test_the_tailored_refusals_say_what_each_value_means(conn, library):
     the type, and it was the part nothing tested."""
     with pytest.raises(ValueError) as no_kind:
         core.save_evaluation(conn, **_evaluation(
-            {"severity": "blocking", "finding": "Something is wrong"}))
+            {"severity": "blocking", "fix": "Change it", "finding": "Something is wrong"}))
     assert "a rule was broken" in str(no_kind.value)
     assert "the brief does not say" in str(no_kind.value)
 
@@ -357,7 +368,7 @@ def test_the_worked_examples_in_the_description_can_actually_be_saved(conn, libr
     assert len(examples) >= 2, f"the docstring should carry worked findings, found {examples}"
 
     for example in examples:
-        result = core.save_evaluation(conn, subject_title="Colombia v2", verdict="revise",
+        result = core.save_evaluation(conn, subject_title="Colombia v2", verdict="revise", approve_if="It is fixed.",
                                       summary="From the worked example.",
                                       findings=[example])
         assert result["evaluation_id"], example
@@ -444,7 +455,8 @@ def test_a_judgment_stored_before_this_rule_still_reads_back(conn, library):
         conn, evaluation_id="eval_before", subject_title="Colombia v0", verdict="revise",
         summary="Written before kind was required.",
         findings=[{"id": "eval_before#1", "severity": "blocking",
-                   "finding": "No posting dates", "kind": None, "departure": None}],
+                   "finding": "No posting dates", "kind": None, "departure": None,
+                   "fix": None}],
         resolved=[], closest_precedent=None, approve_if=None, evidence=None,
         provenance=None, campaign_id=None, cited_ids=[], predictions=None)
 
@@ -465,7 +477,7 @@ def test_a_claim_about_the_brief_is_neither_settled_nor_arguable(conn, library, 
     to defend it or to argue about it are both wrong. Nothing pinned `internal_contradiction`
     to it, so mapping it to `debatable` passed the whole suite."""
     result = core.save_evaluation(conn, **_evaluation(
-        {"severity": "should_fix", "kind": kind,
+        {"severity": "should_fix", "fix": "Change it", "kind": kind,
          "finding": "The brief gives two different end dates"}))
 
     assert result["by_class"] == {"about_the_brief": 1}

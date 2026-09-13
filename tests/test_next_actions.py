@@ -37,11 +37,14 @@ def _evaluation(**over):
     base = {
         "subject_title": "Colombia v2",
         "verdict": "revise",
+        "approve_if": "Dates on every deliverable.",   # §6.5
         "summary": "Solid plan, but nothing is dated.",
-        "findings": [{"severity": "blocking", "kind": "missing_information",
+        "findings": [{"severity": "blocking", "fix": "Change it", "kind": "missing_information",
                       "finding": "No posting dates"}],
     }
     base.update(over)
+    if base.get("verdict") != "revise":
+        base.pop("approve_if", None)
     return base
 
 
@@ -231,7 +234,7 @@ def test_a_rejected_proposal_never_offers_to_replace_anything(conn):
 
     result = core.save_evaluation(conn, subject_title="Colombia v2", verdict="reject",
                                   summary="Not viable as written.",
-                                  findings=[{"severity": "blocking", "kind": "missing_information",
+                                  findings=[{"severity": "blocking", "fix": "Change it", "kind": "missing_information",
                                              "finding": "No dates"}],
                                   closest_precedent={"campaign_id": earlier,
                                                      "similarity": 0.93})
@@ -247,14 +250,16 @@ def test_supersession_is_never_offered_on_a_similarity_score(conn):
     `update_campaign` cannot clear `supersedes`."""
     earlier = store.insert_campaign(conn, title="Colombia v1")
 
-    for verdict, findings in (("revise", [{"severity": "blocking", "kind": "missing_information",
+    for verdict, findings in (("revise", [{"severity": "blocking", "fix": "Change it", "kind": "missing_information",
                                             "finding": "x"}]),
                               ("approve", []),
-                              ("reject", [{"severity": "blocking", "kind": "missing_information",
+                              ("reject", [{"severity": "blocking", "fix": "Change it", "kind": "missing_information",
                                             "finding": "x"}])):
         result = core.save_evaluation(
             conn, subject_title="Colombia v2", verdict=verdict,
             summary="A summary long enough to be a real one.", findings=findings,
+            # §6.5: required on a revise, forbidden on the other two.
+            **({"approve_if": "It is fixed."} if verdict == "revise" else {}),
             closest_precedent={"campaign_id": earlier, "similarity": 0.97})
         assert not any("supersedes" in a["prefilled_args"]
                        for a in result["next_actions"]), verdict
@@ -269,9 +274,9 @@ def test_the_offer_for_a_record_already_in_the_library_is_callable(conn):
     earlier = store.insert_campaign(conn, title="Colombia v1")
 
     result = core.save_evaluation(
-        conn, subject_title="Colombia v2", verdict="revise",
+        conn, subject_title="Colombia v2", verdict="revise", approve_if="It is fixed.",
         summary="Nothing is dated.", campaign_id=cid,
-        findings=[{"severity": "blocking", "kind": "missing_information",
+        findings=[{"severity": "blocking", "fix": "Change it", "kind": "missing_information",
                                              "finding": "No dates"}],
         closest_precedent={"campaign_id": earlier, "similarity": 0.9})
 

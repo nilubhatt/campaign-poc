@@ -803,10 +803,12 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
        "detail": "Jakarta seeded one per creator and concluded above benchmark. Four may be
                   deliberate for a launch this size; the brief does not say.",
        "precedent": {"campaign_id": "<a campaign_id from your evidence>",
-                     "quote": "<its own words, copied — not written from memory>"}}
-    Note what the second one does NOT have: a `fix`. It is marked `unexplained`, so the next
-    step is a question, and "seed one colourway" would be telling them to change something
-    you have just said may be deliberate. A `regression` is where a fix belongs.
+                     "quote": "<its own words, copied — not written from memory>"},
+       "fix": "Say whether four colourways is deliberate for a launch this size"}
+    Look at the second `fix`. Every finding above a note needs one, and for an `unexplained`
+    departure the action is an ANSWER, not a change — "seed one colourway" would be telling
+    them to undo something you have just said may be deliberate. A `regression` is where a
+    fix that changes something belongs.
 
     The response tells you how to voice what you wrote: `by_class` counts the three classes
     and `note` says the register for each. `improvements` carries the possible improvements
@@ -824,6 +826,19 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
     `approve_if` is what would flip a `revise` to `approve`, stated so someone could check
     it: "dates on every deliverable and the two conflicted profiles removed". It doubles as
     the note the partner receives.
+
+    **REQUIRED on a revise. Forbidden on an approve and on a reject.** An approve has nothing
+    to exit, and a condition attached to one is a reservation the verdict does not admit to.
+    A reject that can name the changes that would make it approvable is a revise — that is
+    the difference between the two words. And the list of findings is not the same thing as
+    an exit condition: three findings may need two changes, and one may need three.
+
+    Every finding above a `note` needs a `fix`, one line saying what to change. The response
+    comes back with `exit_checklist` — those fixes, worst first, each pointing at the finding
+    it came from — so the partner has something to tick off rather than a sentence to
+    interpret. For an `unexplained` departure the fix is an ANSWER ("say whether four
+    colourways is deliberate"), never an instruction to undo what you just said may be
+    deliberate.
 
     `resolved` is for a later version of a brief: `[{finding_id, was, now}]` records what an
     earlier evaluation asked for and what changed — that is how the library learns whether
@@ -993,7 +1008,7 @@ def get_evaluation(evaluation_id: str, severity: Optional[Severity] = None,
     ("guardrail_breach") or `departure` ("possible_improvement") rather than fetching
     everything and filtering in the reply.
 
-    `disconfirming`, `by_class` and `how_to_say_it` come back with it, so a judgment read in a later session
+    `disconfirming`, `exit_checklist`, `by_class` and `how_to_say_it` come back with it, so a judgment read in a later session
     is voiced the same way it was when it was written — a rule breach stated, a departure
     asked about. `improvements` lists the departures somebody thought were better than the
     precedent; those are notes by rule, so they are easy to miss in the findings list.

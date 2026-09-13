@@ -906,6 +906,22 @@ def _how_to_say_it(by_class: dict, findings: list) -> str:
     return " ".join(parts)
 
 
+def _exit_checklist(findings: list) -> list:
+    """The exit condition as something somebody can tick off (§6.5).
+
+    The review asks for an exit condition that is "testable" and that "doubles as the note
+    the partner receives", and those are the same requirement: a sentence cannot be checked
+    off and a list can. Composed from the `fix` lines the findings already carry, so it
+    cannot drift from them — a hand-written checklist beside a findings array is two sources
+    of truth for one thing, which is the failure this project has now hit four times.
+
+    Notes are left out. "Worth saying once; nobody has to act" is the severity's own
+    definition, and an item on an exit checklist is by definition something to act on.
+    """
+    return [{"finding_id": f["id"], "severity": f["severity"], "fix": f["fix"]}
+            for f in findings if f["severity"] in ("blocking", "should_fix")]
+
+
 def _say_the_disconfirming_check(check: dict) -> str:
     """§6.4 makes overconfidence visible, which it can only do if somebody is told.
 
@@ -1288,6 +1304,7 @@ def get_evaluation(conn, *, evaluation_id: str, severity: Optional[str] = None,
         "verdict": ev["verdict"],
         "summary": ev["summary"],
         "approve_if": ev.get("approve_if"),
+        **({"exit_checklist": _exit_checklist(stored)} if _exit_checklist(stored) else {}),
         "closest_precedent": ev.get("closest_precedent"),
         "by_class": by_class,
         "findings": findings,
@@ -1466,6 +1483,17 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         if basis == "computed" and not trusted:
             raise ValueError(f"{where}only the server sets basis 'computed'; a finding you "
                              f"reached yourself is 'judged', however certain it is")
+        # §6.5 / D2: a finding above a note is a claim that something must change, and
+        # without a `fix` the reader has the complaint and not the remedy. It is also what
+        # the exit checklist is composed from, so a missing one leaves a hole in the list
+        # somebody is meant to tick off.
+        fix = _bounded(finding.get("fix"), "'fix'", _MAX_FIX, where=where)
+        if severity in ("blocking", "should_fix") and not fix:
+            raise ValueError(
+                f"{where}a {severity!r} finding needs a `fix` — one line saying what to "
+                f"change. A problem worth acting on that does not say what the action is "
+                f"leaves the reader with the complaint and not the remedy, and it leaves a "
+                f"hole in the exit condition, which is built from these.")
         cleaned.append({
             "severity": severity,
             "kind": kind,
@@ -1476,7 +1504,7 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
             "repeats": repeats,
             "detail": _bounded(finding.get("detail"), "'detail'", _MAX_DETAIL, where=where),
             "precedent": precedent,
-            "fix": _bounded(finding.get("fix"), "'fix'", _MAX_FIX, where=where),
+            "fix": fix,
         })
 
     counts = {level: sum(1 for f in cleaned if f["severity"] == level)
@@ -1498,6 +1526,28 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         raise ValueError(f"cannot approve with {counts['blocking']} blocking finding(s): if "
                          f"the brief genuinely cannot proceed as written the verdict is "
                          f"'revise'. Do not lower the severity to make the write succeed.")
+
+    # §6.5. The review: "Every revise should carry its own exit condition. Today the reader
+    # infers it from the list of problems, which is not the same thing and is not checkable."
+    if verdict == "revise" and not approve_if:
+        raise ValueError(
+            "a 'revise' needs `approve_if`: the specific change that would make this an "
+            "approve, stated so somebody could check it against the next version. The list "
+            "of findings is not the same thing — three findings may need two changes, and "
+            "one may need three.")
+    if verdict == "approve" and approve_if:
+        raise ValueError(
+            "an 'approve' cannot carry `approve_if` — there is nothing to exit. A condition "
+            "attached to an approval is a reservation the verdict does not admit to; if "
+            "something still has to change, the verdict is 'revise'.")
+    # The one part of "testable" a validator can genuinely enforce. If there IS a set of
+    # changes that converts this to approve, then that is what 'revise' means — and letting a
+    # reject carry one lets the harsher word be used with the softer meaning.
+    if verdict == "reject" and approve_if:
+        raise ValueError(
+            "a 'reject' cannot carry `approve_if`. If naming a set of changes would make "
+            "this approvable, the verdict is 'revise' — that is the difference between the "
+            "two words. Reject is for a brief that cannot get there from here.")
 
     # Most severe first, always: the order is part of the contract, so two evaluations of
     # the same brief can be compared without re-reading them. The sort is stable, so two
@@ -1549,6 +1599,9 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
     eid = store.next_evaluation_id()
     for n, finding in enumerate(cleaned, start=1):
         finding["id"] = f"{eid}#{n}"
+    # After the ids exist, because each item points at the finding it came from — that is
+    # what lets the next version's judgment close them by id rather than by wording.
+    exit_checklist = _exit_checklist(cleaned)
 
     store.insert_evaluation(
         conn, evaluation_id=eid, subject_title=subject_title, verdict=verdict, summary=summary,
@@ -1590,6 +1643,9 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
                          for f in cleaned
                          if f.get("departure") == "possible_improvement"],
         "approve_if": approve_if,
+        # Absent rather than empty on an approve: an empty list beside an approval reads as
+        # "nothing left to do, we checked", when the truth is there was never a list.
+        **({"exit_checklist": exit_checklist} if exit_checklist else {}),
         "most_valuable_missing_input": missing,
         "disconfirming": disconfirming,
         # §5.2: the three things anyone actually does after a judgment, prefilled. The
@@ -3516,6 +3572,11 @@ def _judgment_to_check(conn, superseded: Optional[str]) -> Optional[dict]:
         "verdict": judgment.get("verdict"),
         "summary": judgment.get("summary"),
         "predictions": judgment.get("predictions"),
+        # §6.5: the exit condition, in front of the version that is supposed to meet it. "The
+        # specific, testable set of changes that converts this verdict to approve" is worth
+        # nothing if nobody sees it when the next version arrives, and §6.3 built the moment.
+        "approve_if": judgment.get("approve_if"),
+        "exit_checklist": _exit_checklist(all_findings),
         "open_findings": open_findings,
         "open_findings_total": len(all_findings),
         "ask": ("This replaces a record the library has already judged. Ask which of the "

@@ -49,12 +49,17 @@ def _judge(conn, campaign_id, peru, **over):
         campaign_id=campaign_id,
         predictions={"predicted_ctr_range": "1.2-1.8%",
                      "recommendation": "Settle the premise or the same structure returns"},
+        # §6.5: a revise says what would end it, and a finding above a note says what to
+        # do about it.
+        approve_if="One colourway per creator.",
         findings=[{"severity": "should_fix", "kind": "precedent_departure",
-                   "departure": "regression",
+                   "departure": "regression", "fix": "Seed one colourway per creator",
                    "finding": "Seeds four colourways where Peru used one",
                    "precedent": {"campaign_id": peru,
                                  "quote": "Seeded one colourway per creator"}}])
     base.update(over)
+    if base.get("verdict") != "revise":
+        base.pop("approve_if", None)
     return core.save_evaluation(conn, **base)
 
 
@@ -457,7 +462,7 @@ def test_the_quiz_is_capped(conn, peru):
     where each is recorded by id rather than as free text."""
     v1 = core.ingest_campaign(conn, title="Colombia v1", detail="Seeds four.")["campaign_id"]
     _judge(conn, v1, peru, findings=[
-        {"severity": "should_fix", "kind": "missing_information",
+        {"severity": "should_fix", "fix": "Change it", "kind": "missing_information",
          "finding": f"Gap number {n}"} for n in range(9)])
     v2 = core.ingest_campaign(conn, title="Colombia v2", supersedes=v1, detail="Seeds two.")
 

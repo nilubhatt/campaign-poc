@@ -65,12 +65,18 @@ def _evaluation(library, **over):
         subject_title="Colombia v1", verdict="revise",
         summary="A compressed flight with four colourways is a stretch.",
         cited_ids=[library["failed"]],
+        # §6.5: a revise says what would end it, and a finding above a note says what to do
+        # about it. Neither is what this file is testing.
+        approve_if="The flight is extended to six weeks.",
         findings=[{"severity": "should_fix", "kind": "precedent_departure",
-                   "departure": "regression",
+                   "departure": "regression", "fix": "Extend the flight to six weeks",
                    "finding": "Compresses the flight to three weeks",
                    "precedent": {"campaign_id": library["failed"],
                                  "quote": "compressed three-week flight"}}])
     base.update(over)
+    # An approve may not carry one, and these tests flip the verdict freely.
+    if base.get("verdict") != "revise":
+        base.pop("approve_if", None)
     return base
 
 
@@ -135,8 +141,8 @@ def test_a_library_that_cannot_argue_back_says_so(conn):
     core.ingest_campaign(conn, title="Only brief", detail="A proposal with no results.")
 
     result = core.save_evaluation(
-        conn, subject_title="Colombia v1", verdict="revise", summary="A stretch.",
-        findings=[{"severity": "should_fix", "kind": "missing_information",
+        conn, subject_title="Colombia v1", verdict="revise", approve_if="It is fixed.", summary="A stretch.",
+        findings=[{"severity": "should_fix", "fix": "Change it", "kind": "missing_information",
                    "finding": "No end date"}])
 
     check = result["disconfirming"]
@@ -275,8 +281,8 @@ def test_the_check_survives_a_database_that_predates_it(tmp_path):
     store._migrate_schema(conn)
 
     saved = core.save_evaluation(
-        conn, subject_title="Colombia v1", verdict="revise", summary="A stretch.",
-        findings=[{"severity": "should_fix", "kind": "missing_information",
+        conn, subject_title="Colombia v1", verdict="revise", approve_if="It is fixed.", summary="A stretch.",
+        findings=[{"severity": "should_fix", "fix": "Change it", "kind": "missing_information",
                    "finding": "No end date"}])
     assert saved["disconfirming"]["code"] == "nothing_to_check_against"
 
@@ -317,9 +323,9 @@ def test_a_campaign_that_resembles_nothing_is_not_called_a_contradiction(conn):
     store.update_campaign(conn, far, tags=[{"value": "performed_well", "source": "verified"}])
 
     result = core.save_evaluation(
-        conn, subject_title="Colombia v1", verdict="revise",
+        conn, subject_title="Colombia v1", verdict="revise", approve_if="It is fixed.",
         summary="Creator-led launch with four colourways and a compressed flight.",
-        findings=[{"severity": "should_fix", "kind": "missing_information",
+        findings=[{"severity": "should_fix", "fix": "Change it", "kind": "missing_information",
                    "finding": "No end date"}])
 
     assert result["disconfirming"]["code"] == "nothing_ranked"
@@ -341,9 +347,9 @@ def test_a_fourth_contradiction_is_not_hidden_by_three_cited_ones(conn):
         ids.append(cid)
 
     result = core.save_evaluation(
-        conn, subject_title="Colombia v1", verdict="revise", summary=body,
+        conn, subject_title="Colombia v1", verdict="revise", approve_if="It is fixed.", summary=body,
         cited_ids=ids[:3],
-        findings=[{"severity": "should_fix", "kind": "missing_information",
+        findings=[{"severity": "should_fix", "fix": "Change it", "kind": "missing_information",
                    "finding": "No end date"}])
 
     assert result["disconfirming"]["code"] == "contradicting_precedent"
@@ -373,8 +379,8 @@ def test_an_impression_is_not_the_counterweight_to_a_verdict(conn):
                                   detail=body, tags=["performed_well"])["campaign_id"]
 
     result = core.save_evaluation(
-        conn, subject_title="Colombia v1", verdict="revise", summary=body,
-        findings=[{"severity": "should_fix", "kind": "missing_information",
+        conn, subject_title="Colombia v1", verdict="revise", approve_if="It is fixed.", summary=body,
+        findings=[{"severity": "should_fix", "fix": "Change it", "kind": "missing_information",
                    "finding": "No end date"}])
 
     assert result["disconfirming"]["code"] == "nothing_to_check_against"
@@ -387,9 +393,9 @@ def test_a_verdict_that_rests_on_a_broken_rule_is_not_argued_with(conn, library)
     thing most likely to change what the marketer does" undoes that from the next field
     over. It is a question about the rule, for whoever owns the rulebook."""
     result = core.save_evaluation(
-        conn, subject_title="Colombia v1", verdict="revise",
+        conn, subject_title="Colombia v1", verdict="revise", approve_if="It is fixed.",
         summary="Uses AI-generated imagery.", cited_ids=[],
-        findings=[{"severity": "blocking", "kind": "guardrail_breach",
+        findings=[{"severity": "blocking", "fix": "Change it", "kind": "guardrail_breach",
                    "finding": "Uses AI-generated imagery",
                    "precedent": {"rule_id": library["rules"],
                                  "quote": "No AI-generated imagery"}}])
@@ -403,12 +409,12 @@ def test_a_verdict_with_a_debatable_half_is_still_argued_with(conn, library):
     leaves something to argue about."""
     body = "Creator-led launch with four colourways and a compressed three-week flight."
     result = core.save_evaluation(
-        conn, subject_title="Colombia v1", verdict="revise", summary=body, cited_ids=[],
-        findings=[{"severity": "blocking", "kind": "guardrail_breach",
+        conn, subject_title="Colombia v1", verdict="revise", approve_if="It is fixed.", summary=body, cited_ids=[],
+        findings=[{"severity": "blocking", "fix": "Change it", "kind": "guardrail_breach",
                    "finding": "Uses AI-generated imagery",
                    "precedent": {"rule_id": library["rules"],
                                  "quote": "No AI-generated imagery"}},
-                  {"severity": "should_fix", "kind": "precedent_departure",
+                  {"severity": "should_fix", "fix": "Change it", "kind": "precedent_departure",
                    "departure": "regression", "finding": "Compresses the flight",
                    "precedent": {"campaign_id": library["failed"],
                                  "quote": "compressed three-week flight"}}])
@@ -426,8 +432,8 @@ def test_the_check_names_what_would_make_it_possible(conn):
     core.add_metrics(conn, campaign_id=cid, detail="CTR 3.4 percent, above benchmark.")
 
     result = core.save_evaluation(
-        conn, subject_title="Colombia v1", verdict="revise", summary="A stretch.",
-        findings=[{"severity": "should_fix", "kind": "missing_information",
+        conn, subject_title="Colombia v1", verdict="revise", approve_if="It is fixed.", summary="A stretch.",
+        findings=[{"severity": "should_fix", "fix": "Change it", "kind": "missing_information",
                    "finding": "No end date"}])
 
     check = result["disconfirming"]
@@ -507,8 +513,8 @@ def test_more_than_one_contradiction_is_reported(conn):
         ids.append(cid)
 
     result = core.save_evaluation(
-        conn, subject_title="Colombia v1", verdict="revise", summary=body,
-        findings=[{"severity": "should_fix", "kind": "missing_information",
+        conn, subject_title="Colombia v1", verdict="revise", approve_if="It is fixed.", summary=body,
+        findings=[{"severity": "should_fix", "fix": "Change it", "kind": "missing_information",
                    "finding": "No end date"}])
 
     assert sorted(result["disconfirming"]["uncited"]) == sorted(ids)
@@ -526,8 +532,8 @@ def test_a_library_whose_only_measured_record_is_the_rulebook_cannot_argue(conn)
                           tags=[{"value": "performed_well", "source": "verified"}])
 
     result = core.save_evaluation(
-        conn, subject_title="Colombia v1", verdict="revise", summary=body,
-        findings=[{"severity": "should_fix", "kind": "missing_information",
+        conn, subject_title="Colombia v1", verdict="revise", approve_if="It is fixed.", summary=body,
+        findings=[{"severity": "should_fix", "fix": "Change it", "kind": "missing_information",
                    "finding": "No end date"}])
 
     assert result["disconfirming"]["code"] == "nothing_to_check_against"

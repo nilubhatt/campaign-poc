@@ -56,6 +56,11 @@ def _evaluation(finding, **over):
     # tests are about the QUOTE, so the classification is filled in here rather than repeated
     # in sixty places — a departure whose direction is not the point is `unexplained`.
     finding = dict(finding)
+    # §6.5 requires a `fix` above a note and an `approve_if` on a revise. Neither is what
+    # these tests are about, so both are filled in here rather than in sixty places.
+    if finding.get("severity") in ("blocking", "should_fix"):
+        finding.setdefault("fix", "Change it")
+    base_approve_if = "The quote is corrected."
     if finding.get("kind") == "precedent_departure":
         # `unexplained` cannot be blocking — a question does not on its own stop a brief —
         # so a blocking fixture is a `regression`. Neither is what these tests are about.
@@ -66,6 +71,7 @@ def _evaluation(finding, **over):
         "subject_title": "Colombia v2",
         "verdict": "revise",
         "summary": "Nothing is dated.",
+        "approve_if": base_approve_if,
         "findings": [finding],
     }
     base.update(over)
@@ -318,8 +324,8 @@ def test_the_refusal_reaches_the_model_over_the_protocol(conn, peru):
     import mcp_server
 
     refused = mcp_server.save_evaluation(
-        subject_title="Colombia v2", verdict="revise", summary="Nothing is dated.",
-        findings=[{"severity": "blocking", "kind": "precedent_departure",
+        subject_title="Colombia v2", verdict="revise", approve_if="It is fixed.", summary="Nothing is dated.",
+        findings=[{"severity": "blocking", "fix": "Change it", "kind": "precedent_departure",
                    "departure": "regression", "finding": "Undated deliverables",
                    "precedent": {"campaign_id": peru,
                                  "quote": "a sentence nobody wrote"}}])
@@ -338,8 +344,8 @@ def test_a_faithful_quote_goes_through_the_tool_too(conn, peru):
     import mcp_server
 
     saved = mcp_server.save_evaluation(
-        subject_title="Colombia v2", verdict="revise", summary="Nothing is dated.",
-        findings=[{"severity": "blocking", "kind": "precedent_departure",
+        subject_title="Colombia v2", verdict="revise", approve_if="It is fixed.", summary="Nothing is dated.",
+        findings=[{"severity": "blocking", "fix": "Change it", "kind": "precedent_departure",
                    "departure": "regression", "finding": "Undated deliverables",
                    "precedent": {"campaign_id": peru, "quote": "posting date"}}])
 
@@ -628,7 +634,7 @@ def test_the_headline_precedent_is_checked_too(conn, peru):
 
     assert core.save_evaluation(
         conn, closest_precedent={"campaign_id": peru, "similarity": 0.91},
-        **_evaluation({"severity": "blocking", "kind": "missing_information",
+        **_evaluation({"severity": "blocking", "fix": "Change it", "kind": "missing_information",
                        "finding": "No end date"}))["evaluation_id"]
 
 
@@ -647,8 +653,8 @@ def test_the_missing_quote_message_survives_the_transport(conn, peru):
     import asyncio
 
     refused = asyncio.run(_call("save_evaluation", {
-        "subject_title": "Colombia v2", "verdict": "revise", "summary": "Nothing is dated.",
-        "findings": [{"severity": "blocking", "kind": "precedent_departure",
+        "subject_title": "Colombia v2", "verdict": "revise", "approve_if": "It is fixed.", "summary": "Nothing is dated.",
+        "findings": [{"severity": "blocking", "fix": "Change it", "kind": "precedent_departure",
                       "departure": "regression", "finding": "Undated deliverables",
                       "precedent": {"campaign_id": peru}}]}))
 
@@ -840,13 +846,13 @@ def test_the_headline_precedent_is_cleaned_not_echoed(conn, peru):
     with pytest.raises(ValueError) as e:
         core.save_evaluation(
             conn, closest_precedent={"campaign_id": peru, "verified": True},
-            **_evaluation({"severity": "blocking", "kind": "missing_information",
+            **_evaluation({"severity": "blocking", "fix": "Change it", "kind": "missing_information",
                            "finding": "No end date"}))
     assert "server" in str(e.value)
 
     saved = core.save_evaluation(
         conn, closest_precedent={"id": peru, "similarity": 0.91, "junk": "x" * 5000},
-        **_evaluation({"severity": "blocking", "kind": "missing_information",
+        **_evaluation({"severity": "blocking", "fix": "Change it", "kind": "missing_information",
                        "finding": "No end date"}))
     stored = store.get_evaluation(conn, saved["evaluation_id"])["closest_precedent"]
     assert stored == {"campaign_id": peru, "layer": "body", "similarity": 0.91}
@@ -858,10 +864,10 @@ def test_an_unknown_layer_on_the_headline_precedent_reaches_the_model(conn, peru
     message discarded. That decorator exists for exactly this."""
     import asyncio
     refused = asyncio.run(_call("save_evaluation", {
-        "subject_title": "Colombia v2", "verdict": "revise", "summary": "Nothing is dated.",
+        "subject_title": "Colombia v2", "verdict": "revise", "approve_if": "It is fixed.", "summary": "Nothing is dated.",
         "closest_precedent": {"campaign_id": peru, "layer": "hearsay",
                               "quote": "content angle, posting date"},
-        "findings": [{"severity": "blocking", "kind": "missing_information",
+        "findings": [{"severity": "blocking", "fix": "Change it", "kind": "missing_information",
                       "finding": "No end date"}]}))
     assert "error" in refused, refused
     assert "hearsay" in refused["error"]
@@ -947,5 +953,5 @@ def test_a_similarity_has_to_be_a_real_number(conn, peru, similarity):
     with pytest.raises(ValueError):
         core.save_evaluation(
             conn, closest_precedent={"campaign_id": peru, "similarity": similarity},
-            **_evaluation({"severity": "blocking", "kind": "missing_information",
+            **_evaluation({"severity": "blocking", "fix": "Change it", "kind": "missing_information",
                            "finding": "No end date"}))

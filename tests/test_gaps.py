@@ -324,9 +324,9 @@ def test_the_verdict_itself_says_what_would_most_change_it(conn):
     cid = _concluded(conn, "Peru seeding", detail="influencer seeding")
 
     result = core.save_evaluation(
-        conn, subject_title="Colombia seeding", verdict="revise",
+        conn, subject_title="Colombia seeding", verdict="revise", approve_if="It is fixed.",
         summary="Nothing is dated.", cited_ids=[cid],
-        findings=[{"severity": "blocking", "kind": "missing_information",
+        findings=[{"severity": "blocking", "fix": "Change it", "kind": "missing_information",
                    "finding": "No dates"}])
 
     missing = result["most_valuable_missing_input"]
@@ -352,8 +352,8 @@ def test_the_line_survives_to_be_read_back_later(conn):
     cid = _concluded(conn, "Peru seeding", detail="influencer seeding")
 
     saved = core.save_evaluation(
-        conn, subject_title="Colombia", verdict="revise", summary="Nothing is dated.",
-        cited_ids=[cid], findings=[{"severity": "blocking", "kind": "missing_information",
+        conn, subject_title="Colombia", verdict="revise", approve_if="It is fixed.", summary="Nothing is dated.",
+        cited_ids=[cid], findings=[{"severity": "blocking", "fix": "Change it", "kind": "missing_information",
                    "finding": "No dates"}])
 
     stored = store.get_evaluation(conn, saved["evaluation_id"])

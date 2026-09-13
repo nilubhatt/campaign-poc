@@ -1509,9 +1509,35 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       *And it was not on the read path.* "Recorded so it can be audited" was true of the
       table and false of the surface: `get_evaluation` did not return it, so from the tool
       side the check lived for exactly one response.
-- [ ] **6.5 (K) `approve_if`** — the testable exit condition that converts revise → approve.
-      *2.4 defined and bounded the field; what remains is requiring it on a revise, forbidding
-      it on an approve, and requiring a `fix` on every blocking/should_fix finding.*
+- [x] **6.5 (K) `approve_if`** — the testable exit condition that converts revise → approve.
+      **Required on a revise, forbidden on an approve — and forbidden on a reject**, which the
+      review does not say and which is the one part of "testable" a validator can genuinely
+      enforce. If naming a set of changes would make a brief approvable, that is what "revise"
+      means; letting a reject carry an exit condition lets the harsher word be used with the
+      softer meaning. An `approve_if` on an approve is a reservation the verdict does not
+      admit to — §2.4 removed the same hedge from a different field.
+      **A `fix` on every finding above a note** (D2's other half). A finding at blocking or
+      should_fix is a claim that something must change, and without a `fix` the reader has the
+      complaint and not the remedy.
+      **The checklist is what makes it testable.** The review asks for an exit condition that
+      is "testable" and that "doubles as the note the partner receives", and those are one
+      requirement: a sentence cannot be ticked off and a list can. `exit_checklist` is
+      composed by the SERVER from the `fix` lines the findings already carry — not written
+      separately, because a hand-written checklist beside a findings array is two sources of
+      truth for one thing, which is the failure this project has hit four times. Each item
+      points at the finding it came from, so a later version can close them by id. Absent
+      rather than empty on an approve: an empty list reads as "nothing left to do, we
+      checked", when the truth is there was never a list.
+      **And it reaches the version that is supposed to meet it.** §6.3 built the moment a
+      superseding record arrives; the exit condition and the checklist ride along with it, and
+      both are on the read path. An exit condition nobody sees when the next version lands is
+      a sentence in a database.
+      *One tension this surfaced, worth recording:* §6.2 says an `unexplained` departure must
+      be asked about rather than corrected, and §6.5 requires a `fix` on it. The resolution is
+      that for an unexplained departure the action IS an answer — "say whether four colourways
+      is deliberate" — which is a real, checkable thing to do and not an instruction to undo
+      what the finding has just said may be deliberate. The worked example says so.
+      Closes D2.
 - [ ] **6.6 (L) Evidence-strength line** on every judgment — how many precedents, concluded,
       verified; top similarity; whether one match dominates.
 

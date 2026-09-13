@@ -501,9 +501,11 @@ def test_a_finding_can_cite_a_comment_and_has_to_say_that_it_did(conn, cited_rec
     with a green tick."""
     result = core.save_evaluation(
         conn, subject_title="Colombia v2", verdict="revise",
+        approve_if="The timeline is extended.",
         summary="Reuses a timeline the Peru team themselves flagged as unrealistic.",
         findings=[{
             "severity": "should_fix",
+            "fix": "Change it",
             "kind": "precedent_departure",
             "departure": "regression",
             "finding": "Same six-week timeline Peru's own reviewer called unrealistic",
@@ -522,8 +524,8 @@ def test_a_precedent_defaults_to_the_deck_body(conn, cited_records):
     """Unmarked means the brief itself, which is the safe reading: a citation that silently
     became commentary would be the defect this field exists to prevent."""
     result = core.save_evaluation(
-        conn, subject_title="Colombia v2", verdict="revise", summary="Nothing is dated.",
-        findings=[{"severity": "blocking", "kind": "precedent_departure",
+        conn, subject_title="Colombia v2", verdict="revise", approve_if="It is fixed.", summary="Nothing is dated.",
+        findings=[{"severity": "blocking", "fix": "Change it", "kind": "precedent_departure",
                    "departure": "regression", "finding": "No dates",
                    "precedent": {"campaign_id": "camp_x", "quote": "posting date per asset"}}])
 
@@ -534,8 +536,8 @@ def test_a_precedent_defaults_to_the_deck_body(conn, cited_records):
 def test_an_unknown_layer_is_rejected(conn):
     with pytest.raises(ValueError) as exc:
         core.save_evaluation(
-            conn, subject_title="T", verdict="revise", summary="s",
-            findings=[{"severity": "blocking", "kind": "precedent_departure",
+            conn, subject_title="T", verdict="revise", approve_if="It is fixed.", summary="s",
+            findings=[{"severity": "blocking", "fix": "Change it", "kind": "precedent_departure",
                        "departure": "regression", "finding": "x",
                        "precedent": {"campaign_id": "c", "quote": "q", "layer": "hearsay"}}])
 

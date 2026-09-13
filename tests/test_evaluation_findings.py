@@ -59,6 +59,7 @@ def cited_records(conn):
 def _finding(**over):
     base = {
         "severity": "blocking",
+        "fix": "Change it",
         # §6.2: `kind` is required on every finding, and a precedent_departure has to say
         # which way it departs. The default here cites a campaign, so it is a departure whose
         # direction these tests do not turn on.
@@ -84,9 +85,14 @@ def _evaluation(**over):
         "verdict": "revise",
         "summary": "Solid activation plan, but nothing is dated and the influencer roster "
                    "has an unresolved conflict.",
+        # §6.5: a revise says what would end it, and this file's default verdict is revise.
+        # Dropped below when a caller flips the verdict, because an approve may not carry one.
+        "approve_if": "Dates on every deliverable and the conflicted profile removed.",
         "findings": [_finding()],
     }
     base.update(over)
+    if base.get("verdict") != "revise":
+        base.pop("approve_if", None)
     return base
 
 
@@ -170,7 +176,7 @@ def test_an_evaluation_with_no_findings_must_not_be_a_revise(conn):
     """A verdict of revise with nothing to revise is not actionable, and is the shape a
     model falls into when it is hedging."""
     with pytest.raises(ValueError) as exc:
-        core.save_evaluation(conn, **_evaluation(verdict="revise", findings=[]))
+        core.save_evaluation(conn, **_evaluation(verdict="revise", approve_if="It is fixed.", findings=[]))
 
     assert "finding" in str(exc.value).lower()
 
@@ -527,7 +533,7 @@ def test_a_revise_needs_something_above_a_note(conn):
     """The original rule counted findings of any severity, so three notes satisfied a
     'revise' - the same hedge one level down."""
     with pytest.raises(ValueError) as exc:
-        core.save_evaluation(conn, **_evaluation(verdict="revise", findings=[
+        core.save_evaluation(conn, **_evaluation(verdict="revise", approve_if="It is fixed.", findings=[
             _finding(severity="note", finding="Consider a second colourway")]))
 
     assert "note" in str(exc.value).lower()

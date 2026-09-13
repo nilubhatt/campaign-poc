@@ -39,7 +39,9 @@ def _finding(text, **over):
     # across two versions of a brief, not about classifying them — `missing_information` is
     # the kind that needs no citation, so the fixtures stay about what they are testing.
     base = {"severity": "blocking", "kind": "missing_information",
-            "category": "timeline", "finding": text}
+            "category": "timeline", "finding": text,
+            # §6.5: a finding above a note says what to do about it.
+            "fix": "Fix it"}
     base.update(over)
     return base
 
@@ -53,7 +55,13 @@ def _judge(conn, campaign_id, findings, **over):
     payload = {"subject_title": "a version", "verdict": "revise" if findings else "approve",
                "summary": "A summary of what this version got right and wrong.",
                "campaign_id": campaign_id, "findings": findings}
+    # §6.5: a revise says what would end it, an approve may not. Neither is what this file
+    # tests, so the helper tracks the verdict rather than every call site restating it.
+    if payload["verdict"] == "revise":
+        payload["approve_if"] = "The findings above are addressed."
     payload.update(over)
+    if payload.get("verdict") != "revise":
+        payload.pop("approve_if", None)
     return core.save_evaluation(conn, **payload)
 
 
