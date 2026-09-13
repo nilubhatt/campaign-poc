@@ -812,6 +812,15 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
     and `note` says the register for each. `improvements` carries the possible improvements
     separately, because the rule that makes them notes also keeps them out of `findings`.
 
+    **The server checks your verdict against the other side.** After you save, it searches
+    for precedent that CONTRADICTS the verdict — campaigns resembling this one that worked
+    anyway when you said revise, or that failed when you said approve, counting only measured
+    results rather than impressions. It comes back as `disconfirming`, with the measured line
+    behind each. Read it before you speak: if it found something the judgment did not cite,
+    say so before you give the verdict. And read the `code` rather than the absence of rows —
+    "could not be checked" and "nothing came back" are opposite conclusions. You cannot write
+    this field; a check you report on yourself is not a check.
+
     `approve_if` is what would flip a `revise` to `approve`, stated so someone could check
     it: "dates on every deliverable and the two conflicted profiles removed". It doubles as
     the note the partner receives.
@@ -984,7 +993,7 @@ def get_evaluation(evaluation_id: str, severity: Optional[Severity] = None,
     ("guardrail_breach") or `departure` ("possible_improvement") rather than fetching
     everything and filtering in the reply.
 
-    `by_class` and `how_to_say_it` come back with it, so a judgment read in a later session
+    `disconfirming`, `by_class` and `how_to_say_it` come back with it, so a judgment read in a later session
     is voiced the same way it was when it was written — a rule breach stated, a departure
     asked about. `improvements` lists the departures somebody thought were better than the
     precedent; those are notes by rule, so they are easy to miss in the findings list.

@@ -1468,6 +1468,47 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       `did_not_work` / `unknown` by measured result, instead of handing over one ranked list
       in which the strongest match sets the tone. The save-time search records
       overconfidence; this is the part that can prevent it.
+      **From review, and the first finding falsified the item's own headline sentence.** The
+      search queried the JUDGMENT'S OWN PROSE — summary plus finding lines — and then called
+      what came back "precedent resembling this one": a claim about the brief, made from a
+      search over the complaint about it. A verdict reading "budget is thin" about a
+      Mexico-shaped brief does not retrieve Mexico. It queries the subject record where the
+      subject is a stored record, says `query: "judgment_text"` where it is not, and D86 owes
+      7.2 the case where a brief is judged before it is filed.
+      *And the preventive half was a partition, not a search.* `outcomes` sorted the top-5
+      the reasoner had already seen — so on any real library the five nearest are five
+      records nobody tagged, both poles come back empty, and the reasoner has seen nothing
+      contradictory. That is the state the review describes, dressed as the fix for it. Each
+      pole is now its own filtered search, because a filter runs before ranking and a
+      partition cannot reach past it.
+      *An embedder outage read as a verdict that survived scrutiny.* `embedding.Unavailable`
+      is a `ValueError`, so it was swallowed into "nothing came back" and the note then said
+      the verdict "was argued against and it held" — the exact collapse this item exists to
+      prevent, arriving on the failure that actually happens, which is Ollama not running.
+      *There was no similarity floor,* so a single-market print campaign came back at
+      similarity 0.0 as precedent "resembling" a creator-led launch. Once a library holds one
+      measured campaign per pole that fires on every save: the always-on field nobody reads.
+      *And `top_k` truncated before the cited filter,* so three cited campaigns filled the
+      window and a fourth, genuinely uncited, was never looked at — reported as "nothing
+      contradicted it". The cited ones are excluded from the candidates now.
+      *Five codes, not three.* Two of the original three covered states meaning opposite
+      things. `nothing_contradicted_it` in particular claimed "the verdict was argued against
+      and it held" on the strength of one filtered query — §6.1 was made to narrow `checked`
+      to exactly what it established, and this was doing the reverse.
+      *It was arguing with rules.* A `revise` resting only on `guardrail_breach` searched for
+      "precedent that worked anyway" and told the model it was "most likely to change what
+      the marketer does" — undoing §6.2 from the next field over. A rule is not a matter of
+      precedent; whether some campaign broke it and did well is a question for whoever owns
+      the rulebook. Exempt only when the verdict rests ENTIRELY on rules.
+      *`reference` records were precedent,* which nothing else in this codebase allows.
+      *`nothing_to_check_against` named no way out,* while every other `cannot` here names
+      the record that would lift it — it now carries the concluded, measured campaigns that
+      nobody has tagged, which is one `update_campaign` away.
+      *`uncited` was bare ids,* so a model mirroring the shape says "camp_8701e96a" rather
+      than "Mexico launch, performed_well, CTR 3.4% against a 1.8% benchmark".
+      *And it was not on the read path.* "Recorded so it can be audited" was true of the
+      table and false of the surface: `get_evaluation` did not return it, so from the tool
+      side the check lived for exactly one response.
 - [ ] **6.5 (K) `approve_if`** — the testable exit condition that converts revise → approve.
       *2.4 defined and bounded the field; what remains is requiring it on a revise, forbidding
       it on an approve, and requiring a `fix` on every blocking/should_fix finding.*

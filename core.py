@@ -907,18 +907,37 @@ def _how_to_say_it(by_class: dict, findings: list) -> str:
 
 
 def _say_the_disconfirming_check(check: dict) -> str:
-    """§6.4 makes overconfidence visible, which it can only do if somebody is told."""
-    if check["code"] == "contradicting_precedent":
+    """§6.4 makes overconfidence visible, which it can only do if somebody is told.
+
+    One sentence per code, and there are five because five different things can have
+    happened. The first version had three, two of which covered states meaning the opposite
+    of each other — an embedder outage came back as "the verdict was argued against and it
+    held", which is the collapse this item exists to prevent, on the failure that actually
+    happens.
+    """
+    code = check["code"]
+    if code == "contradicting_precedent":
         return (" The server searched for precedent that CONTRADICTS this verdict and found "
-                f"{len(check['uncited'])} the judgment did not cite — see `disconfirming`. "
-                "Say so before the verdict: a campaign that looked like this and went the "
-                "other way is the one thing most likely to change what the marketer does.")
-    if check["code"] == "nothing_to_check_against":
-        return (" The server could not check this verdict against the other side: nothing in "
-                "the library has measured results pointing that way. Say that the check was "
-                "not possible — do NOT say nothing contradicted it.")
-    return (" The server searched for precedent contradicting this verdict and found none. "
-            "That is worth one sentence: the verdict was argued against and it held.")
+                f"{len(check['uncited'])} the judgment did not cite — see `disconfirming`, "
+                "which carries the measured result behind each. Say so before the verdict: a "
+                "campaign that looked like this and went the other way is the one thing most "
+                "likely to change what the marketer does.")
+    if code == "could_not_check":
+        return (" The search for contradicting precedent COULD NOT RUN. Do not report this "
+                "verdict as unchallenged — nothing was checked.")
+    if code == "nothing_to_check_against":
+        return (" This verdict could not be checked against the other side: no campaign in "
+                "the library carries a measured performance verdict. Say the check was not "
+                "possible — do NOT say nothing contradicted it. `could_be_checked_if` names "
+                "the campaigns that would make it possible.")
+    if code == "verdict_rests_on_a_rule":
+        return (" No disconfirming search was run: this verdict rests only on rules that were "
+                "broken, and a rule is not a matter of precedent.")
+    # nothing_ranked — checked, and nothing close enough came back.
+    return (" The server searched for precedent contradicting this verdict. Campaigns with "
+            "measured results pointing the other way exist, and none of them resembles this "
+            "brief closely enough to argue with it. Worth one sentence, and no more than "
+            "one: what was checked is similarity, not the merits.")
 
 
 # §6.4: which way a verdict has to be argued with. A negative verdict is contradicted by
@@ -931,30 +950,43 @@ _DISCONFIRMING = {
     "approve": ("precedent_that_failed", "underperformed"),
 }
 _MAX_DISCONFIRMING = 3
+# Below this, "resembling this one" is not a sentence anybody can defend. `find_similar` has
+# no cutoff — with a tag filter it ranks every candidate and slices — so the first version
+# reported a single-market print campaign at similarity 0.0 as precedent resembling a
+# creator-led launch, and told the model to raise it before the verdict. Once a library holds
+# one measured campaign per pole, that fires on every save: the always-on field nobody reads.
+_DISCONFIRMING_FLOOR = 0.25
 
 
-def _both_poles(evidence: list) -> dict:
-    """The same retrieved evidence, split by what actually happened (§6.4).
+def _pole_search(conn, *, tag: str, text: Optional[str] = None,
+                 campaign_id: Optional[str] = None, top_k: int,
+                 exclude: Optional[set] = None) -> list:
+    """The most similar records with a MEASURED verdict of one kind, above the floor.
 
-    Only `verified` performance tags count. A `performed_well` somebody typed is an
-    impression, and weighing an impression as the counterweight to a verdict is the failure
-    tag provenance exists to prevent. A record with no verified performance tag is in
-    neither pole — `unknown` is the honest third bucket, and it is usually the biggest.
+    `verified` only: a performance tag somebody typed is an impression, and an impression
+    cannot be the counterweight to a judgment. `reference` records are dropped — the rulebook
+    is not precedent, and nothing else here treats it as any.
     """
-    poles: dict = {"worked": [], "did_not_work": [], "unknown": []}
-    for row in evidence:
-        verified = {t.get("value") for t in (row.get("tags") or [])
-                    if t.get("source") == "verified"}
-        where = ("worked" if "performed_well" in verified
-                 else "did_not_work" if "underperformed" in verified
-                 else "unknown")
-        poles[where].append({"campaign_id": row["campaign_id"], "title": row["title"],
-                             "similarity": row["similarity"]})
-    return poles
+    exclude = exclude or set()
+    try:
+        matches = find_similar(conn, text=text, campaign_id=campaign_id,
+                               top_k=top_k + len(exclude) + _MAX_DISCONFIRMING,
+                               tags=[{"value": tag, "source": "verified"}],
+                               full_detail=False)
+    except embedding.Unavailable:
+        raise
+    except ValueError:
+        return []
+    kept = [m for m in matches
+            if m["campaign_id"] not in exclude
+            and m.get("record_type") != "reference"
+            and (m.get("similarity") or 0) >= _DISCONFIRMING_FLOOR]
+    return kept[:top_k]
 
 
-def _disconfirming_search(conn, *, verdict: str, text: str,
-                          cited_ids: Optional[list]) -> dict:
+def _disconfirming_search(conn, *, verdict: str, subject_text: str, query_basis: str,
+                          cited_ids: Optional[list], by_class: dict,
+                          subject_campaign_id: Optional[str] = None) -> dict:
     """One query for precedent that contradicts this verdict, run by the SERVER (§6.4).
 
     The review asked for the search and for the result to be recorded, "including nothing".
@@ -965,66 +997,155 @@ def _disconfirming_search(conn, *, verdict: str, text: str,
     question twice already, in `basis` and in `precedent.checked`: a check is only worth
     anything if a difference in it is a bug, which holds only when the server did it.
 
-    Restricted to `verified` performance tags — a tag somebody typed is an impression, and
-    weighing an impression as the counterweight to a verdict is the unverified-evidence
-    failure tag provenance exists to prevent.
+    Every branch returns a `code`, and there are five of them because there are five
+    genuinely different things that can have happened. The first version had three, and
+    review found two of them covering states that mean opposite things.
     """
+    def outcome(code, what_it_means, **extra):
+        return {"looked_for": looked_for, "query": query_basis, "basis": "computed",
+                "found": [], "uncited": [], "code": code,
+                "what_it_means": what_it_means, **extra}
+
     looked_for, tag = _DISCONFIRMING[verdict]
+    # A verdict resting only on broken rules is not open to this argument, and §6.2 spent a
+    # whole item saying so. "A campaign that broke the rule and performed anyway" is real
+    # information — for whoever owns the rulebook (§12.1), not as a reason to reconsider the
+    # breach. Voicing it as verdict-changing would undo 6.2 from the next field over.
+    if verdict != "approve" and by_class and set(by_class) == {"not_debatable"}:
+        return outcome(
+            "verdict_rests_on_a_rule",
+            "This verdict rests only on rules that were broken, which is not a matter of "
+            "precedent. Whether some past campaign broke the same rule and did well is a "
+            "question about the rule, not about this brief.")
     # This runs on EVERY save, so it has to survive a database that predates the columns it
     # reads. An upgraded v0.2.0 schema has no `tags`, and the first version of this crashed
-    # every judgment on exactly the machine the review was gathered on — the same lesson
-    # §6.1's `text_on_file` learned, one function over.
+    # every judgment on exactly the machine the review was gathered on.
     if not {"tags", "markets"} <= set(store._columns(conn, "campaigns")):
-        return {
-            "looked_for": looked_for, "found": [], "uncited": [], "basis": "computed",
-            "code": "nothing_to_check_against",
-            "what_it_means": ("This library predates performance tagging, so nothing in it "
-                              "carries a measured verdict that could contradict this one. "
-                              "That is a fact about the library, NOT a check this judgment "
-                              "passed."),
-        }
-    # Whether the library COULD argue back at all, asked before asking whether it did. An
-    # empty shelf reported as a clean check turns an absence of evidence into a supporting
-    # vote, and those are opposite conclusions about the same judgment.
-    possible = store.filter_campaign_ids(conn, tags=[{"value": tag, "source": "verified"}])
+        return outcome(
+            "nothing_to_check_against",
+            "This library predates performance tagging, so nothing in it carries a measured "
+            "verdict that could contradict this one. That is a fact about the library, NOT a "
+            "check this judgment passed.")
+    # Whether the library COULD argue back, asked before whether it did. An empty shelf
+    # reported as a clean check turns an absence of evidence into a supporting vote.
+    possible = [cid for cid in store.filter_campaign_ids(
+        conn, tags=[{"value": tag, "source": "verified"}])
+        if (store.get_campaign(conn, cid) or {}).get("record_type") != "reference"]
     if not possible:
-        return {
-            "looked_for": looked_for, "found": [], "uncited": [], "basis": "computed",
-            "code": "nothing_to_check_against",
-            "what_it_means": (
-                f"Nothing in the library is tagged {tag!r} with measured results behind it, "
-                f"so there is no precedent that could contradict this verdict. That is a "
-                f"fact about the library, NOT a check this judgment passed."),
-        }
-    try:
-        matches = find_similar(conn, text=text, top_k=_MAX_DISCONFIRMING,
-                               tags=[{"value": tag, "source": "verified"}],
-                               full_detail=False)
-    except ValueError:
-        matches = []
+        return outcome(
+            "nothing_to_check_against",
+            f"No campaign in the library is tagged {tag!r} with measured results behind it, "
+            f"so there is no precedent that could contradict this verdict. That is a fact "
+            f"about the library, NOT a check this judgment passed.",
+            could_be_checked_if=_campaigns_that_could_be_tagged(conn))
     already = set(cited_ids or [])
+    try:
+        # The cited ones are excluded from the CANDIDATES, not filtered out afterwards.
+        # Filtering after the slice meant three cited campaigns filled `top_k` and a fourth,
+        # genuinely uncited and contradicting, was never looked at — and the answer came back
+        # "nothing contradicted it".
+        uncited_matches = _pole_search(
+            conn, tag=tag, top_k=_MAX_DISCONFIRMING, exclude=already | {subject_campaign_id},
+            **({"campaign_id": subject_campaign_id} if subject_campaign_id
+               else {"text": subject_text}))
+    except embedding.Unavailable as exc:
+        # A fourth outcome, and the most likely real one: Ollama is not running. `Unavailable`
+        # is a ValueError, so the first version swallowed it into "nothing came back" and
+        # then said the verdict "was argued against and it held" — the exact collapse this
+        # item was written to prevent, on the failure that actually happens.
+        return outcome(
+            "could_not_check",
+            f"The search for contradicting precedent could not run ({exc}). Nothing was "
+            f"checked — do not report this verdict as unchallenged.")
     found = [{"campaign_id": m["campaign_id"], "title": m["title"],
-              "similarity": m["similarity"], "cited": m["campaign_id"] in already}
-             for m in matches]
-    uncited = [row["campaign_id"] for row in found if not row["cited"]]
+              "similarity": m["similarity"], "tag": tag,
+              "why_it_contradicts": _why_it_contradicts(conn, m["campaign_id"], tag)}
+             for m in uncited_matches]
+    if not found:
+        return outcome(
+            "nothing_ranked",
+            f"{len(possible)} campaign(s) are tagged {tag!r} with measured results, and none "
+            f"the judgment had not already cited resembles this one closely enough to argue "
+            f"with it.")
     return {
-        "looked_for": looked_for,
+        "looked_for": looked_for, "query": query_basis, "basis": "computed",
         "found": found,
-        # The point is not the record, it is the noticing: a contradicting campaign the
-        # judgment never cited is the Mexico case — the reasoner never retrieved it, so it
-        # never had to explain it away. One it DID cite has already been weighed, and
-        # throwing that back would train the reader to skip the field.
-        "uncited": uncited,
-        "basis": "computed",
-        "code": "contradicting_precedent" if uncited else "nothing_contradicted_it",
+        # Rich rows, not bare ids: a model mirroring the shape of a result says what the shape
+        # contains, and "camp_8701e96a" is not the thing most likely to change what the
+        # marketer does. "Mexico launch, performed_well, CTR 3.4% vs 1.8% benchmark" is.
+        "uncited": [row["campaign_id"] for row in found],
+        "code": "contradicting_precedent",
         "what_it_means": (
-            f"{len(uncited)} campaign(s) resembling this one are tagged {tag!r} with measured "
-            f"results, and this judgment did not cite them. Say so."
-            if uncited else
-            f"Nothing in the library resembling this one is tagged {tag!r} with measured "
-            f"results behind it. The verdict was checked against the case for the other side "
-            f"and nothing came back."),
+            f"{len(found)} campaign(s) resembling this one are tagged {tag!r} with measured "
+            f"results, and this judgment did not cite them. Say so."),
     }
+
+
+def _both_poles(conn, *, evidence: list, text: Optional[str],
+                campaign_id: Optional[str]) -> dict:
+    """What worked and what did not, each retrieved in its OWN right (§6.4).
+
+    The first version partitioned the evidence list that had already been retrieved — and
+    review's objection is exact: on any real library the five nearest by similarity are five
+    records nobody has tagged, both poles come back empty, and the reasoner has seen nothing
+    contradictory. That is the state the review describes, dressed as a fix for it. A
+    partition of a ranked list cannot reach past the ranking; only a filtered search can.
+
+    So each pole is a search with the tag as a FILTER, which runs before ranking. `unknown`
+    stays a partition of what was retrieved, because that is exactly what it is: the rest of
+    the evidence, whose outcome nobody recorded.
+    """
+    ranked = {row["campaign_id"] for row in evidence}
+    poles: dict = {}
+    for pole, tag in (("worked", "performed_well"), ("did_not_work", "underperformed")):
+        try:
+            matches = _pole_search(conn, tag=tag, text=text, campaign_id=campaign_id,
+                                   top_k=_MAX_DISCONFIRMING,
+                                   exclude={campaign_id} if campaign_id else set())
+        except embedding.Unavailable:
+            matches = []
+        poles[pole] = [{"campaign_id": m["campaign_id"], "title": m["title"],
+                        "similarity": m["similarity"],
+                        # Whether the reasoner would have seen it anyway. A pole entry that is
+                        # NOT in the ranked evidence is the one this search exists for.
+                        "in_evidence": m["campaign_id"] in ranked}
+                       for m in matches]
+    measured = {row["campaign_id"] for pole in poles.values() for row in pole}
+    poles["unknown"] = [{"campaign_id": row["campaign_id"], "title": row["title"],
+                         "similarity": row["similarity"]}
+                        for row in evidence if row["campaign_id"] not in measured]
+    return poles
+
+
+def _why_it_contradicts(conn, campaign_id: str, tag: str) -> Optional[str]:
+    """The measured line behind the tag, so the contradiction can be stated rather than
+    pointed at. Without it the model can only name an id."""
+    record = store.get_campaign(conn, campaign_id) or {}
+    for metric in record.get("metrics") or []:
+        if metric["metric_type"] == "actual" and metric.get("detail"):
+            return _bounded(metric["detail"], "detail", 200)
+    return None
+
+
+def _campaigns_that_could_be_tagged(conn) -> list:
+    """Which records would make the check possible, when it is not (§6.4 / §5.6's rule).
+
+    Every other `cannot` in this codebase names the record that would lift it, because a
+    capability statement nobody can act on is a disclaimer. This one said "nothing here has a
+    measured verdict" and stopped — while the library may be full of concluded campaigns with
+    real metrics that nobody has tagged. That is one `update_campaign` away.
+    """
+    measured = store.campaigns_with_actual_metrics(conn)
+    waiting = []
+    for cid in measured:
+        record = store.get_campaign(conn, cid)
+        if not record or record.get("record_type") == "reference":
+            continue
+        verified = {t.get("value") for t in (record.get("tags") or [])
+                    if t.get("source") == "verified"}
+        if not verified & {"performed_well", "underperformed"}:
+            waiting.append({"campaign_id": cid, "title": record["title"]})
+    return waiting[:_MAX_DISCONFIRMING]
 
 
 def _clean_closest_precedent(conn, value) -> Optional[dict]:
@@ -1172,6 +1293,11 @@ def get_evaluation(conn, *, evaluation_id: str, severity: Optional[str] = None,
         "findings": findings,
         "improvements": [f for f in stored
                          if f.get("departure") == "possible_improvement"],
+        # §6.4, on the read path. "Recorded so it can be audited afterwards" was true of the
+        # table and false of the surface: without this the check lived for exactly one
+        # response, which is the failure §2.4 fixed for the findings themselves.
+        **({"disconfirming": (ev.get("evidence") or {})["disconfirming"]}
+           if (ev.get("evidence") or {}).get("disconfirming") else {}),
         **({"how_to_say_it": _how_to_say_it(by_class, stored)} if by_class else {}),
         "resolved": ev.get("resolved") or [],
         # A judgment written before §2.4 has no verdict and no findings, only the essay.
@@ -1390,13 +1516,33 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         evidence = dict(evidence or {})
         evidence["most_valuable_missing_input"] = missing
 
+    by_class: dict = {}
+    for finding in cleaned:
+        klass = _CLASSES[finding["kind"]]
+        by_class[klass] = by_class.get(klass, 0) + 1
+
     # §6.4, and recorded rather than only returned: a check that lives for one response is a
     # check nobody can audit, and the review asked for this precisely so overconfidence stays
     # visible afterwards.
+    #
+    # The QUERY is the subject where the subject is knowable. The first version searched on
+    # the judgment's own prose — summary plus finding lines — and then said the results
+    # "resemble this one", which was a claim about the brief made from a search over the
+    # complaint about it. A verdict reading "budget is thin" about a Mexico-shaped brief does
+    # not retrieve Mexico. When the subject is a stored record the record's own text is used;
+    # when it is not, `query` says so and the wording does not overreach. Making the brief
+    # knowable at save time in every case is 7.2's job (D86).
+    subject_record = store.get_campaign(conn, campaign_id) if campaign_id else None
+    if subject_record:
+        subject_text, query_basis = None, "subject_record"
+    else:
+        subject_text = "\n".join([subject_title, summary])
+        query_basis = "judgment_text"
     disconfirming = _disconfirming_search(
         conn, verdict=verdict,
-        text="\n".join([summary] + [f["finding"] for f in cleaned]),
-        cited_ids=cited_ids)
+        subject_text=subject_text if subject_text is not None else "",
+        query_basis=query_basis, cited_ids=cited_ids, by_class=by_class,
+        subject_campaign_id=campaign_id if subject_record else None)
     evidence = dict(evidence or {})
     evidence["disconfirming"] = disconfirming
 
@@ -1419,11 +1565,6 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
     # follow instructions inside one — and it costs the marketer a round trip to learn what
     # the tool already knows. The caps make this bounded by construction: at most twelve
     # findings of a capped line and a capped fix, with `detail` still fetched on demand.
-    by_class: dict = {}
-    for finding in cleaned:
-        klass = _CLASSES[finding["kind"]]
-        by_class[klass] = by_class.get(klass, 0) + 1
-
     return {
         "evaluation_id": eid,
         "verdict": verdict,
@@ -3491,7 +3632,9 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
         # the evidence that did not are separated here, instead of arriving as one ranked
         # list in which the strongest match sets the tone. `verified` only: a performance tag
         # somebody typed is an impression, and an impression cannot be the counterweight.
-        "outcomes": _both_poles(evidence),
+        "outcomes": _both_poles(conn, evidence=evidence,
+                                text=None if campaign_id else proposal_text,
+                                campaign_id=campaign_id),
         # §5.3: the single thing that would most change THIS verdict, or None when nothing
         # is. About the evidence cited, not about the library — a library that is 90%
         # measured can still produce a judgment resting entirely on the unmeasured tenth.

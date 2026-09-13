@@ -90,7 +90,9 @@ def test_a_negative_verdict_is_checked_against_precedent_that_worked(conn, libra
 def test_a_positive_verdict_is_checked_against_precedent_that_failed(conn, library):
     """The other direction, and the one an approving reasoner never goes looking for."""
     result = core.save_evaluation(conn, **_evaluation(
-        library, verdict="approve", summary="Looks fine.", findings=[]))
+        library, cited_ids=[], verdict="approve",
+        summary="Creator-led launch with four colourways and a compressed flight looks fine.",
+        findings=[]))
 
     check = result["disconfirming"]
     assert check["looked_for"] == "precedent_that_failed"
@@ -154,13 +156,14 @@ def test_the_three_outcomes_of_the_check_are_three_different_things(conn, librar
     # The same library, and a judgment whose contradicting precedent was already weighed.
     weighed = core.save_evaluation(conn, **_evaluation(
         library, cited_ids=[library["failed"], library["worked"]]))
-    assert weighed["disconfirming"]["code"] == "nothing_contradicted_it"
-    assert weighed["disconfirming"]["found"], "it looked and it found; nothing was UNCITED"
+    assert weighed["disconfirming"]["code"] == "nothing_ranked"
+    assert weighed["disconfirming"]["found"] == [], \
+        "the cited ones are excluded from the CANDIDATES, so nothing is left to report"
 
     assert "not possible" in core._say_the_disconfirming_check(
         {"code": "nothing_to_check_against", "uncited": []})
-    assert "held" in core._say_the_disconfirming_check(
-        {"code": "nothing_contradicted_it", "uncited": []})
+    assert "not the merits" in core._say_the_disconfirming_check(
+        {"code": "nothing_ranked", "uncited": []})
 
 
 # ── it has to be visible, or it is a column nobody reads ────────────────────
@@ -276,3 +279,275 @@ def test_the_check_survives_a_database_that_predates_it(tmp_path):
         findings=[{"severity": "should_fix", "kind": "missing_information",
                    "finding": "No end date"}])
     assert saved["disconfirming"]["code"] == "nothing_to_check_against"
+
+
+# ── review round: six mutations survived, and each was a real hole ──────────
+
+def test_an_embedder_outage_is_not_a_verdict_that_survived_scrutiny(conn, library):
+    """`embedding.Unavailable` is a `ValueError`, so it was swallowed into "nothing came
+    back" and the note then said the verdict "was argued against and it held". That is the
+    exact collapse this item exists to prevent, arriving on the failure that actually
+    happens: Ollama is not running."""
+    import embedding
+
+    def dead(*a, **k):
+        raise embedding.Unavailable("ollama is not running")
+
+    original = embedding.embed
+    embedding.embed = dead
+    try:
+        result = core.save_evaluation(conn, **_evaluation(library))
+    finally:
+        embedding.embed = original
+
+    assert result["disconfirming"]["code"] == "could_not_check"
+    assert "could not run" in result["disconfirming"]["what_it_means"].lower()
+    assert "unchallenged" in result["note"]
+
+
+def test_a_campaign_that_resembles_nothing_is_not_called_a_contradiction(conn):
+    """`find_similar` has no cutoff: with a tag filter it ranks every candidate and slices.
+    A single-market print campaign came back at similarity 0.0 as precedent "resembling" a
+    creator-led launch, and the note told the model to raise it before the verdict. Once a
+    library holds one measured campaign per pole that fires on every save."""
+    far = core.ingest_campaign(
+        conn, title="Peru print", status="concluded",
+        detail="zzzz qqqq xxxx vvvv, entirely unrelated wording.")["campaign_id"]
+    core.add_metrics(conn, campaign_id=far, detail="CTR 4 percent.")
+    store.update_campaign(conn, far, tags=[{"value": "performed_well", "source": "verified"}])
+
+    result = core.save_evaluation(
+        conn, subject_title="Colombia v1", verdict="revise",
+        summary="Creator-led launch with four colourways and a compressed flight.",
+        findings=[{"severity": "should_fix", "kind": "missing_information",
+                   "finding": "No end date"}])
+
+    assert result["disconfirming"]["code"] == "nothing_ranked"
+    assert result["disconfirming"]["found"] == []
+
+
+def test_a_fourth_contradiction_is_not_hidden_by_three_cited_ones(conn):
+    """`top_k` truncated BEFORE the cited filter, so three cited campaigns filled the window
+    and a fourth — genuinely uncited and contradicting — was never looked at. The answer came
+    back "nothing contradicted it"."""
+    body = "Creator-led launch with four colourways and a compressed three-week flight."
+    ids = []
+    for n in range(4):
+        cid = core.ingest_campaign(conn, title=f"Launch {n}", status="concluded",
+                                   detail=body)["campaign_id"]
+        core.add_metrics(conn, campaign_id=cid, detail="CTR 3.4 percent, above benchmark.")
+        store.update_campaign(conn, cid,
+                              tags=[{"value": "performed_well", "source": "verified"}])
+        ids.append(cid)
+
+    result = core.save_evaluation(
+        conn, subject_title="Colombia v1", verdict="revise", summary=body,
+        cited_ids=ids[:3],
+        findings=[{"severity": "should_fix", "kind": "missing_information",
+                   "finding": "No end date"}])
+
+    assert result["disconfirming"]["code"] == "contradicting_precedent"
+    assert result["disconfirming"]["uncited"] == [ids[3]]
+
+
+def test_the_rulebook_is_not_precedent(conn, library):
+    """`reference` records are excluded everywhere else in this codebase, and a rulebook
+    tagged `performed_well` is not a campaign that went the other way."""
+    body = "Creator-led launch with four colourways and a compressed three-week flight."
+    rules = core.ingest_campaign(conn, title="Rules that worked", record_type="reference",
+                                 detail=body)["campaign_id"]
+    core.add_metrics(conn, campaign_id=rules, detail="CTR 9 percent.")
+    store.update_campaign(conn, rules,
+                          tags=[{"value": "performed_well", "source": "verified"}])
+
+    result = core.save_evaluation(conn, **_evaluation(library, summary=body))
+    assert rules not in result["disconfirming"]["uncited"]
+
+
+def test_an_impression_is_not_the_counterweight_to_a_verdict(conn):
+    """Dropping `source: verified` from either query left the whole suite green, because the
+    fixtures only ever carried verified tags — so the docstring's central claim was
+    unenforced by any test in the search path."""
+    body = "Creator-led launch with four colourways and a compressed three-week flight."
+    stated = core.ingest_campaign(conn, title="Guess launch", status="concluded",
+                                  detail=body, tags=["performed_well"])["campaign_id"]
+
+    result = core.save_evaluation(
+        conn, subject_title="Colombia v1", verdict="revise", summary=body,
+        findings=[{"severity": "should_fix", "kind": "missing_information",
+                   "finding": "No end date"}])
+
+    assert result["disconfirming"]["code"] == "nothing_to_check_against"
+    assert stated not in result["disconfirming"]["uncited"]
+
+
+def test_a_verdict_that_rests_on_a_broken_rule_is_not_argued_with(conn, library):
+    """§6.2 spent a whole item establishing that a breach is not debatable. Searching for "a
+    campaign that broke this rule and did well" and then telling the model it is "the one
+    thing most likely to change what the marketer does" undoes that from the next field
+    over. It is a question about the rule, for whoever owns the rulebook."""
+    result = core.save_evaluation(
+        conn, subject_title="Colombia v1", verdict="revise",
+        summary="Uses AI-generated imagery.", cited_ids=[],
+        findings=[{"severity": "blocking", "kind": "guardrail_breach",
+                   "finding": "Uses AI-generated imagery",
+                   "precedent": {"rule_id": library["rules"],
+                                 "quote": "No AI-generated imagery"}}])
+
+    assert result["disconfirming"]["code"] == "verdict_rests_on_a_rule"
+    assert "not a matter of precedent" in result["disconfirming"]["what_it_means"]
+
+
+def test_a_verdict_with_a_debatable_half_is_still_argued_with(conn, library):
+    """Only a judgment resting ENTIRELY on rules is exempt. One breach beside one departure
+    leaves something to argue about."""
+    body = "Creator-led launch with four colourways and a compressed three-week flight."
+    result = core.save_evaluation(
+        conn, subject_title="Colombia v1", verdict="revise", summary=body, cited_ids=[],
+        findings=[{"severity": "blocking", "kind": "guardrail_breach",
+                   "finding": "Uses AI-generated imagery",
+                   "precedent": {"rule_id": library["rules"],
+                                 "quote": "No AI-generated imagery"}},
+                  {"severity": "should_fix", "kind": "precedent_departure",
+                   "departure": "regression", "finding": "Compresses the flight",
+                   "precedent": {"campaign_id": library["failed"],
+                                 "quote": "compressed three-week flight"}}])
+
+    assert result["disconfirming"]["code"] == "contradicting_precedent"
+
+
+def test_the_check_names_what_would_make_it_possible(conn):
+    """Every other `cannot` in this codebase names the record that would lift it, because a
+    capability statement nobody can act on is a disclaimer. This one said "nothing here has a
+    measured verdict" and stopped — while the library may be full of concluded campaigns with
+    real metrics that nobody has tagged, one `update_campaign` away."""
+    cid = core.ingest_campaign(conn, title="Mexico launch", status="concluded",
+                               detail="A launch.")["campaign_id"]
+    core.add_metrics(conn, campaign_id=cid, detail="CTR 3.4 percent, above benchmark.")
+
+    result = core.save_evaluation(
+        conn, subject_title="Colombia v1", verdict="revise", summary="A stretch.",
+        findings=[{"severity": "should_fix", "kind": "missing_information",
+                   "finding": "No end date"}])
+
+    check = result["disconfirming"]
+    assert check["code"] == "nothing_to_check_against"
+    assert [row["campaign_id"] for row in check["could_be_checked_if"]] == [cid]
+
+
+def test_the_contradiction_can_be_stated_rather_than_pointed_at(conn, library):
+    """A model mirroring the shape of a result says what the shape contains, and
+    "camp_8701e96a" is not the thing most likely to change what the marketer does."""
+    result = core.save_evaluation(conn, **_evaluation(library))
+
+    row = result["disconfirming"]["found"][0]
+    assert row["title"] == "Mexico launch"
+    assert row["tag"] == "performed_well"
+    assert "3.4 percent" in row["why_it_contradicts"]
+
+
+def test_the_check_is_on_the_read_path_too(conn, library):
+    """"Recorded so it can be audited afterwards" was true of the table and false of the
+    surface: `get_evaluation` did not return it, so from the tool side it lived for exactly
+    one response — the failure §2.4 fixed for the findings themselves."""
+    saved = core.save_evaluation(conn, **_evaluation(library))
+
+    read_back = core.get_evaluation(conn, evaluation_id=saved["evaluation_id"])
+    assert read_back["disconfirming"]["code"] == "contradicting_precedent"
+
+
+def test_the_search_says_what_it_actually_searched(conn, library):
+    """It queried the judgment's own prose and then called the results "precedent resembling
+    this one" — a claim about the brief, made from a search over the complaint about it."""
+    without = core.save_evaluation(conn, **_evaluation(library))
+    assert without["disconfirming"]["query"] == "judgment_text"
+
+    subject = core.ingest_campaign(
+        conn, title="Colombia v1", status="proposed",
+        detail="Creator-led launch with four colourways and a compressed three-week flight."
+    )["campaign_id"]
+    with_record = core.save_evaluation(conn, **_evaluation(library, campaign_id=subject))
+    assert with_record["disconfirming"]["query"] == "subject_record"
+    assert library["worked"] in with_record["disconfirming"]["uncited"]
+
+
+def test_the_poles_reach_past_what_was_already_retrieved(conn):
+    """The first version partitioned the evidence already retrieved — so on a real library the
+    five nearest are five records nobody tagged, both poles come back empty, and the reasoner
+    has seen nothing contradictory. That is the state the review describes, dressed as a fix
+    for it."""
+    body = "Creator-led launch with four colourways and a compressed three-week flight."
+    for n in range(6):
+        core.ingest_campaign(conn, title=f"Untagged {n}", detail=body)
+    measured = core.ingest_campaign(conn, title="Mexico launch", status="concluded",
+                                    detail=body)["campaign_id"]
+    core.add_metrics(conn, campaign_id=measured, detail="CTR 3.4 percent, above benchmark.")
+    store.update_campaign(conn, measured,
+                          tags=[{"value": "performed_well", "source": "verified"}])
+
+    package = core.prepare_evaluation(conn, subject_title="Colombia v1", proposal_text=body,
+                                      top_k=5)
+
+    worked = package["outcomes"]["worked"]
+    assert [r["campaign_id"] for r in worked] == [measured], \
+        "a filter runs before ranking; a partition cannot reach past it"
+
+
+def test_more_than_one_contradiction_is_reported(conn):
+    """`_MAX_DISCONFIRMING = 1` left the suite green: every test had exactly one
+    contradicting campaign, so nothing pinned that the window holds more than a token."""
+    body = "Creator-led launch with four colourways and a compressed three-week flight."
+    ids = []
+    for n in range(2):
+        cid = core.ingest_campaign(conn, title=f"Launch {n}", status="concluded",
+                                   detail=body)["campaign_id"]
+        core.add_metrics(conn, campaign_id=cid, detail="CTR 3.4 percent, above benchmark.")
+        store.update_campaign(conn, cid,
+                              tags=[{"value": "performed_well", "source": "verified"}])
+        ids.append(cid)
+
+    result = core.save_evaluation(
+        conn, subject_title="Colombia v1", verdict="revise", summary=body,
+        findings=[{"severity": "should_fix", "kind": "missing_information",
+                   "finding": "No end date"}])
+
+    assert sorted(result["disconfirming"]["uncited"]) == sorted(ids)
+
+
+def test_a_library_whose_only_measured_record_is_the_rulebook_cannot_argue(conn):
+    """"Could not be checked" and "checked, nothing close enough" are opposite conclusions,
+    and counting a `reference` record as a possible contradiction put the library in the
+    wrong one: it reported a check that ran when there was nothing to run it against."""
+    body = "Creator-led launch with four colourways and a compressed three-week flight."
+    rules = core.ingest_campaign(conn, title="Rules", record_type="reference",
+                                 detail=body)["campaign_id"]
+    core.add_metrics(conn, campaign_id=rules, detail="CTR 9 percent.")
+    store.update_campaign(conn, rules,
+                          tags=[{"value": "performed_well", "source": "verified"}])
+
+    result = core.save_evaluation(
+        conn, subject_title="Colombia v1", verdict="revise", summary=body,
+        findings=[{"severity": "should_fix", "kind": "missing_information",
+                   "finding": "No end date"}])
+
+    assert result["disconfirming"]["code"] == "nothing_to_check_against"
+
+
+def test_the_schema_guard_names_every_column_the_search_reads(conn):
+    """The v0.2.0 fixture lacks `tags` AND `markets`, so dropping either from the guard read
+    the same. `filter_campaign_ids` selects both, and a database with one and not the other
+    would crash every save."""
+    import sqlite3
+    import time
+
+    half = sqlite3.connect(":memory:")
+    half.row_factory = sqlite3.Row
+    half.execute("CREATE TABLE campaigns (id TEXT PRIMARY KEY, title TEXT NOT NULL, "
+                 "tags TEXT NOT NULL DEFAULT '[]')")
+    half.execute("INSERT INTO campaigns VALUES ('c1', 'A launch', '[]')")
+    half.commit()
+
+    check = core._disconfirming_search(
+        half, verdict="revise", subject_text="anything", query_basis="judgment_text",
+        cited_ids=[], by_class={"about_the_brief": 1})
+    assert check["code"] == "nothing_to_check_against"
