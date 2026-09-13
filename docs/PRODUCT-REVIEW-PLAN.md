@@ -1917,9 +1917,31 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 
 ## Phase 8 — Metrics that evolve
 
-- [ ] **8.1 Metric registry** — canonical key, display name, unit, direction, aliases, first
+- [x] **8.1 Metric registry** — canonical key, display name, unit, direction, aliases, first
       seen, times seen, campaign types, status. Values in typed storage, not an opaque JSON
       string (today's `structured` cannot answer "show me every ROAS on file").
+      **Reading the review's list of collisions closely gives three problems, not one.**
+      *The keys collide* — `reach` / `crm_reach` / `stated_combined_influencer_reach` are one
+      measure with three names. The registry canonicalises, and `raw_key` is kept beside the
+      canonical one because canonicalising is a CLAIM about what somebody meant, and keeping
+      what they wrote is what makes the claim checkable.
+      *Some of what is in those keys is not a name at all.* `_mxn` is a UNIT and
+      `_upper_funnel` is a SCOPE. Folding them into the key is what made two budgets unaddable
+      and impressions unqueryable, so they are pulled into their own columns rather than being
+      spelled away — the registry knows the kind of unit and the key knows the instance.
+      *And the last pair is not a naming problem.* `planned_roas_july_stated` versus
+      `_recomputed` is "the partner's figure is wrong and here is the right one" with nowhere
+      to live, so it became a key name — the review calls it the clearest signal the schema is
+      failing. A registry that only canonicalised names would rename both halves to `roas` and
+      lose exactly what distinguishes them. A value row carries its own `source`, a correction
+      is a second VALUE rather than a second measure, and `best_value` says which one to weigh
+      — keeping both and saying nothing records a disagreement without resolving it.
+      **Typed storage is the other half.** "Show me every ROAS on file" is the question a
+      metric store exists to answer, and a JSON string cannot be asked it.
+      **The registry is seeded into the database, not read from the constant,** because §8.2
+      adds provisional entries and §8.3 graduates them — a registry half in code and half in a
+      table is two registries, which is the drift this project has now watched five times.
+      The seed is the PRODUCT's canonical names; §12.1 lets a rulebook extend it.
 - [ ] **8.2 Unknown metric → provisional + ask** (never reject, never silently accept).
 - [ ] **8.3 Graduation gate** — seen in N campaigns, ≥2 partners/markets, confirmed once by a
       person, before a measure becomes expected.

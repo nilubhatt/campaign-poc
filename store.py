@@ -91,6 +91,34 @@ CREATE TABLE IF NOT EXISTS metrics (
     structured    TEXT,            -- optional JSON {ctr, roi, conversions, ...}
     created_at    REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS metric_registry (
+    canonical     TEXT PRIMARY KEY,      -- §8.1: one name per measure
+    display_name  TEXT NOT NULL,
+    unit          TEXT,                  -- percent | ratio | currency | count | people
+    direction     TEXT,                  -- higher_is_better | lower_is_better | NULL
+    aliases       TEXT NOT NULL DEFAULT '[]',  -- JSON: every spelling seen for this measure
+    status        TEXT NOT NULL DEFAULT 'provisional',  -- provisional | expected | retired
+    first_seen    REAL,
+    last_seen     REAL,
+    times_seen    INTEGER NOT NULL DEFAULT 0,
+    markets       TEXT NOT NULL DEFAULT '[]'   -- which markets it has appeared in (§8.3)
+);
+CREATE TABLE IF NOT EXISTS metric_values (
+    id            TEXT PRIMARY KEY,
+    campaign_id   TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    metric        TEXT NOT NULL,         -- the canonical name
+    raw_key       TEXT NOT NULL,         -- what the caller actually wrote; canonicalising is
+                                          -- a claim about what they meant, and keeping this
+                                          -- is what makes the claim checkable
+    value         REAL NOT NULL,         -- TYPED: "show me every ROAS" needs a number column
+    unit          TEXT,
+    source        TEXT NOT NULL DEFAULT 'stated',  -- stated | recomputed. §8.1's sharpest
+                                          -- finding: a correction had nowhere to live and
+                                          -- became a key name
+    scope         TEXT,                  -- upper_funnel, organic, … — out of the key
+    metric_type   TEXT NOT NULL DEFAULT 'actual',
+    created_at    REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS evaluations (
     id            TEXT PRIMARY KEY,
     campaign_id   TEXT REFERENCES campaigns(id) ON DELETE SET NULL,  -- may be a not-yet-stored proposal
@@ -161,6 +189,8 @@ _INDEXES = """
 CREATE INDEX IF NOT EXISTS chunks_campaign_idx   ON campaign_chunks(campaign_id);
 CREATE INDEX IF NOT EXISTS assets_campaign_idx   ON assets(campaign_id);
 CREATE INDEX IF NOT EXISTS metrics_campaign_idx ON metrics(campaign_id);
+CREATE INDEX IF NOT EXISTS metric_values_metric_idx ON metric_values(metric);
+CREATE INDEX IF NOT EXISTS metric_values_campaign_idx ON metric_values(campaign_id);
 CREATE INDEX IF NOT EXISTS evals_campaign_idx   ON evaluations(campaign_id);
 CREATE INDEX IF NOT EXISTS recon_eval_idx       ON reconciliations(evaluation_id);
 """
@@ -1482,6 +1512,71 @@ def get_retrieval(conn, retrieval_id: str) -> Optional[dict]:
     d["similarities"] = json.loads(d.get("similarities") or "[]")
     d["warnings"] = json.loads(d.get("warnings") or "[]")
     return d
+
+
+def metric_registry(conn) -> dict:
+    if not _columns(conn, "metric_registry"):
+        return {}
+    out = {}
+    for row in conn.execute("SELECT * FROM metric_registry").fetchall():
+        d = dict(row)
+        d["aliases"] = json.loads(d["aliases"] or "[]")
+        d["markets"] = json.loads(d["markets"] or "[]")
+        out[d["canonical"]] = d
+    return out
+
+
+def register_metric(conn, *, canonical, display_name, unit, direction, aliases,
+                    status="provisional") -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO metric_registry (canonical, display_name, unit, direction, "
+        "aliases, status) VALUES (?,?,?,?,?,?)",
+        (canonical, display_name, unit, direction, json.dumps(list(aliases)), status))
+    conn.commit()
+
+
+def touch_metric(conn, canonical: str, *, campaign_id: Optional[str] = None) -> None:
+    """Record that this measure was seen again — §8.3's graduation gate and §8.5's retirement
+    both read these, and recording them from the first write is what stops the history being
+    missing for exactly the measures that arrived before anybody thought about it."""
+    row = conn.execute("SELECT first_seen, times_seen, markets FROM metric_registry "
+                       "WHERE canonical = ?", (canonical,)).fetchone()
+    if not row:
+        return
+    markets = json.loads(row["markets"] or "[]")
+    if campaign_id:
+        record = conn.execute("SELECT market, region FROM campaigns WHERE id = ?",
+                              (campaign_id,)).fetchone()
+        where = (record["market"] or record["region"]) if record else None
+        if where and where not in markets:
+            markets.append(where)
+    now = _now()
+    conn.execute("UPDATE metric_registry SET first_seen = COALESCE(first_seen, ?), "
+                 "last_seen = ?, times_seen = times_seen + 1, markets = ? WHERE canonical = ?",
+                 (now, now, json.dumps(markets), canonical))
+    conn.commit()
+
+
+def record_metric_value(conn, *, campaign_id, metric, raw_key, value, unit, source, scope,
+                        metric_type) -> str:
+    vid = _id("mval")
+    conn.execute(
+        "INSERT INTO metric_values (id, campaign_id, metric, raw_key, value, unit, source, "
+        "scope, metric_type, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (vid, campaign_id, metric, raw_key, value, unit, source, scope, metric_type, _now()))
+    conn.commit()
+    return vid
+
+
+def metric_values(conn, *, metric: str, campaign_id: Optional[str] = None) -> list:
+    if not _columns(conn, "metric_values"):
+        return []
+    sql = "SELECT * FROM metric_values WHERE metric = ?"
+    params = [metric]
+    if campaign_id:
+        sql += " AND campaign_id = ?"
+        params.append(campaign_id)
+    return [dict(r) for r in conn.execute(sql + " ORDER BY created_at", params).fetchall()]
 
 
 def campaigns_with_actual_metrics(conn) -> set:
