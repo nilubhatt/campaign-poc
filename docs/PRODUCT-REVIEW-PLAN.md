@@ -1364,8 +1364,43 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       themselves. It returns `by_class`, `improvements` and the same voicing note, and takes a
       `departure=` filter.
       Closes D1. The `rule_id` half of D1 was already done by 6.1.
-- [ ] **6.3 (I) Close the prediction loop** — when a superseding record arrives, surface the
+- [x] **6.3 (I) Close the prediction loop** — when a superseding record arrives, surface the
       prior evaluation's predictions and ask which held.
+      **The load-bearing sentence in the review is the second one:** "`reconcile_evaluation`
+      has never once run". The tool exists, works, and is never called, because it needs
+      somebody to decide to go back — and nobody does. So the fix is not a tool, it is a
+      MOMENT: the person uploading v2 is looking at the thing that proves or refutes what was
+      said about v1, and asking then costs one prompt. `upload_campaign(supersedes=…)` now
+      returns `earlier_judgment` — the prior verdict, its predictions, its open findings, and
+      an ask — plus a `reconcile_evaluation` offer prefilled with the id.
+      **Not gated on `predictions`.** Most judgments carry none, and the case the review
+      described was a RECOMMENDATION that came true ("the same structure returns rearranged
+      unless the premise is settled"), not a CTR range. Gating on the forecast field would
+      have dropped the example the item exists for. It IS gated on there being something to
+      check: a record nobody judged has no claim to test, and a judgment already reconciled
+      has been tested — asking again is the always-present prompt nobody reads.
+      **Closes D41, the offer both reviewers condemned in 5.2.** What was wrong there was
+      never the offer, it was the evidence: prefilled from `closest_precedent`, a similarity
+      match asserted by the model, when "this replaces that" is a claim about somebody's
+      intent and a similarity score is a fact about text. It comes back on the evidence 5.4
+      identified as strongest — two judgments of the same brief that a diff compared to
+      completion, which means two reviews already treated them as versions of one thing. The
+      label names the record that would be hidden, because that is the consequence being
+      agreed to and it is invisible in the arguments.
+      **And it needed a write path, which is why D41 could not be closed before.**
+      `update_campaign` could not set `supersedes` at all: a supersession could only be
+      declared at upload, and one declared by mistake hid a record from every future search
+      and was undoable only by deleting the campaign — that is why 5.2's reviewers called the
+      offer dangerous rather than merely wrong. It can now be set, and cleared with `""`.
+      Three ways of being nonsense are refused: a record superseding itself removes itself
+      from the library, a record superseding nothing links nothing, and a cycle hides both
+      ends and would make the chain walk below run forever.
+      **Closes D64.** `diff(v1, v3)` compared only the two endpoints, so a finding v2 had
+      explicitly resolved came back against v3 as `no_longer_raised` — "neither resolved nor
+      repeated", when the library holds the record of it being resolved. It walks the
+      supersession chain now and reports `through`, because a diff across a chain is a
+      different claim from a diff between adjacent versions and a reader cannot tell
+      otherwise. Closes D57.
 - [ ] **6.4 (J) Disconfirming search required** before a verdict is saved; record what came
       back, including "nothing".
 - [ ] **6.5 (K) `approve_if`** — the testable exit condition that converts revise → approve.

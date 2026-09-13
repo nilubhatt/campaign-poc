@@ -632,10 +632,17 @@ def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Opti
 
 def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_type=None,
                     status=None, tags=None, region=None, market=None, markets=None,
-                    collection=None) -> bool:
+                    collection=None, supersedes=None) -> bool:
     """Update campaign metadata (§6.4) — NOT deck_text/chunks/embeddings; re-upload (or
     supersede) for content changes. Only given fields change; tags/markets, if given, fully
-    replace the existing list rather than merging. Returns whether the campaign exists."""
+    replace the existing list rather than merging. Returns whether the campaign exists.
+
+    `supersedes` is here because §6.3 needs it and 5.2's reviewers needed it: supersession
+    could only be declared at upload, so somebody who realised afterwards had no way to say
+    so, and a supersession declared BY MISTAKE hid a record from every future search and was
+    undoable only by deleting the campaign. Passing `""` clears it — the retraction that did
+    not exist is the reason the 5.2 offer was called dangerous rather than merely wrong.
+    """
     fields, params = [], []
     if title is not None:
         fields.append("title = ?"); params.append(title)
@@ -665,6 +672,9 @@ def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_t
         fields.append("markets = ?"); params.append(json.dumps(normalize_markets(markets)))
     if collection is not None:
         fields.append("collection = ?"); params.append(collection)
+    if supersedes is not None:
+        fields.append("supersedes = ?")
+        params.append(_checked_supersedes(conn, campaign_id, supersedes))
 
     if not fields:
         return get_campaign(conn, campaign_id) is not None
@@ -675,6 +685,56 @@ def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_t
     cur = conn.execute(f"UPDATE campaigns SET {', '.join(fields)} WHERE id = ?", params)
     conn.commit()
     return cur.rowcount > 0
+
+
+def _checked_supersedes(conn, campaign_id: str, supersedes) -> Optional[str]:
+    """The three ways a supersession can be nonsense, refused before it is written.
+
+    All three hide records from search, which is what makes them worth checking rather than
+    accepting: a record pointed at nothing is a link nobody can follow back, a record
+    superseding itself removes itself from the library, and a cycle removes both ends and
+    would make §6.3's chain walk run forever.
+    """
+    target = (supersedes or "").strip()
+    if not target:
+        return None                       # the retraction
+    if target == campaign_id:
+        raise ValueError("a campaign cannot supersede itself — that would hide it from "
+                         "every search, including its own")
+    if conn.execute("SELECT 1 FROM campaigns WHERE id = ?", (target,)).fetchone() is None:
+        raise ValueError(f"cannot supersede {target!r}: there is no such record. Supersession "
+                         f"hides the superseded record from search, so a wrong id here "
+                         f"quietly hides nothing and links nothing")
+    seen, walk = {campaign_id}, target
+    while walk:
+        if walk in seen:
+            raise ValueError(f"that would make a supersession cycle through {walk!r}. Both "
+                             f"ends of a cycle are hidden from every search and neither can "
+                             f"be reached from the other")
+        seen.add(walk)
+        row = conn.execute("SELECT supersedes FROM campaigns WHERE id = ?",
+                           (walk,)).fetchone()
+        walk = row["supersedes"] if row else None
+    return target
+
+
+def supersession_chain(conn, campaign_id: str) -> list[str]:
+    """Oldest to newest, following `supersedes` back from this record (§6.3 / D64).
+
+    `diff_campaigns` compared adjacent judgments only, so a finding v2 explicitly resolved
+    was reported against v3 as "neither resolved nor repeated" — the library forgetting its
+    own evidence and then hedging about it. The visited set is belt and braces: cycles are
+    refused on write, but a database that predates that check could still hold one.
+    """
+    chain, seen, walk = [], set(), campaign_id
+    while walk and walk not in seen:
+        chain.append(walk)
+        seen.add(walk)
+        row = conn.execute("SELECT supersedes FROM campaigns WHERE id = ?",
+                           (walk,)).fetchone()
+        walk = row["supersedes"] if row else None
+    chain.reverse()
+    return chain
 
 
 def delete_campaign(conn, campaign_id: str) -> bool:

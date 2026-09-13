@@ -363,6 +363,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
     # stored-versus-searchable conflation defect 05 opened with.
     store.mark_embedded(conn, cid, embedded_count == len(chunk_texts))
     current = store.get_campaign(conn, cid)
+    earlier_judgment = _judgment_to_check(conn, supersedes)
     return {
         "campaign_id": cid, "title": title, "record_type": record_type,
         "embedded": embedded_count == len(chunk_texts),
@@ -374,8 +375,13 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         "normalised": changed,
         "next_actions": actions.after_upload(
             campaign_id=cid, status=current["status"],
-            has_metrics=bool(current["metrics"])),
+            has_metrics=bool(current["metrics"]),
+            earlier_judgment=earlier_judgment),
         "warnings": notices.collapse(warnings),
+        # §6.3: the one moment where "was our judgment any good?" is both answerable and
+        # free. Attached only when there IS an unreconciled judgment on the record this one
+        # replaces — see `_judgment_to_check`.
+        **({"earlier_judgment": earlier_judgment} if earlier_judgment else {}),
     }
 
 
@@ -1920,8 +1926,23 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
             detail=f"no supersedes link between {earlier} and {later}",
             next_actions=[]))
 
+    # D64: every version BETWEEN the two, when they are actually linked. Comparing only the
+    # two endpoints reported a finding v2 explicitly resolved as `no_longer_raised` against
+    # v3 — "neither resolved nor repeated", when the library holds the record of it being
+    # resolved. That is the library forgetting its own evidence and then hedging about it.
+    chain = store.supersession_chain(conn, later)
+    through = chain[chain.index(earlier):] if earlier in chain else [earlier, later]
+
     before = store.latest_evaluation_for_campaign(conn, earlier)
     after = store.latest_evaluation_for_campaign(conn, later)
+    # What every judgment along the way recorded as resolved, by finding id. A correction
+    # taken at any point in the chain was taken.
+    resolved_along_chain: dict = {}
+    for link in through[1:]:
+        judgment = store.latest_evaluation_for_campaign(conn, link)
+        for row in ((judgment or {}).get("resolved") or []):
+            if row.get("finding_id"):
+                resolved_along_chain[row["finding_id"]] = {**row, "in_version": link}
 
     # `comparable` means both sides carry a STRUCTURED judgment. A pre-§2.4 evaluation reads
     # back with no verdict and an empty findings list, and treating it as comparable made
@@ -1939,6 +1960,10 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
         "later": {"campaign_id": later, "title": second["title"]},
         "arguments_reordered": reordered,
         "order_basis": order_basis,
+        # Which records the answer was assembled from. A diff across a chain is a different
+        # claim from a diff between two adjacent versions, and a reader cannot tell without
+        # being told.
+        "through": through,
         "adopted": [], "raised_again": [], "newly_introduced": [], "no_longer_raised": [],
         # BOTH judgments' citations. Only the earlier one was checked, so a later judgment
         # resting on a record since replaced reported nothing — and the later judgment is
@@ -1991,6 +2016,8 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
 
     resolved_by_id = {r["finding_id"]: r for r in (after.get("resolved") or [])
                       if r.get("finding_id")}
+    # A correction recorded anywhere along the chain counts, not only in the final judgment.
+    resolved_by_id = {**resolved_along_chain, **resolved_by_id}
     later_findings = list(after.get("findings") or [])
     repeats_by_id = {f["repeats"]: f for f in later_findings if f.get("repeats")}
     matched_later: list = []
@@ -2082,7 +2109,38 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
     result["counts"] = {name: len(result[name]) for name in
                         ("adopted", "raised_again", "newly_introduced", "no_longer_raised",
                          "carried_stale")}
+    result["next_actions"] = _offer_to_link_versions(first, second)
     return result
+
+
+def _offer_to_link_versions(first: dict, second: dict) -> list[dict]:
+    """Offer to record that one version replaces the other — D41, and only here.
+
+    5.2 offered this prefilled from `closest_precedent`: a similarity match, ASSERTED by the
+    model. "This replaces that" is a claim about somebody's intent and a similarity score is
+    a fact about text, and the two are not the same kind of thing — both reviewers condemned
+    it independently. What was wrong was never the offer; it was the evidence.
+
+    The evidence here is that two judgments of the same brief EXIST and a diff of them ran to
+    completion. That is a fact about the library rather than a resemblance, and it is
+    stronger than either of the alternatives 5.2's tracker row listed, because it means two
+    reviews already treated these as versions of one thing.
+
+    The offer names the record it would hide, in the label, because that is the consequence
+    the user is agreeing to and it is invisible in the arguments. §5.2's other lesson: this
+    is offered, never taken — accepting hides a record from every search, and `supersedes`
+    can now be cleared, which is what makes offering it defensible at all.
+    """
+    if second.get("supersedes") or first.get("supersedes"):
+        return []
+    return actions.trim([actions.action(
+        f"Record that “{second['title']}” replaces “{first['title']}”, "
+        f"which removes “{first['title']}” from future search results",
+        "update_campaign",
+        why="Both versions have been judged and compared as versions of one brief, but "
+            "nothing links them — so searches still return both, and the older one can be "
+            "cited as precedent for the newer.",
+        consent="ask", campaign_id=second["id"], supersedes=first["id"])])
 
 
 def _reread(earlier: dict, later: dict) -> dict:
@@ -3058,6 +3116,48 @@ def _incompleteness_warnings(conn) -> list[dict]:
         next_actions=actions.to_finish_indexing(
             by_campaign[0]["campaign_id"] if by_campaign else None),
         detail=f"{outstanding} unembedded items across {records} campaigns")]
+
+
+def _judgment_to_check(conn, superseded: Optional[str]) -> Optional[dict]:
+    """The prior judgment this new record is about to settle, or None (§6.3).
+
+    The review's observation is that `reconcile_evaluation` works, and has never once run,
+    because it needs somebody to decide to go back and nobody does. So the fix is not a tool
+    but a MOMENT: the person uploading v2 is looking at the thing that proves or refutes what
+    was said about v1, and asking then costs one prompt.
+
+    Returned only when there is something to check. A record nobody judged has no claim to
+    test, and a judgment already reconciled has been tested — asking again would be the
+    always-present prompt that stops being read.
+
+    Note what is NOT required: `predictions`. Most judgments have none, and the case the
+    review actually described was a RECOMMENDATION that came true ("the same structure
+    returns rearranged unless the premise is settled"), not a CTR range. Gating on the
+    forecast field would have dropped the example the item exists for.
+    """
+    if not superseded:
+        return None
+    judgment = store.latest_evaluation_for_campaign(conn, superseded)
+    if not judgment:
+        return None
+    if store.unreconciled_evaluation_id(conn, superseded) != judgment["id"]:
+        return None
+    record = store.get_campaign(conn, superseded)
+    open_findings = [{k: f.get(k) for k in ("id", "severity", "kind", "departure", "finding")}
+                     for f in (judgment.get("findings") or [])]
+    return {
+        "campaign_id": superseded,
+        "title": record["title"] if record else None,
+        "evaluation_id": judgment["id"],
+        "verdict": judgment.get("verdict"),
+        "summary": judgment.get("summary"),
+        "predictions": judgment.get("predictions"),
+        "open_findings": open_findings,
+        "ask": ("This replaces a record the library has already judged. Ask which of these "
+                "held and which did not — that is the only way the library learns whether "
+                "its own judgment is worth anything, and this is the moment somebody can "
+                "actually answer. Record the answer with save_reconciliation."),
+    }
 
 
 def _earlier_version_findings(conn, campaign_id: Optional[str]) -> Optional[dict]:

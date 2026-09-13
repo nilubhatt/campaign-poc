@@ -329,9 +329,10 @@ def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optio
                     record_type: Optional[RecordType] = None, status: Optional[Status] = None,
                     tags: Optional[Union[TagInput, list[TagInput]]] = None, region: Optional[str] = None,
                     market: Optional[str] = None, markets: Optional[list[str]] = None,
-                    collection: Optional[str] = None) -> dict:
+                    collection: Optional[str] = None,
+                    supersedes: Optional[str] = None) -> dict:
     """Edit a campaign's metadata (title, detail, record_type, status, tags, region, market,
-    markets, collection). Only the fields you pass change. tags/markets, if given, fully
+    markets, collection, supersedes). Only the fields you pass change. tags/markets, if given, fully
     REPLACE the existing list (not a merge) — pass the complete new list, including any
     you're keeping. This is also how you upgrade a tag's provenance once real data comes in
     — e.g. re-save tags with {"value": "performed_well", "source": "verified"} instead of
@@ -343,13 +344,19 @@ def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optio
     marketer, not you — see upload_campaign's docstring on asking rather than guessing when
     it's unclear whether this record IS a collection launch versus merely related to one.
     Does NOT change deck_text/chunks/embeddings; for content changes, upload a new record
-    and pass supersedes=campaign_id instead."""
+    and pass supersedes=campaign_id instead.
+
+    `supersedes` records that THIS record replaces an older one. **Ask before setting it.**
+    It is a claim about what the marketer intended, not something to infer from two records
+    looking alike, and accepting it removes the older record from every future search — the
+    user hears "link these versions" and agrees, unseen, to hide one of them. Pass `""` to
+    take it back if it was set by mistake."""
     conn = store.connect()
     try:
         ok = store.update_campaign(conn, campaign_id, title=title, detail=detail,
                                    record_type=record_type, status=status, tags=tags,
                                    region=region, market=market, markets=markets,
-                                   collection=collection)
+                                   collection=collection, supersedes=supersedes)
         if not ok:
             return {"error": f"campaign {campaign_id} not found"}
         return store.get_campaign(conn, campaign_id)

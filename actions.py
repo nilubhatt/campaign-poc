@@ -145,7 +145,7 @@ def after_metrics(*, campaign_id: str, open_evaluation_id: Optional[str]) -> lis
 
 
 def after_upload(*, campaign_id: str, status: Optional[str],
-                 has_metrics: bool) -> list[dict]:
+                 has_metrics: bool, earlier_judgment: Optional[dict] = None) -> list[dict]:
     """After a record lands.
 
     One thing is worth offering, and only sometimes: a concluded campaign with no outcome
@@ -160,6 +160,19 @@ def after_upload(*, campaign_id: str, status: Optional[str],
     the missing tool is tracked instead (D39).
     """
     offers = []
+    # §6.3, and FIRST: a record that replaces a judged one is the one moment where "was our
+    # judgment any good?" can actually be answered, and the answer is gone as soon as the
+    # person moves on. It ends in `save_reconciliation` by way of `reconcile_evaluation`,
+    # which is a tool that exists and works and has never once been called.
+    if earlier_judgment:
+        offers.append(action(
+            f"Check what the library predicted about \u201c{earlier_judgment['title']}\u201d "
+            f"against what this version shows",
+            "reconcile_evaluation",
+            why="This replaces a record the library already judged, and nothing has yet "
+                "recorded whether that judgment was right. This is the moment somebody can "
+                "say.",
+            consent="ask", evaluation_id=earlier_judgment["evaluation_id"]))
     if status == "concluded" and not has_metrics:
         offers.append(action(
             "Record what this campaign actually achieved, so later judgments can weigh it",
