@@ -674,7 +674,7 @@ def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_t
         fields.append("collection = ?"); params.append(collection)
     if supersedes is not None:
         fields.append("supersedes = ?")
-        params.append(_checked_supersedes(conn, campaign_id, supersedes))
+        params.append(checked_supersedes(conn, campaign_id, supersedes))
 
     if not fields:
         return get_campaign(conn, campaign_id) is not None
@@ -687,25 +687,30 @@ def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_t
     return cur.rowcount > 0
 
 
-def _checked_supersedes(conn, campaign_id: str, supersedes) -> Optional[str]:
+def checked_supersedes(conn, campaign_id: Optional[str], supersedes) -> Optional[str]:
     """The three ways a supersession can be nonsense, refused before it is written.
 
     All three hide records from search, which is what makes them worth checking rather than
     accepting: a record pointed at nothing is a link nobody can follow back, a record
     superseding itself removes itself from the library, and a cycle removes both ends and
     would make §6.3's chain walk run forever.
+
+    `campaign_id` is None on the upload path, where the record does not have an id yet: only
+    the dangling-pointer check applies there, and it is the one that mattered — the upload
+    path had no validation at all, so a typo left {"", "  ", "camp_nope"} in the set of
+    superseded ids and a link pointing at nothing.
     """
     target = (supersedes or "").strip()
     if not target:
         return None                       # the retraction
-    if target == campaign_id:
+    if campaign_id is not None and target == campaign_id:
         raise ValueError("a campaign cannot supersede itself — that would hide it from "
                          "every search, including its own")
     if conn.execute("SELECT 1 FROM campaigns WHERE id = ?", (target,)).fetchone() is None:
         raise ValueError(f"cannot supersede {target!r}: there is no such record. Supersession "
                          f"hides the superseded record from search, so a wrong id here "
                          f"quietly hides nothing and links nothing")
-    seen, walk = {campaign_id}, target
+    seen, walk = ({campaign_id} if campaign_id else set()), target
     while walk:
         if walk in seen:
             raise ValueError(f"that would make a supersession cycle through {walk!r}. Both "

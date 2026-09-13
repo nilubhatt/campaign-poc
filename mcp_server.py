@@ -304,7 +304,11 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
 
     Pass supersedes=<campaign_id> if this record replaces an existing one (e.g. a corrected
     deck) — the old record is then excluded from future search evidence, so it stops
-    confusing retrieval, without being deleted.
+    confusing retrieval, without being deleted. **Ask before setting it**: it is a claim
+    about what the marketer intended, not something to infer from two records looking alike,
+    and hiding the older record is the part they do not see. `update_campaign(supersedes="")`
+    takes it back. If the replaced record carries a judgment nobody has checked, the response
+    comes back with `earlier_judgment` — surface it and ask which of its predictions held.
 
     Add results later with add_metrics. On confirm=True, returns the campaign_id plus
     chunks_total/chunks_embedded (partial embedding failures are reported in warnings, not
@@ -350,16 +354,15 @@ def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optio
     It is a claim about what the marketer intended, not something to infer from two records
     looking alike, and accepting it removes the older record from every future search — the
     user hears "link these versions" and agrees, unseen, to hide one of them. Pass `""` to
-    take it back if it was set by mistake."""
+    take it back if it was set by mistake. Setting it returns `earlier_judgment` when the
+    replaced record carries a judgment nobody has checked yet — that is the moment to ask
+    which of its predictions held."""
     conn = store.connect()
     try:
-        ok = store.update_campaign(conn, campaign_id, title=title, detail=detail,
-                                   record_type=record_type, status=status, tags=tags,
-                                   region=region, market=market, markets=markets,
-                                   collection=collection, supersedes=supersedes)
-        if not ok:
-            return {"error": f"campaign {campaign_id} not found"}
-        return store.get_campaign(conn, campaign_id)
+        return core.update_campaign(conn, campaign_id, title=title, detail=detail,
+                                    record_type=record_type, status=status, tags=tags,
+                                    region=region, market=market, markets=markets,
+                                    collection=collection, supersedes=supersedes)
     finally:
         conn.close()
 

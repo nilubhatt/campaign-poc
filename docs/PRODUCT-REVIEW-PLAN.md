@@ -1401,6 +1401,43 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       supersession chain now and reports `through`, because a diff across a chain is a
       different claim from a diff between adjacent versions and a reader cannot tell
       otherwise. Closes D57.
+      **From review, and the first finding was this item recreating the §5.2 failure it had
+      quoted.** The prefilled offer FAILED WHEN ACCEPTED: `reconcile_evaluation` looks up
+      measured results on the record being replaced, which is a brief that never ran, so
+      accepting returned "no actual metrics on file" and told the model to record results for
+      a proposal. §5.2's rule is not "the tool must exist", it is that accepting must work —
+      and the test asserted the prefilled arguments instead of calling it. It offers
+      `save_reconciliation` directly now, and the test calls the offer.
+      *The D41 offer is accepted by calling `update_campaign`* — the one path where the loop
+      did not fire. The flow this item constructs led straight to the gap in it. That user is
+      the better case, not the worse one: they have both judgments on screen because they
+      just compared them.
+      *The link offer's evidence was still wrong.* It fired whenever a diff of two judged
+      records completed, which is not a fact about the records — it is a fact about which two
+      ids the CALLER passed, and the caller is the model 5.2 condemned. Two unrelated
+      campaigns got an offer to hide one of them, in the same response whose warning says the
+      library cannot tell which came first. The gate is a finding id now: a later finding
+      whose `repeats` names an earlier one, or a recorded resolution. Both are statements
+      somebody made, which is this module's own rule that a resemblance never outranks a
+      statement. The guard also reads both endpoints and their `is_superseded`, because
+      reading only the later one let a record already replaced by a third be re-parented.
+      *`ingest_campaign(supersedes=)` had no validation at all* — the primary declaration
+      path could create every state `update_campaign` refuses, and a typo left `{"", "  ",
+      "camp_nope"}` in the set of superseded ids. A blank is now no supersession rather than
+      an error, because whitespace is an empty form field and not a typo for an id.
+      *The order check and the chain walk disagreed about "linked".* The check read the two
+      `supersedes` columns while the walk read the chain, so `diff(v1, v3)` warned "no
+      supersedes link" while using the link, and `diff(v3, v1)` was silently answered
+      backwards with the chain never walked. Ancestry, not adjacency.
+      *Chain-adopted is not adjacent-adopted.* Between adjacent versions "adopted" means the
+      later reviewer confirmed it; across a chain it means confirmed once and not re-examined
+      since. Entries carry `resolved_in` and a caveat saying so — the module caveats weaker
+      claims than that one.
+      *And the payload was a quiz.* Unfiltered, a twelve-finding judgment turned filing a
+      document into an exam, and the findings are settled one by one when this version is
+      evaluated anyway — where 5.4 records each by id rather than as free text. Capped at
+      three with the total reported; the verdict and the predictions are not capped, because
+      the forecast-shaped claim is the thing only this moment catches.
 - [ ] **6.4 (J) Disconfirming search required** before a verdict is saved; record what came
       back, including "nothing".
 - [ ] **6.5 (K) `approve_if`** — the testable exit condition that converts revise → approve.

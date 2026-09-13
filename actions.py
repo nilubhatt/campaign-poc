@@ -165,14 +165,25 @@ def after_upload(*, campaign_id: str, status: Optional[str],
     # person moves on. It ends in `save_reconciliation` by way of `reconcile_evaluation`,
     # which is a tool that exists and works and has never once been called.
     if earlier_judgment:
+        # `save_reconciliation`, NOT `reconcile_evaluation` — and this was wrong in the first
+        # version in the exact way §5.2 records one field over. `reconcile_evaluation` looks
+        # up `metric_type='actual'` rows on the record being replaced, which is a BRIEF that
+        # never ran, so accepting the offer returned "no actual metrics on file" and told the
+        # model to record results for a proposal. An offer whose `why` says "this is the
+        # moment somebody can say" and which then refuses to hear the answer is worse than no
+        # offer. Everything `reconcile_evaluation` would have fetched is already in
+        # `earlier_judgment`, so the step it adds is the step that breaks.
         offers.append(action(
-            f"Check what the library predicted about \u201c{earlier_judgment['title']}\u201d "
-            f"against what this version shows",
-            "reconcile_evaluation",
+            f"Record whether the library was right about "
+            f"\u201c{earlier_judgment['title']}\u201d, now that this version shows",
+            "save_reconciliation",
             why="This replaces a record the library already judged, and nothing has yet "
                 "recorded whether that judgment was right. This is the moment somebody can "
                 "say.",
-            consent="ask", evaluation_id=earlier_judgment["evaluation_id"]))
+            consent="ask",
+            needs=["what the user says actually happened — which of the predictions and "
+                   "findings held, in their words"],
+            evaluation_id=earlier_judgment["evaluation_id"]))
     if status == "concluded" and not has_metrics:
         offers.append(action(
             "Record what this campaign actually achieved, so later judgments can weigh it",

@@ -166,6 +166,11 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
             "duplicate_title",
             detail=f"{len(duplicates)} existing campaign(s) already titled {title!r}",
             next_actions=[]))
+    # The upload path could create every state `update_campaign` refuses: a dangling id, a
+    # blank string, whitespace. `get_superseded_campaign_ids` then held {"", "  ",
+    # "camp_nope"} and the link pointed at nothing, silently. Self-reference and cycles are
+    # impossible here — the id does not exist yet — but "there is no such record" is not.
+    supersedes = store.checked_supersedes(conn, None, supersedes) if supersedes else None
     cid = store.insert_campaign(
         conn, title=title, record_type=record_type, status=status, tags=tags, region=region,
         market=market, markets=markets, collection=collection, supersedes=supersedes,
@@ -485,6 +490,11 @@ _MAX_RESOLVED = 120
 # ...and quantity cannot substitute for length: thirty capped findings is an essay built
 # out of bricks.
 _MAX_FINDINGS = 12
+# How many of an earlier judgment's findings to put in front of somebody who is uploading its
+# replacement (§6.3). They are shown so the user can see what was said; they get SETTLED one
+# by one when this version is evaluated. Unfiltered, filing a document became a twelve-item
+# quiz.
+_MAX_EARLIER_FINDINGS = 3
 # Which layer of a deck a quote was taken from (§2.5): what the brief says, or what somebody
 # said about it.
 _LAYERS = ("body", "commentary")
@@ -1913,9 +1923,14 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
     reordered = False
     order_basis = "as_given"
     warnings: list[dict] = []
-    if second.get("supersedes") == earlier:
+    # Adjacency is not the question — ANCESTRY is. Checking only the two `supersedes` columns
+    # meant `diff(v1, v3)` across a real chain still warned "no supersedes link", while the
+    # chain walk below happily used the link; and `diff(v3, v1)` was silently answered
+    # backwards with the chain never walked, though the library holds the whole thing. The
+    # order check and the chain walk disagreed about what "linked" means.
+    if earlier in store.supersession_chain(conn, later):
         order_basis = "supersession"
-    elif first.get("supersedes") == later:
+    elif later in store.supersession_chain(conn, earlier):
         first, second = second, first
         earlier, later = later, earlier
         reordered = True
@@ -1938,6 +1953,14 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
     # What every judgment along the way recorded as resolved, by finding id. A correction
     # taken at any point in the chain was taken.
     resolved_along_chain: dict = {}
+    # `[1:]` — everything AFTER the earlier endpoint. Worth saying that this slice cannot
+    # currently change the answer and is kept for intent: a judgment's `resolved` rows name
+    # findings from the version BEFORE it, never its own, so folding in the earlier
+    # endpoint's rows adds ids that are not in the set being matched against. Review's
+    # mutation of it survives the suite and no honest test kills it, because the two forms
+    # are equivalent on every input the schema can produce. Left explicit rather than
+    # simplified, so that if `resolved` ever names an arbitrary id the slice is already
+    # saying which versions are in scope.
     for link in through[1:]:
         judgment = store.latest_evaluation_for_campaign(conn, link)
         for row in ((judgment or {}).get("resolved") or []):
@@ -2042,8 +2065,23 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
                                              "category",
                                              "finding")}
         if finding.get("id") in resolved_by_id:
+            row = resolved_by_id[finding["id"]]
             entry["basis"] = "computed"
-            entry["now"] = resolved_by_id[finding["id"]].get("now")
+            entry["now"] = row.get("now")
+            # Which version actually recorded it, when that was not the one being compared
+            # against. Without it, a v1→v3 diff reported a correction as adopted with `now`
+            # text written by v2's reviewer and nothing said so — and the caveat below is
+            # only true of the chain case, so a reader has to be able to tell them apart.
+            if row.get("in_version") and row["in_version"] != later:
+                entry["resolved_in"] = row["in_version"]
+                # Between adjacent versions, "adopted" means the later reviewer confirmed it.
+                # Across a chain it means confirmed ONCE and not re-examined since: v3's
+                # reviewer compared against v2 and never looked at this finding again, so a
+                # regression between v2 and v3 would not show here. This module caveats
+                # weaker claims than that one.
+                entry["caveat"] = (
+                    f"Recorded as resolved in {row['in_version']}, not re-examined in "
+                    f"{later}. Adopted once, not confirmed since.")
             result["adopted"].append(entry)
             continue
 
@@ -2109,11 +2147,11 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
     result["counts"] = {name: len(result[name]) for name in
                         ("adopted", "raised_again", "newly_introduced", "no_longer_raised",
                          "carried_stale")}
-    result["next_actions"] = _offer_to_link_versions(first, second)
+    result["next_actions"] = _offer_to_link_versions(first, second, result)
     return result
 
 
-def _offer_to_link_versions(first: dict, second: dict) -> list[dict]:
+def _offer_to_link_versions(first: dict, second: dict, diff: dict) -> list[dict]:
     """Offer to record that one version replaces the other — D41, and only here.
 
     5.2 offered this prefilled from `closest_precedent`: a similarity match, ASSERTED by the
@@ -2121,25 +2159,42 @@ def _offer_to_link_versions(first: dict, second: dict) -> list[dict]:
     a fact about text, and the two are not the same kind of thing — both reviewers condemned
     it independently. What was wrong was never the offer; it was the evidence.
 
-    The evidence here is that two judgments of the same brief EXIST and a diff of them ran to
-    completion. That is a fact about the library rather than a resemblance, and it is
-    stronger than either of the alternatives 5.2's tracker row listed, because it means two
-    reviews already treated these as versions of one thing.
+    **The first version of this fix got the evidence wrong too, and review said so in the
+    same words.** It fired whenever a diff of two judged records completed — which is not a
+    fact about the records, it is a fact about which two ids the CALLER passed, and the
+    caller is the model 5.2 condemned. Two unrelated campaigns got an offer to hide one of
+    them, in the same response whose warning said the library cannot tell which came first.
+
+    So the gate is a finding id: a later finding whose `repeats` names an earlier one, or a
+    `resolved` row naming an earlier finding. Both are statements somebody made about these
+    two records being versions of one brief — which is this module's own rule, that a
+    resemblance never outranks a statement. Unrelated campaigns share no finding ids and get
+    nothing.
 
     The offer names the record it would hide, in the label, because that is the consequence
     the user is agreeing to and it is invisible in the arguments. §5.2's other lesson: this
     is offered, never taken — accepting hides a record from every search, and `supersedes`
     can now be cleared, which is what makes offering it defensible at all.
     """
-    if second.get("supersedes") or first.get("supersedes"):
+    # Either endpoint already linked, in either direction. Reading only the two `supersedes`
+    # columns missed fan-in: an earlier record already replaced by a THIRD record was still
+    # offered up to be replaced again, silently making two records claim the same one.
+    if (second.get("supersedes") or first.get("supersedes")
+            or second.get("is_superseded") or first.get("is_superseded")):
+        return []
+    # A statement, not a resemblance: an id-matched repeat, or a recorded resolution.
+    linked = any(entry.get("match") == "id" for entry in diff["raised_again"])
+    linked = linked or bool(diff["adopted"])
+    if not linked:
         return []
     return actions.trim([actions.action(
         f"Record that “{second['title']}” replaces “{first['title']}”, "
         f"which removes “{first['title']}” from future search results",
         "update_campaign",
-        why="Both versions have been judged and compared as versions of one brief, but "
-            "nothing links them — so searches still return both, and the older one can be "
-            "cited as precedent for the newer.",
+        why="A judgment of one names a finding from the judgment of the other by id, so "
+            "somebody has already treated these as versions of one brief — but nothing links "
+            "the records, so searches still return both and the older can be cited as "
+            "precedent for the newer.",
         consent="ask", campaign_id=second["id"], supersedes=first["id"])])
 
 
@@ -3118,6 +3173,28 @@ def _incompleteness_warnings(conn) -> list[dict]:
         detail=f"{outstanding} unembedded items across {records} campaigns")]
 
 
+def update_campaign(conn, campaign_id: str, **fields) -> dict:
+    """`store.update_campaign`, plus §6.3's moment when a supersession is declared LATE.
+
+    The first version fired the prediction loop only at upload — and the D41 offer is
+    accepted by calling THIS, so the flow the item constructs (diff two judged versions,
+    offer to link, accept) landed on the one path where the loop never fired. That user is
+    the better case, not the worse one: they have both judgments on screen because they just
+    compared them.
+    """
+    if not store.update_campaign(conn, campaign_id, **fields):
+        return {"error": f"campaign {campaign_id} not found"}
+    record = store.get_campaign(conn, campaign_id)
+    earlier_judgment = _judgment_to_check(conn, fields.get("supersedes") or None)
+    if not earlier_judgment:
+        return record
+    return {**record, "earlier_judgment": earlier_judgment,
+            "next_actions": actions.after_upload(
+                campaign_id=campaign_id, status=record["status"],
+                has_metrics=bool(record["metrics"]),
+                earlier_judgment=earlier_judgment)}
+
+
 def _judgment_to_check(conn, superseded: Optional[str]) -> Optional[dict]:
     """The prior judgment this new record is about to settle, or None (§6.3).
 
@@ -3143,8 +3220,15 @@ def _judgment_to_check(conn, superseded: Optional[str]) -> Optional[dict]:
     if store.unreconciled_evaluation_id(conn, superseded) != judgment["id"]:
         return None
     record = store.get_campaign(conn, superseded)
+    # Capped, and the cap is the point. The user is filing a document, not sitting an exam:
+    # unfiltered, a twelve-finding judgment turned an upload into a quiz. The findings get
+    # settled ONE BY ONE in the evaluation of this new version, where 5.4 already records
+    # each as resolved or raised again — structurally, by id, rather than as free text. What
+    # only THIS moment can catch is the forecast-shaped claim, which is why the verdict and
+    # the predictions are not capped.
+    all_findings = judgment.get("findings") or []
     open_findings = [{k: f.get(k) for k in ("id", "severity", "kind", "departure", "finding")}
-                     for f in (judgment.get("findings") or [])]
+                     for f in all_findings[:_MAX_EARLIER_FINDINGS]]
     return {
         "campaign_id": superseded,
         "title": record["title"] if record else None,
@@ -3153,10 +3237,16 @@ def _judgment_to_check(conn, superseded: Optional[str]) -> Optional[dict]:
         "summary": judgment.get("summary"),
         "predictions": judgment.get("predictions"),
         "open_findings": open_findings,
-        "ask": ("This replaces a record the library has already judged. Ask which of these "
-                "held and which did not — that is the only way the library learns whether "
-                "its own judgment is worth anything, and this is the moment somebody can "
-                "actually answer. Record the answer with save_reconciliation."),
+        "open_findings_total": len(all_findings),
+        "ask": ("This replaces a record the library has already judged. Ask which of the "
+                "predictions and the verdict held — that is the only way the library learns "
+                "whether its own judgment is worth anything, and this is the moment somebody "
+                "can actually answer. Record their answer with save_reconciliation, in their "
+                "words, as `comparison`. Do NOT call reconcile_evaluation: it looks for "
+                "measured results on the record being replaced, which is a brief that never "
+                "ran. The findings are listed so the user can see what was said; the place "
+                "they get settled one by one is the evaluation of THIS version, which "
+                "records each as resolved or raised again."),
     }
 
 
