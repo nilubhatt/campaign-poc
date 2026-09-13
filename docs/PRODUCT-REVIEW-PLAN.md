@@ -1438,8 +1438,36 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       evaluated anyway — where 5.4 records each by id rather than as free text. Capped at
       three with the total reported; the verdict and the predictions are not capped, because
       the forecast-shaped claim is the thing only this moment catches.
-- [ ] **6.4 (J) Disconfirming search required** before a verdict is saved; record what came
+- [x] **6.4 (J) Disconfirming search required** before a verdict is saved; record what came
       back, including "nothing".
+      **The server runs it, not the model**, and that is the decision worth writing down
+      because the review does not say who. A model that has already reached a verdict, asked
+      to go and find evidence against itself, is marking its own homework — and the failure
+      the review names, "drift toward confirming whatever the first strong match suggests",
+      is exactly what would shape the query. This codebase settled the same question twice
+      already, in §2.4's `basis` rule and §6.1's `precedent.checked`: a check is worth
+      something only if a difference in it is a bug, which holds only when the server did it.
+      A model-supplied `evidence.disconfirming` is refused.
+      **What contradicts depends on the verdict**, which is why it happens at save time and
+      not at retrieval. A `revise` or `reject` is contradicted by precedent that looked like
+      this and WORKED — Mexico, the library's own warning, a brief rated weak that performed.
+      An `approve` is contradicted by precedent that looked like this and did not. `verified`
+      tags only: a performance tag somebody typed is an impression, and an impression cannot
+      be the counterweight to a verdict.
+      **Three outcomes, not two.** "It could not be checked", "it was checked and nothing came
+      back" and "it was checked and something did" are three conclusions, and collapsing any
+      two turns an absence of evidence into evidence of absence. A library with nothing
+      measured cannot argue back, and reporting that as a clean check would make an empty
+      shelf a supporting vote. Each has its own code and its own sentence in the note.
+      **`uncited` is the point, not `found`.** A contradicting campaign the judgment DID cite
+      has already been weighed; throwing it back would train the reader to skip the field.
+      The Mexico case is the uncited one — the reasoner never retrieved it, so it never had
+      to explain it away.
+      **And the save-time check cannot change a verdict, so there is a second half.**
+      `prepare_evaluation` now splits the retrieved evidence into `outcomes.worked` /
+      `did_not_work` / `unknown` by measured result, instead of handing over one ranked list
+      in which the strongest match sets the tone. The save-time search records
+      overconfidence; this is the part that can prevent it.
 - [ ] **6.5 (K) `approve_if`** — the testable exit condition that converts revise → approve.
       *2.4 defined and bounded the field; what remains is requiring it on a revise, forbidding
       it on an approve, and requiring a `fix` on every blocking/should_fix finding.*

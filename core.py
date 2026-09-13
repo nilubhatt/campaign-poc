@@ -906,6 +906,127 @@ def _how_to_say_it(by_class: dict, findings: list) -> str:
     return " ".join(parts)
 
 
+def _say_the_disconfirming_check(check: dict) -> str:
+    """§6.4 makes overconfidence visible, which it can only do if somebody is told."""
+    if check["code"] == "contradicting_precedent":
+        return (" The server searched for precedent that CONTRADICTS this verdict and found "
+                f"{len(check['uncited'])} the judgment did not cite — see `disconfirming`. "
+                "Say so before the verdict: a campaign that looked like this and went the "
+                "other way is the one thing most likely to change what the marketer does.")
+    if check["code"] == "nothing_to_check_against":
+        return (" The server could not check this verdict against the other side: nothing in "
+                "the library has measured results pointing that way. Say that the check was "
+                "not possible — do NOT say nothing contradicted it.")
+    return (" The server searched for precedent contradicting this verdict and found none. "
+            "That is worth one sentence: the verdict was argued against and it held.")
+
+
+# §6.4: which way a verdict has to be argued with. A negative verdict is contradicted by
+# precedent that looked like this and WORKED — Mexico, the library's own warning, a brief
+# rated weak that performed. A positive verdict is contradicted by precedent that looked like
+# this and did not.
+_DISCONFIRMING = {
+    "revise": ("precedent_that_worked", "performed_well"),
+    "reject": ("precedent_that_worked", "performed_well"),
+    "approve": ("precedent_that_failed", "underperformed"),
+}
+_MAX_DISCONFIRMING = 3
+
+
+def _both_poles(evidence: list) -> dict:
+    """The same retrieved evidence, split by what actually happened (§6.4).
+
+    Only `verified` performance tags count. A `performed_well` somebody typed is an
+    impression, and weighing an impression as the counterweight to a verdict is the failure
+    tag provenance exists to prevent. A record with no verified performance tag is in
+    neither pole — `unknown` is the honest third bucket, and it is usually the biggest.
+    """
+    poles: dict = {"worked": [], "did_not_work": [], "unknown": []}
+    for row in evidence:
+        verified = {t.get("value") for t in (row.get("tags") or [])
+                    if t.get("source") == "verified"}
+        where = ("worked" if "performed_well" in verified
+                 else "did_not_work" if "underperformed" in verified
+                 else "unknown")
+        poles[where].append({"campaign_id": row["campaign_id"], "title": row["title"],
+                             "similarity": row["similarity"]})
+    return poles
+
+
+def _disconfirming_search(conn, *, verdict: str, text: str,
+                          cited_ids: Optional[list]) -> dict:
+    """One query for precedent that contradicts this verdict, run by the SERVER (§6.4).
+
+    The review asked for the search and for the result to be recorded, "including nothing".
+    It did not say who runs it, and that is the decision worth writing down: a model that has
+    already reached a verdict, asked to go and find evidence against itself, is marking its
+    own homework — and the failure the review names, drifting toward confirming the first
+    strong match, is exactly what would shape the query. This codebase settled the same
+    question twice already, in `basis` and in `precedent.checked`: a check is only worth
+    anything if a difference in it is a bug, which holds only when the server did it.
+
+    Restricted to `verified` performance tags — a tag somebody typed is an impression, and
+    weighing an impression as the counterweight to a verdict is the unverified-evidence
+    failure tag provenance exists to prevent.
+    """
+    looked_for, tag = _DISCONFIRMING[verdict]
+    # This runs on EVERY save, so it has to survive a database that predates the columns it
+    # reads. An upgraded v0.2.0 schema has no `tags`, and the first version of this crashed
+    # every judgment on exactly the machine the review was gathered on — the same lesson
+    # §6.1's `text_on_file` learned, one function over.
+    if not {"tags", "markets"} <= set(store._columns(conn, "campaigns")):
+        return {
+            "looked_for": looked_for, "found": [], "uncited": [], "basis": "computed",
+            "code": "nothing_to_check_against",
+            "what_it_means": ("This library predates performance tagging, so nothing in it "
+                              "carries a measured verdict that could contradict this one. "
+                              "That is a fact about the library, NOT a check this judgment "
+                              "passed."),
+        }
+    # Whether the library COULD argue back at all, asked before asking whether it did. An
+    # empty shelf reported as a clean check turns an absence of evidence into a supporting
+    # vote, and those are opposite conclusions about the same judgment.
+    possible = store.filter_campaign_ids(conn, tags=[{"value": tag, "source": "verified"}])
+    if not possible:
+        return {
+            "looked_for": looked_for, "found": [], "uncited": [], "basis": "computed",
+            "code": "nothing_to_check_against",
+            "what_it_means": (
+                f"Nothing in the library is tagged {tag!r} with measured results behind it, "
+                f"so there is no precedent that could contradict this verdict. That is a "
+                f"fact about the library, NOT a check this judgment passed."),
+        }
+    try:
+        matches = find_similar(conn, text=text, top_k=_MAX_DISCONFIRMING,
+                               tags=[{"value": tag, "source": "verified"}],
+                               full_detail=False)
+    except ValueError:
+        matches = []
+    already = set(cited_ids or [])
+    found = [{"campaign_id": m["campaign_id"], "title": m["title"],
+              "similarity": m["similarity"], "cited": m["campaign_id"] in already}
+             for m in matches]
+    uncited = [row["campaign_id"] for row in found if not row["cited"]]
+    return {
+        "looked_for": looked_for,
+        "found": found,
+        # The point is not the record, it is the noticing: a contradicting campaign the
+        # judgment never cited is the Mexico case — the reasoner never retrieved it, so it
+        # never had to explain it away. One it DID cite has already been weighed, and
+        # throwing that back would train the reader to skip the field.
+        "uncited": uncited,
+        "basis": "computed",
+        "code": "contradicting_precedent" if uncited else "nothing_contradicted_it",
+        "what_it_means": (
+            f"{len(uncited)} campaign(s) resembling this one are tagged {tag!r} with measured "
+            f"results, and this judgment did not cite them. Say so."
+            if uncited else
+            f"Nothing in the library resembling this one is tagged {tag!r} with measured "
+            f"results behind it. The verdict was checked against the case for the other side "
+            f"and nothing came back."),
+    }
+
+
 def _clean_closest_precedent(conn, value) -> Optional[dict]:
     """The same id-and-quote shape as a finding's precedent, and it was outside the check.
 
@@ -1099,6 +1220,13 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         raise ValueError("summary is required — one line a person can act on")
     approve_if = _bounded(approve_if, "approve_if", _MAX_APPROVE_IF)
     closest_precedent = _clean_closest_precedent(conn, closest_precedent)
+    # §6.4 is a server fact for the same reason `basis` and `precedent.checked` are: a check
+    # the model reports is a claim, and a model asked to find evidence against a verdict it
+    # has already reached is marking its own homework.
+    if isinstance(evidence, dict) and "disconfirming" in evidence:
+        raise ValueError("evidence.disconfirming is written by the server, not by you — it "
+                         "records the search the server ran for precedent contradicting your "
+                         "verdict. A check you report on yourself is not a check.")
     resolved = _clean_resolved(resolved, conn)
 
     cleaned = []
@@ -1262,6 +1390,16 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         evidence = dict(evidence or {})
         evidence["most_valuable_missing_input"] = missing
 
+    # §6.4, and recorded rather than only returned: a check that lives for one response is a
+    # check nobody can audit, and the review asked for this precisely so overconfidence stays
+    # visible afterwards.
+    disconfirming = _disconfirming_search(
+        conn, verdict=verdict,
+        text="\n".join([summary] + [f["finding"] for f in cleaned]),
+        cited_ids=cited_ids)
+    evidence = dict(evidence or {})
+    evidence["disconfirming"] = disconfirming
+
     eid = store.next_evaluation_id()
     for n, finding in enumerate(cleaned, start=1):
         finding["id"] = f"{eid}#{n}"
@@ -1312,13 +1450,14 @@ def save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
                          if f.get("departure") == "possible_improvement"],
         "approve_if": approve_if,
         "most_valuable_missing_input": missing,
+        "disconfirming": disconfirming,
         # §5.2: the three things anyone actually does after a judgment, prefilled. The
         # supersession offer only appears when there IS an earlier version — an approval of
         # a new brief supersedes nothing, and an offer that is always there stops being read.
         "next_actions": actions.after_evaluation(
             subject_title=subject_title, evaluation_id=eid, verdict=verdict,
             campaign_id=campaign_id),
-        "note": _how_to_say_it(by_class, cleaned),
+        "note": _how_to_say_it(by_class, cleaned) + _say_the_disconfirming_check(disconfirming),
     }
 
 
@@ -3323,6 +3462,10 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
              "which corrections were taken instead of guessing from how alike two sentences "
              "read. "
              if _earlier_version_findings(conn, campaign_id) else "") +
+            "`outcomes` splits this evidence into what WORKED and what did NOT, by measured "
+            "result rather than by impression. Read both before deciding: resemblance to a "
+            "strong performer is not evidence, and a brief that looks like something that "
+            "failed may be the thing that worked. Say which side you weighed. "
             "Reason over this evidence, then call save_evaluation with a verdict "
             "(approve / revise / reject), a one-line summary, and one short finding per "
             "problem — each with its severity, its kind, and a quote from the campaign or "
@@ -3342,6 +3485,13 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: i
             "an observation, and saying it as one is better than a citation that fails."
         ),
         "campaigns_with_outcomes": [e["campaign_id"] for e in concluded],
+        # §6.4's other half, and the half that can actually change a verdict. The save-time
+        # search RECORDS overconfidence; by then the judgment is written. What changes the
+        # reasoning is seeing both sides while reasoning — so the evidence that worked and
+        # the evidence that did not are separated here, instead of arriving as one ranked
+        # list in which the strongest match sets the tone. `verified` only: a performance tag
+        # somebody typed is an impression, and an impression cannot be the counterweight.
+        "outcomes": _both_poles(evidence),
         # §5.3: the single thing that would most change THIS verdict, or None when nothing
         # is. About the evidence cited, not about the library — a library that is 90%
         # measured can still produce a judgment resting entirely on the unmeasured tenth.
