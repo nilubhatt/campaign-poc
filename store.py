@@ -139,6 +139,52 @@ CREATE TABLE IF NOT EXISTS metric_registry (
     times_seen    INTEGER NOT NULL DEFAULT 0,
     markets       TEXT NOT NULL DEFAULT '[]'   -- which markets it has appeared in (§8.3)
 );
+CREATE TABLE IF NOT EXISTS execution_drift (
+    -- §9.5: the drift figure, stored ON the outcome. "`performed_well` at low drift and
+    -- `performed_well` at high drift stop looking identical — the first is evidence the brief
+    -- was good, the second is evidence something was good and the brief may not have been it."
+    --
+    -- REWRITTEN whenever the answer changes: results arriving, photographs arriving, a
+    -- classification being made. It is a cache of the current reading, not a snapshot of what a
+    -- past judgment rested on — an earlier comment here claimed the latter, which stopped being
+    -- true the moment there were three call sites, and a false claim carrying the server's
+    -- authority is the failure this product is written against. D128 owns making it versioned
+    -- so a saved verdict can be read against the figure that existed when it was written.
+    campaign_id   TEXT PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
+    score         REAL,                  -- NULL when nothing was ever checked
+    relative      REAL,
+    counts        TEXT NOT NULL DEFAULT '{}',   -- JSON: as_briefed / never_appeared / new / …
+    classified    TEXT NOT NULL DEFAULT '{}',   -- JSON: improvement / neutral / degradation …
+    items         TEXT NOT NULL DEFAULT '[]',   -- JSON: the classified items themselves —
+                                  -- §9.5 asks for "the score, the counts, and the classified
+                                  -- items", and counts alone cannot say WHAT was judged good
+    status        TEXT NOT NULL,         -- as_briefed | drifted | never_checked
+    created_at    REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS drift_classifications (
+    -- §9.4: what somebody made of one piece of execution drift. APPENDED, never updated — a
+    -- reading made before the numbers came in and one made after are two judgments about the
+    -- same thing, and the pair is worth more than either.
+    id            TEXT PRIMARY KEY,
+    campaign_id   TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    -- WHAT this is about, as a stable id: the asset a briefed image or delivered photograph
+    -- has, or the commitment a promise has. It was the file path, which `_keep_asset` sets to
+    -- a uuid on purpose — so the offer read "say whether a3f9c21d88e04b17.png not matching was
+    -- a loss", the stored record was unreadable six months later, and a person answering in
+    -- their own words created a DIFFERENT item, so the offer re-fired on the same uuid forever.
+    subject       TEXT NOT NULL,
+    -- And the same thing in words somebody can read: the promise the brief made, or what the
+    -- image was. A judgment nobody can read back is one nobody can act on.
+    item          TEXT NOT NULL,
+    classification TEXT NOT NULL,        -- improvement | neutral | degradation | too_early
+    why           TEXT NOT NULL,
+    classified_by TEXT NOT NULL,
+    -- Whether a measured outcome existed WHEN THIS WAS JUDGED. "Usually needs the outcome to
+    -- settle it" — so a reader can weigh "this looked like an improvement" against "this was
+    -- an improvement" without reconstructing which one it was.
+    outcome_known INTEGER NOT NULL DEFAULT 0,
+    created_at    REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS commitments (
     -- §9.3: the specific, checkable promises a brief makes. "A claw machine loaded with
     -- branded merchandise" is a thing somebody can look for in the photographs; "a premium
@@ -1440,15 +1486,29 @@ def outstanding_by_campaign(conn, campaign_id: Optional[str] = None) -> list[dic
                   key=lambda r: -(r["sections_left"] + r["images_left"]))
 
 
-def get_all_fingerprints(conn, *, exclude_campaign_id: Optional[str] = None) -> list[dict]:
-    """[{asset_id, campaign_id, phash}] for a provenance check, optionally excluding one
-    campaign's own assets (so an image doesn't "match" itself)."""
-    sql = """SELECT af.asset_id AS asset_id, a.campaign_id AS campaign_id, af.phash AS phash
+def get_all_fingerprints(conn, *, exclude_campaign_id: Optional[str] = None,
+                         phase: Optional[str] = None) -> list[dict]:
+    """[{asset_id, campaign_id, phash, phase}] for a provenance check, optionally excluding one
+    campaign's own assets (so an image doesn't "match" itself).
+
+    `phase` travels on every row (§9.1/D121). This corpus was built when "asset" meant
+    "creative", and §9.1 put delivered event photographs into the same table — so a reuse check
+    could report "this image is already in the library" about a photograph OF an execution
+    without ever saying that is what it was. It is still a real match and still worth
+    reporting; what it is not is the same finding.
+    """
+    sql = """SELECT af.asset_id AS asset_id, a.campaign_id AS campaign_id, af.phash AS phash,
+                    a.phase AS phase
              FROM asset_fingerprints af JOIN assets a ON a.id = af.asset_id"""
-    params: list = []
+    where, params = [], []
     if exclude_campaign_id:
-        sql += " WHERE a.campaign_id != ?"
+        where.append("a.campaign_id != ?")
         params.append(exclude_campaign_id)
+    if phase:
+        where.append("a.phase = ?")
+        params.append(phase)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
@@ -1458,23 +1518,30 @@ def mark_asset_embedded(conn, asset_id: str) -> None:
 
 
 def list_assets(conn, *, campaign_ids: Optional[list[str]] = None,
-               exclude_campaign_id: Optional[str] = None) -> list[dict]:
-    """[{id, campaign_id, ...}] for CLIP similarity search (§6.6) — either restricted to a
-    filtered candidate set of campaigns, or all assets excluding one campaign's own."""
+               exclude_campaign_id: Optional[str] = None,
+               phase: Optional[str] = None) -> list[dict]:
+    """[{id, campaign_id, phase, ...}] for CLIP similarity search (§6.6) — either restricted to
+    a filtered candidate set of campaigns, or all assets excluding one campaign's own.
+
+    `phase` narrows it to one side (§9.1/D121): `proposed` is the creative corpus this search
+    was written against, `delivered` the photographs of what actually ran. Unfiltered by
+    default, because "your new hero shot looks like a photograph of the Bogotá activation" is
+    a real answer — it just has to arrive saying which it is.
+    """
+    where, params = [], []
     if campaign_ids is not None:
         if not campaign_ids:
             return []
-        placeholders = ",".join("?" * len(campaign_ids))
-        rows = conn.execute(
-            f"SELECT * FROM assets WHERE campaign_id IN ({placeholders})", campaign_ids
-        ).fetchall()
+        where.append(f"campaign_id IN ({','.join('?' * len(campaign_ids))})")
+        params += list(campaign_ids)
     elif exclude_campaign_id:
-        rows = conn.execute(
-            "SELECT * FROM assets WHERE campaign_id != ?", (exclude_campaign_id,)
-        ).fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM assets").fetchall()
-    return [dict(r) for r in rows]
+        where.append("campaign_id != ?")
+        params.append(exclude_campaign_id)
+    if phase:
+        where.append("phase = ?")
+        params.append(phase)
+    sql = "SELECT * FROM assets" + (" WHERE " + " AND ".join(where) if where else "")
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
 # ── metrics ──────────────────────────────────────────────────────────────────
@@ -1652,6 +1719,8 @@ def bulk_import_metrics(conn, rows: list[dict], *, confirm: bool = False) -> dic
                 "columns": columns,
                 "what_it_means": _import_preview_sentence(rows, columns, problems)}
     imported, errors = 0, []
+    # Which campaigns need §9.5's drift figure refreshed once the loop is done.
+    touched: set[str] = set()
     # An explicit BEGIN, because without one the per-row SAVEPOINT was the OUTERMOST one — and
     # releasing the outermost savepoint commits. So the batch fsynced once per row after all,
     # exactly as it did before `commit=False` existed, while the comment below claimed
@@ -1730,13 +1799,19 @@ def bulk_import_metrics(conn, rows: list[dict], *, confirm: bool = False) -> dic
             try:
                 written = core.add_metrics(
                     batched, campaign_id=cid, detail=row.get("detail"),
-                    structured=row.get("structured"), metric_type=metric_type, confirm=True)
+                    structured=row.get("structured"), metric_type=metric_type, confirm=True,
+                    # Once per campaign, after the loop — not once per row. §9.5's snapshot
+                    # reads every asset and every classification, and a workbook with fifty
+                    # rows for one campaign ran that fifty times to keep the last answer.
+                    snapshot_drift=False)
             except Exception:
                 conn.execute("ROLLBACK TO bulk_row")
                 raise
             finally:
                 conn.execute("RELEASE bulk_row")
             imported += 1
+            if metric_type == "actual":
+                touched.add(cid)
             # Everything the write path asked or refused, kept rather than dropped. The return
             # was discarded, and the questions inside it are ONE-SHOT: `metrics.record` marks a
             # measure surfaced and offered as a side effect, so an import consumed §8.2's "is
@@ -1754,6 +1829,10 @@ def bulk_import_metrics(conn, rows: list[dict], *, confirm: bool = False) -> dic
         except Exception as exc:
             errors.append({"row": i, "reason": str(exc), **_retry_of(exc)})
 
+    # Once per campaign, with every row on file — the figure a later citation carries has to
+    # rest on the whole import, not on whichever row happened to be last.
+    for cid in touched:
+        core._snapshot_execution_drift(conn, cid)
     conn.commit()
     result = {"preview": False, "imported": imported, "errors": errors,
               "not_processed": not_processed, "columns": columns,
@@ -2008,6 +2087,71 @@ def touch_metric(conn, canonical: str, *, campaign_id: Optional[str] = None) -> 
                  "last_seen = ?, times_seen = times_seen + 1, markets = ? WHERE canonical = ?",
                  (now, now, json.dumps(markets), canonical))
     conn.commit()
+
+
+def record_execution_drift(conn, campaign_id: str, *, score, relative, counts, classified,
+                           status: str, items=None) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO execution_drift (campaign_id, score, relative, counts, "
+        "classified, items, status, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        (campaign_id, score, relative, json.dumps(counts), json.dumps(classified),
+         json.dumps(items or []), status, _now()))
+    conn.commit()
+
+
+def execution_drift_for(conn, campaign_id: str) -> dict:
+    """What was known about how faithfully this campaign ran, when its results were filed.
+
+    `never_checked` is a THIRD state and not a low score. Reading "nobody looked" as "it ran as
+    briefed" is the assumption that makes the whole of Phase 9 necessary.
+    """
+    if not _columns(conn, "execution_drift"):
+        return _no_drift_on_file()
+    row = conn.execute("SELECT * FROM execution_drift WHERE campaign_id = ?",
+                       (campaign_id,)).fetchone()
+    if not row:
+        return _no_drift_on_file()
+    d = dict(row)
+    d["counts"] = json.loads(d["counts"] or "{}")
+    d["classified"] = json.loads(d["classified"] or "{}")
+    d["items"] = json.loads(d.get("items") or "[]")
+    d["basis"] = "computed"
+    return d
+
+
+def _no_drift_on_file() -> dict:
+    return {"score": None, "relative": None, "counts": {}, "classified": {}, "items": [],
+            "status": "never_checked", "basis": "computed"}
+
+
+def insert_drift_classification(conn, *, campaign_id: str, subject: str, item: str,
+                                classification: str, why: str, classified_by: str,
+                                outcome_known: bool) -> str:
+    did = _id("drift")
+    conn.execute(
+        "INSERT INTO drift_classifications (id, campaign_id, subject, item, classification, "
+        "why, classified_by, outcome_known, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (did, campaign_id, subject, item, classification, why, classified_by,
+         int(outcome_known), _now()))
+    conn.commit()
+    return did
+
+
+def drift_classifications(conn, campaign_id: str, *, subject: Optional[str] = None) -> list:
+    """Oldest first — the order a reading changed in is the point of keeping both."""
+    if not _columns(conn, "drift_classifications"):
+        return []
+    sql = "SELECT * FROM drift_classifications WHERE campaign_id = ?"
+    params: list = [campaign_id]
+    if subject is not None:
+        sql += " AND subject = ?"
+        params.append(subject)
+    return [dict(r) for r in conn.execute(sql + " ORDER BY created_at, id", params).fetchall()]
+
+
+def latest_drift_classification(conn, campaign_id: str, subject: str) -> Optional[dict]:
+    rows = drift_classifications(conn, campaign_id, subject=subject)
+    return rows[-1] if rows else None
 
 
 def insert_commitment(conn, *, campaign_id: str, text: str, source_line: str,

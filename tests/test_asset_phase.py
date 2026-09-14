@@ -227,3 +227,108 @@ def test_a_date_is_stored_normalised(conn, tmp_path):
                             phase="delivered", captured_on="20260314")
 
     assert store.get_assets_for_campaign(conn, cid)[0]["captured_on"] == "2026-03-14"
+
+
+# ── D121: the search corpora predate the field ──────────────────────────────
+
+def _structured_png(tmp_path, name, seed=1):
+    """pHash measures STRUCTURE — flat-colour images all hash to 8000000000000000, so a
+    fixture built from them is one image as far as any of this is concerned."""
+    import random
+
+    from PIL import Image
+
+    rng = random.Random(seed)
+    img = Image.new("RGB", (64, 64), (250, 250, 250))
+    px = img.load()
+    for _ in range(700):
+        x, y = rng.randrange(64), rng.randrange(64)
+        c = (rng.randrange(256), rng.randrange(256), rng.randrange(256))
+        for dx in range(4):
+            for dy in range(4):
+                if x + dx < 64 and y + dy < 64:
+                    px[x + dx, y + dy] = c
+    path = tmp_path / name
+    img.save(path)
+    return str(path)
+
+
+def test_a_reuse_match_says_which_side_it_came_from(conn, tmp_path):
+    """The reuse corpus was built when "asset" meant "creative". §9.1 put photographs of
+    executions in the same table, so "this image is already in the library" could be said about
+    a photograph OF an event in exactly the words used for a reused hero render. Both are real
+    matches; they are not the same finding."""
+    cid = _campaign(conn)
+    shot = _structured_png(tmp_path, "wrap.png", seed=4)
+    core.ingest_image_asset(conn, campaign_id=cid, asset_ref={"path": shot},
+                            phase="delivered", captured_on="2026-03-14")
+
+    out = core.check_image_provenance(conn, asset_ref={"path": shot})
+
+    assert out["matches"], out
+    assert out["matches"][0]["phase"] == "delivered"
+    assert "photograph of what actually ran" in out["matches"][0]["what_it_is"]
+
+
+def test_briefed_creative_says_that_it_is_briefed_creative(conn, tmp_path):
+    cid = _campaign(conn)
+    hero = _structured_png(tmp_path, "hero.png", seed=9)
+    core.ingest_image_asset(conn, campaign_id=cid, asset_ref={"path": hero})
+
+    out = core.check_image_provenance(conn, asset_ref={"path": hero})
+
+    assert out["matches"][0]["phase"] == "proposed"
+    assert "briefed image" in out["matches"][0]["what_it_is"]
+
+
+def test_the_reuse_check_can_be_narrowed_to_one_side(conn, tmp_path):
+    cid = _campaign(conn)
+    shot = _structured_png(tmp_path, "wrap2.png", seed=12)
+    core.ingest_image_asset(conn, campaign_id=cid, asset_ref={"path": shot},
+                            phase="delivered", captured_on="2026-03-14")
+
+    creative_only = core.check_image_provenance(conn, asset_ref={"path": shot},
+                                                phase="proposed")
+    delivered_only = core.check_image_provenance(conn, asset_ref={"path": shot},
+                                                 phase="delivered")
+
+    assert creative_only["matches"] == []
+    assert len(delivered_only["matches"]) == 1
+
+
+def test_visual_similarity_says_it_too(conn, tmp_path):
+    """"Looks like the APAC shoot" and "looks like a photograph of the Bogotá activation" are
+    different answers to the same query, and this corpus could not tell them apart."""
+    cid = _campaign(conn)
+    shot = _structured_png(tmp_path, "act.png", seed=21)
+    core.ingest_image_asset(conn, campaign_id=cid, asset_ref={"path": shot},
+                            phase="delivered", captured_on="2026-03-14")
+
+    out = core.find_similar_images(conn, asset_ref={"path": shot})
+
+    assert out["matches"], out
+    assert out["matches"][0]["phase"] == "delivered"
+    assert "actually ran" in out["matches"][0]["what_it_is"]
+
+
+def test_visual_similarity_can_be_narrowed_too(conn, tmp_path):
+    cid = _campaign(conn)
+    shot = _structured_png(tmp_path, "act2.png", seed=31)
+    core.ingest_image_asset(conn, campaign_id=cid, asset_ref={"path": shot},
+                            phase="delivered", captured_on="2026-03-14")
+
+    assert core.find_similar_images(conn, asset_ref={"path": shot},
+                                    phase="proposed")["matches"] == []
+    assert core.find_similar_images(conn, asset_ref={"path": shot},
+                                    phase="delivered")["matches"]
+
+
+def test_an_unrecognised_phase_is_never_described_as_creative(conn):
+    """`assets.phase` is NOT NULL with a `proposed` default, so this cannot arrive from the
+    database — it is the guard for the next value somebody adds to the vocabulary. Describing
+    an unrecognised phase as "a briefed image" would invent provenance."""
+    said = core._what_the_match_is("rehearsal")
+
+    assert "briefed" not in said
+    assert "rehearsal" in said
+    assert core._what_the_match_is("proposed") != said

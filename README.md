@@ -121,7 +121,8 @@ Offline smoke test (no Ollama): `CAMPAIGN_POC_EMBED_PROVIDER=hash python -m http
 `upload_campaign` · `update_campaign` · `delete_campaign` · `add_metrics` ·
 `bulk_import_metrics` · `upload_image_asset` · `check_image_provenance` ·
 `find_similar_images` · `upload_image_assets` · `compare_execution` · `check_commitments` ·
-`list_commitments` · `add_commitment` · `drop_commitment` · `list_campaigns` · `get_campaign` · `find_similar_campaigns` ·
+`list_commitments` · `add_commitment` · `drop_commitment` ·
+`classify_drift` · `drift_readings` · `list_campaigns` · `get_campaign` · `find_similar_campaigns` ·
 `diff_campaigns` · `coverage` · `gaps` · `getting_started` · `prepare_evaluation` · `save_evaluation` · `get_evaluation` ·
 `list_evaluations` · `reconcile_evaluation` · `save_reconciliation` · `resolve_measure` ·
 `measure_status` · `graduate_measure` · `note_correction` · `list_corrections` ·
@@ -152,6 +153,7 @@ learning.py      the shared loop: how a measure or a rule becomes expected, and 
 metrics.py       the metric registry and typed values (canonical names, units, targets)
 corrections.py   standing corrections — client feedback on the same loop, with provenance
 commitments.py   the promises a brief names, and whether the photographs show them
+drift.py         what somebody made of the difference — recorded, never inferred
 replay.py        what changed when the rules changed, as a report; never a rewrite
 agreement.py     the golden-set harness: verdict agreement and self-consistency
 mcp_server.py    MCPServer tools (the API Claude calls)

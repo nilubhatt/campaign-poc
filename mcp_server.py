@@ -19,6 +19,7 @@ import config
 import commitments
 import corrections
 import core
+import drift
 import enums
 import metrics
 import replay
@@ -134,6 +135,15 @@ concluded — finished, wrapped, completed, ended, done, post-campaign."""
 # §9.1: what an image IS. The default is `proposed` because every asset already in a library
 # came out of a deck, and reading briefed creative as evidence of what ran is the confusion the
 # whole of Phase 9 exists to make visible.
+# §9.4. The review's three, plus the one its own sentence requires: "usually needs the outcome
+# to settle it", so before there is an outcome the true answer is that it is too early.
+DriftClassification = _enum("improvement", "neutral", "degradation", "too_early",
+                            "not_drift")
+"""improvement — moved away from the brief and moved somewhere better.
+neutral — moved away from the brief and it made no difference.
+degradation — moved away from the brief and that cost something.
+too_early — nothing measured yet, so whether it mattered cannot be said."""
+
 AssetPhase = _enum("proposed", "delivered")
 """proposed — creative lifted from a brief; what somebody intends to run.
 delivered — a photograph that came back after the event; evidence of what ran."""
@@ -504,6 +514,67 @@ def upload_image_asset(campaign_id: str, asset_ref: dict, phase: AssetPhase = "p
 
 @mcp.tool()
 @_catch_value_errors
+def classify_drift(campaign_id: str, subject: str, classification: DriftClassification,
+                   why: str, classified_by: str, about: Optional[str] = None) -> dict:
+    """Say whether a difference between the brief and what ran was a loss (§9.4).
+
+    The library can see that the execution differed — which briefed images came back, which
+    promises were visible. What it will not say is whether any of that mattered, because a
+    claw machine replaced by something better and a claw machine that never turned up produce
+    identical numbers.
+
+      • `improvement` — it moved away from the brief and moved somewhere better.
+      • `neutral`     — it moved away from the brief and it made no difference.
+      • `degradation` — it moved away from the brief and that cost something.
+      • `too_early`   — nothing has been measured yet, so whether it mattered cannot be said.
+                        This is the honest answer before results, not a way of declining.
+      • `not_drift`   — it did NOT differ; the comparison could not see that it matched. A
+                        photograph of a claw machine that was built rarely fingerprints like
+                        the render of it, so this is a correction to the instrument and the
+                        only way a person can undo a downgrade the server computed. Use it
+                        when the photographs show the briefed thing.
+
+    **Do not classify on the user's behalf.** Show them what differed and ask. Treating every
+    difference as a defect teaches this library to punish anything that went better than
+    planned — the UAE claw machine was unbriefed and drew the queue the photo booth was meant
+    to.
+
+    `subject` is the `asset_id` or `commitment_id` the difference is ABOUT — compare_execution
+    and check_commitments both name them, and its offers carry it prefilled. It is not a phrase:
+    a classification typed against "the claw machine" is filed against nothing, cannot be read
+    back, and leaves the original difference still unjudged and still being asked about.
+
+    `why` and `classified_by` are both required: this is read months later by somebody deciding
+    whether to repeat the change. Classifying again does not overwrite — a reading that changed
+    when the numbers arrived is kept alongside the first, with what was known at each time."""
+    conn = store.connect()
+    try:
+        return drift.classify(conn, campaign_id=campaign_id, subject=subject,
+                              classification=classification, why=why,
+                              classified_by=classified_by, about=about)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def drift_readings(campaign_id: str, subject: Optional[str] = None) -> dict:
+    """What has been made of this campaign's drift (§9.4).
+
+    With `subject` — the `asset_id` or `commitment_id` — every reading of that one piece in
+    order, including one that changed when the results came in, which is the most useful thing
+    this record holds. Without it, the latest reading of each, with what each one is about."""
+    conn = store.connect()
+    try:
+        return ({"campaign_id": campaign_id, "subject": subject,
+                 "history": drift.history(conn, campaign_id=campaign_id, subject=subject)}
+                if subject else drift.for_campaign(conn, campaign_id))
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
 def check_commitments(campaign_id: str) -> dict:
     """Each promise the brief named, against the photographs that came back (§9.3).
 
@@ -623,17 +694,24 @@ def compare_execution(campaign_id: str) -> dict:
 
 @mcp.tool()
 @_catch_value_errors
-def check_image_provenance(asset_ref: dict, campaign_id: Optional[str] = None) -> dict:
+def check_image_provenance(asset_ref: dict, campaign_id: Optional[str] = None,
+                           phase: Optional[AssetPhase] = None) -> dict:
     """Check whether an image matches one already in the memory — same/near-same photo,
     even after resize/recompress/light crop (perceptual hashing; catches exact reuse, NOT
     aesthetic similarity — use find_similar_images for that). Works before the image is
     stored. Pass campaign_id (the campaign this image is headed for) to exclude that
     campaign's own assets and get a flag when a match comes from a *different* region — the
     real question is usually not "does this image exist" but "does this image belong to a
-    different region than where it's being used.\""""
+    different region than where it's being used.\"
+
+    **Read `what_it_is` on every match before reporting it.** The library holds briefed
+    creative AND photographs of what actually ran (§9.1), and "this hero image was used in
+    Peru" and "this matches a photograph of the Bogotá activation" are different findings.
+    `phase` narrows the search to one side when you only want one."""
     conn = store.connect()
     try:
-        return core.check_image_provenance(conn, asset_ref=asset_ref, campaign_id=campaign_id)
+        return core.check_image_provenance(conn, asset_ref=asset_ref, campaign_id=campaign_id,
+                                           phase=phase)
     finally:
         conn.close()
 
@@ -641,17 +719,23 @@ def check_image_provenance(asset_ref: dict, campaign_id: Optional[str] = None) -
 @mcp.tool()
 @_catch_value_errors
 def find_similar_images(asset_ref: dict, campaign_id: Optional[str] = None, top_k: int = 5,
-                        region: Optional[str] = None) -> dict:
+                        region: Optional[str] = None,
+                        phase: Optional[AssetPhase] = None) -> dict:
     """Aesthetic/regional visual similarity via CLIP — catches "same product, different
     photo," "looks like the APAC shoot" — NOT exact reuse (use check_image_provenance for
     that). Works before the image is stored. Pass region to weigh only that region's assets
     first (mirrors find_similar_campaigns' filter-before-rank pattern); pass campaign_id (the
     campaign this image is headed for) to exclude its own assets and flag matches from a
-    different region."""
+    different region.
+
+    **Read `what_it_is` on every match.** This corpus was built when every asset was creative;
+    §9.1 put photographs of executions in the same table, so "looks like the APAC shoot" and
+    "looks like a photograph of the Bogotá activation" now both come back here. `phase`
+    narrows it: `proposed` for creative only, `delivered` for what actually ran."""
     conn = store.connect()
     try:
         return core.find_similar_images(conn, asset_ref=asset_ref, campaign_id=campaign_id,
-                                        top_k=top_k, region=region)
+                                        top_k=top_k, region=region, phase=phase)
     finally:
         conn.close()
 

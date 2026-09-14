@@ -2350,9 +2350,70 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       `upload_campaign` with `TypeError` — not a `ValueError`, so the model got "Error
       executing tool" with the reason discarded, in the one case where saying "that path does
       not exist" is the entire job.
-- [ ] **9.4 Classify drift** improvement / neutral / degradation, marked `judged`.
-- [ ] **9.5 Attach drift to the outcome record**; high-drift campaigns are weaker precedent
+- [x] **9.4 Classify drift** improvement / neutral / degradation, marked `judged`.
+      **"Presence and absence are facts; whether a change was good is a judgment."** That
+      sentence draws the line the server must not cross, so `drift.py` RECORDS a classification
+      and never makes one: no default, no inference from the drift score, nothing anywhere that
+      reads a high score as a bad sign. A claw machine replaced by something better and a claw
+      machine that never turned up produce identical numbers.
+      **"Usually needs the outcome to settle it" is a value, not a caveat.** `too_early` is the
+      honest answer before results, every classification is stamped with whether the outcome was
+      known WHEN IT WAS MADE, and nothing is overwritten — "this looked like an improvement
+      before the numbers and a degradation after" is the most interesting thing the record
+      holds. `drift_to_revisit` re-asks the `too_early` ones once a result lands, because the
+      classification offer fires when the photographs arrive and that is normally before the
+      numbers.
+      *Found by review, all reproduced:*
+      **§9.4 punished improvement at the one layer where drift changes a verdict.** The citation
+      caveat was keyed on the computed status alone, so a departure a named person had judged an
+      *improvement* carried the identical "the brief may not have been it" discount as one
+      judged a degradation. The item exists to stop the library punishing improvement and that
+      is precisely where it was punished; `_execution_note` now reads the classifications.
+      **The offer could not be satisfied.** Classifications were keyed on a free string that the
+      offer prefilled with `asset.file_path` — a uuid by design. The question read "say whether
+      a3f9c21d88e04b17.png not matching was a loss", a person answering in their own words filed
+      against a different item, the count never fell and the same offer re-fired forever. Keyed
+      on a resolvable `subject` (`asset_id` or `commitment_id`) with a human `about` line, and
+      an unresolvable subject is refused with what to pass instead.
+      **The count and the offer were different lists.** `unclassified` counted asset-keyed
+      events; the offer was drawn from commitments. Answering the server's own question moved
+      nothing. One population now feeds both, a `never_appeared`/`new` pair counts once, and a
+      promise that WAS visible is never offered — a question with no true answer gets a made-up
+      one.
+      **The computed downgrade was uncorrectable.** §9.2's own comments say a photograph of a
+      built claw machine will not fingerprint-match the briefed render, so every campaign with
+      site photography is stamped `drifted` — and all four judgments on offer began "the
+      execution moved away from the brief". A person looking at the photographs had no way to
+      say "it did not; you just couldn't tell". `not_drift` is that correction: the one
+      classification that disputes a fact rather than weighing one, which is why it is a
+      person's and is visible as such. The computed status stays what the instrument saw.
+- [x] **9.5 Attach drift to the outcome record**; high-drift campaigns are weaker precedent
       and retrieval says so.
+      **The caveat travels WITH the citation.** Every evidence row carries an `execution` note
+      saying whether that campaign ran as briefed, because a result from a campaign that drifted
+      is evidence that something worked and the brief may not have been it — and a result from
+      one nobody checked is neither. It says WEAKER, never disqualified: dropping high-drift
+      campaigns throws away the evidence this phase most wants kept.
+      **Snapshotted at every moment the answer can change** — results arriving, photographs
+      arriving, a classification being made. Taken only on `add_metrics`, it froze every real
+      campaign at `never_checked`, since the wrap deck lands weeks after the numbers.
+      *Found by review, all reproduced:*
+      **`never_checked` and `as_briefed` are different facts and the stale snapshot said the
+      wrong one.** Stale is worse than absent here, because `never_checked`'s own sentence
+      asserts that nobody looked.
+      **Partitioning the ranked evidence cannot answer "did anything run as briefed".** Same
+      argument as §6.4's poles, one axis over: on a library where the five nearest all drifted,
+      partitioning those five reports "nothing here ran as briefed", which is a statement about
+      the RANKING dressed as one about the library. `ran_as_briefed` is a filtered retrieval
+      pass, and it is never silent on empty.
+      **`performed_well` was the one pole without the caveat** — "this one worked" is the line a
+      reasoner leans on hardest, and it arrived as a bare endorsement of the brief.
+      **A bulk import ran the whole comparison once per row** — fifty workbook rows for one
+      campaign meant fifty identical comparisons and forty-nine discarded snapshots. Once per
+      campaign, after the loop.
+      **The snapshot swallowed every exception**, leaving the campaign reading `never_checked`
+      forever — indistinguishable from nobody having looked, which is the distinction the whole
+      item rests on. It still does not raise (a result must file), and it no longer disappears.
 - [ ] **9.6 `context_events` table** — date range, scope, kind, description, source, stated
       impact; auto-linked by market + window overlap.
 - [ ] **9.7 Seed fixed calendar events per market**; `prepare_evaluation` checks every

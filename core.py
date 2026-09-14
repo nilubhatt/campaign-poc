@@ -12,6 +12,7 @@ import base64
 import binascii
 import re
 import sqlite3
+import sys
 import unicodedata
 import time
 from pathlib import Path
@@ -23,6 +24,7 @@ import clip_embed
 import commitments
 import config
 import corrections
+import drift
 import embedding
 import enums
 import extract
@@ -421,7 +423,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
 
 def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
                 structured: Optional[dict] = None, metric_type: str = "actual",
-                confirm: bool = True) -> dict:
+                confirm: bool = True, snapshot_drift: bool = True) -> dict:
     """
     Record an outcome/metric on a campaign (§6.5), with the same §6.9 confirm-before-write
     gate as ingest_campaign: confirm=False previews what would be recorded — for a
@@ -446,6 +448,12 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
         }
     mid = store.add_metrics(conn, campaign_id, detail=detail, structured=structured,
                            metric_type=metric_type)
+    # §9.5: the drift, ON the outcome. `snapshot_drift=False` is for a bulk import, which
+    # writes many rows against the same campaign and re-ran the whole comparison for each —
+    # fifty workbook rows for one campaign meant fifty identical comparisons and forty-nine
+    # discarded snapshots. It takes it once, after the loop.
+    if metric_type == "actual" and snapshot_drift:
+        _snapshot_execution_drift(conn, campaign_id)
     # §8.1/§8.2: the structured values also go into the registry's TYPED storage, canonicalised
     # — the JSON blob above stays as the record of what was sent, and this is what makes "show
     # me every ROAS on file" answerable. An unfamiliar key asks once rather than being rejected
@@ -484,11 +492,17 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
         eligible += [written["newly_eligible"]] if written.get("newly_eligible") else []
         # §8.5/§2.1: a checklist that shrank silently is partial state nobody was told about.
         retired += written.get("retired") or []
+    revisit = drift.to_revisit(conn, campaign_id) if metric_type == "actual" else []
     return {"metrics_id": mid, "campaign_id": campaign_id, "status": "stored",
             **({"new_measures": asked} if asked else {}),
             **({"skipped": skipped} if skipped else {}),
             **({"newly_eligible": eligible} if eligible else {}),
             **({"retired_measures": retired} if retired else {}),
+            # §9.4: "usually needs the outcome to settle it" — and the classification offer
+            # fires when the photographs land, which is normally BEFORE the numbers. Without
+            # asking again here, `too_early` is a one-way sink that absorbs the answer the
+            # feature exists to collect.
+            **({"drift_to_revisit": revisit} if revisit else {}),
             # The moment the precondition for reconciling is satisfied. Offered at
             # save_evaluation time it simply failed: there were no actuals yet (§5.2 review).
             "next_actions": actions.after_metrics(
@@ -1183,6 +1197,43 @@ def _say_the_expected_measures(expected: dict) -> str:
 # How many rules the note itself spells out. The rest stay in `standing_corrections`, where
 # the model can read them — this bounds the STANDING INSTRUCTION, not the data.
 _MAX_STANDING_SHOWN = 5
+
+
+def _say_the_execution_drift(evidence: list) -> str:
+    """What the model is told about how faithfully the cited campaigns ran (§9.5).
+
+    Silent when nobody has ever checked one, which on a library with no delivered photographs
+    is always — a standing paragraph about execution drift there is the note that fires on
+    everything.
+
+    It says WEAKER, never disqualified. Dropping a high-drift campaign would throw away the
+    evidence this phase most wants kept: the UAE claw machine departed from precedent and beat
+    it, and a library that hides those has learned to punish improvement.
+    """
+    checked = [e for e in evidence if e["execution"]["status"] != "never_checked"]
+    if not checked:
+        return ""
+    # `_reads_as_briefed`, not the raw status: a campaign whose photographs somebody looked at
+    # and confirmed match the brief belongs on the faithful side, whatever the fingerprints
+    # made of it. Keyed on the status alone, the one case §9.2 says its instrument cannot see
+    # was also the one case a person could not correct.
+    faithful = [e for e in checked if _reads_as_briefed(e["execution"])]
+    drifted = [e for e in checked
+               if e["execution"]["status"] == "drifted" and not _reads_as_briefed(
+                   e["execution"])]
+    said = ("`execution` on each piece of evidence says whether that campaign RAN AS BRIEFED. "
+            "It changes what its result is evidence OF, and not whether the result is true. ")
+    if faithful:
+        said += (f"{len(faithful)} of these ran as briefed, so their outcomes are evidence "
+                 f"about the brief. ")
+    if drifted:
+        said += (f"{len(drifted)} drifted from the brief, so an outcome there says something "
+                 f"worked and the brief may not have been it — weigh it as precedent "
+                 f"accordingly, and say so if you rest on it. It is not disqualified: a "
+                 f"change that beat the plan is the most useful thing a library can hold. ")
+    said += ("Anything marked `never_checked` has not been compared at all, which is not the "
+             "same as having run faithfully. ")
+    return said
 
 
 def _say_the_standing_corrections(standing: dict) -> str:
@@ -1912,6 +1963,13 @@ def _both_poles(conn, *, evidence: list, text: Optional[str],
             matches = []
         poles[pole] = [{"campaign_id": m["campaign_id"], "title": m["title"],
                         "similarity": m["similarity"],
+                        # §9.5 again, and this is the pole where it matters most: "this one
+                        # worked" is the sentence a reasoner leans on hardest, and it is the
+                        # one place the caveat was not stated. A `performed_well` campaign
+                        # that drifted is evidence that SOMETHING worked and the brief may not
+                        # have been it — reaching a reader here as a bare endorsement of the
+                        # brief is the misreading §9.5 exists to prevent.
+                        "execution": _execution_note(conn, m["campaign_id"]),
                         # Whether the reasoner would have seen it anyway. A pole entry that is
                         # NOT in the ranked evidence is the one this search exists for.
                         "in_evidence": m["campaign_id"] in ranked}
@@ -1921,6 +1979,60 @@ def _both_poles(conn, *, evidence: list, text: Optional[str],
                          "similarity": row["similarity"]}
                         for row in evidence if row["campaign_id"] not in measured]
     return poles
+
+
+def _ran_as_briefed(conn, *, evidence: list, text: Optional[str],
+                    campaign_id: Optional[str]) -> dict:
+    """Precedent that actually ran the way it was written down (§9.5), retrieved in its own
+    right.
+
+    `_both_poles`' argument, one axis over. §9.5 attaches an `execution` note to every cited
+    row, which tells a reader what the ranked evidence is worth — but it cannot tell them the
+    library holds a faithfully-executed precedent the ranking did not reach. On a library where
+    the five nearest all drifted, partitioning those five reports "nothing here ran as briefed",
+    which is a statement about the ranking dressed as a statement about the library. Only a
+    filtered pass can tell the two apart.
+
+    Filtered on the STORED snapshot, not recomputed: §9.5's figure is a fact about the evidence
+    as it stood, and a reader comparing this list against a citation's own `execution` must be
+    reading the same number.
+    """
+    ranked = {row["campaign_id"] for row in evidence}
+    try:
+        matches = find_similar(conn, text=text, campaign_id=campaign_id,
+                               top_k=_MAX_DISCONFIRMING * 4, full_detail=False)
+    except (embedding.Unavailable, ValueError):
+        matches = []
+    faithful = []
+    for match in matches:
+        if match["campaign_id"] == campaign_id or match.get("record_type") == "reference":
+            continue
+        note = _execution_note(conn, match["campaign_id"])
+        if not _reads_as_briefed(note):
+            continue
+        faithful.append({"campaign_id": match["campaign_id"], "title": match["title"],
+                         "similarity": match["similarity"], "execution": note,
+                         "in_evidence": match["campaign_id"] in ranked})
+        if len(faithful) == _MAX_DISCONFIRMING:
+            break
+    return {
+        "basis": "computed",
+        "found": faithful,
+        # Never silent on empty. "No precedent here has been checked against what it ran" and
+        # "the precedent that was checked all drifted" are different facts about the library,
+        # and both are different again from the ranking simply not reaching one.
+        "what_it_means": (
+            f"{len(faithful)} campaign(s) like this one have been compared against their own "
+            f"brief and ran as briefed, so their outcomes are evidence about the BRIEF. "
+            + ("" if all(f["in_evidence"] for f in faithful) else
+               "Some are not in the ranked evidence above — they are here because they ran "
+               "faithfully, not because they ranked. ")
+            if faithful else
+            "No campaign like this one has been compared against its own brief and found to "
+            "have run as briefed. That is a fact about what has been CHECKED, not a finding "
+            "about execution: an unchecked campaign is not a faithful one, and it is not a "
+            "drifted one either."),
+    }
 
 
 def _why_it_contradicts(conn, campaign_id: str, tag: str) -> Optional[str]:
@@ -4632,6 +4744,10 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
             "metrics": metrics,
             "metrics_total": len(all_metrics),
             "metrics_truncated": metrics_truncated,
+            # §9.5: the caveat travels WITH the citation, not somewhere a reader has to go and
+            # look. A result from a campaign that drifted is evidence that something worked and
+            # the brief may not have been it — and a result from one nobody checked is neither.
+            "execution": _execution_note(conn, c["id"]),
         })
     return evidence
 
@@ -4998,7 +5114,8 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
             "can see. Do not silently re-derive it, and do not defer to it against the "
             "evidence in front of you. "
             + _say_the_expected_measures(expected_now)
-            + _say_the_standing_corrections(standing_now) +
+            + _say_the_standing_corrections(standing_now)
+            + _say_the_execution_drift(evidence) +
             "`outcomes` splits this evidence into what WORKED and what did NOT, by measured "
             "result rather than by impression. Read both before deciding: resemblance to a "
             "strong performer is not evidence, and a brief that looks like something that "
@@ -5049,6 +5166,12 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
         "outcomes": _both_poles(conn, evidence=evidence,
                                 text=None if campaign_id else proposal_text,
                                 campaign_id=campaign_id),
+        # §9.5, retrieved rather than partitioned. The `execution` note on each citation says
+        # what THAT row is worth; this says whether the library holds a precedent that ran the
+        # way it was written, which the ranked five cannot answer for it.
+        "ran_as_briefed": _ran_as_briefed(conn, evidence=evidence,
+                                          text=None if campaign_id else proposal_text,
+                                          campaign_id=campaign_id),
         # §5.3: the single thing that would most change THIS verdict, or None when nothing
         # is. About the evidence cited, not about the library — a library that is 90%
         # measured can still produce a judgment resting entirely on the unmeasured tenth.
@@ -5193,6 +5316,10 @@ def ingest_image_asset(conn, *, campaign_id: str, asset_ref: dict,
     stored_name = _keep_asset(path)
     result = _store_and_fingerprint_image(conn, campaign_id, stored_name, phase=phase,
                                           captured_on=captured_on)
+    if phase == "delivered":
+        # The photographs are the other half of the answer, and they usually arrive after the
+        # results (§9.5).
+        _snapshot_execution_drift(conn, campaign_id)
     result["warnings"] = warnings + result["warnings"]
     return result
 
@@ -5363,8 +5490,9 @@ def compare_execution(conn, *, campaign_id: str) -> dict:
             detail=f"{len(missing)} image{'s' * (len(missing) != 1)} could not be compared: "
                    + "; ".join(reasons) + "."))
 
-    drift, drift_warnings = _drift_score(conn, briefed, delivered)
+    drift_score, drift_warnings = _drift_score(conn, briefed, delivered)
     warnings += drift_warnings
+    judged = drift.for_campaign(conn, campaign_id)
     as_briefed, never_appeared, new, another_view = _match_by_fingerprint(
         [a for a in briefed if a["id"] in prints],
         [a for a in delivered if a["id"] in prints], prints)
@@ -5379,6 +5507,7 @@ def compare_execution(conn, *, campaign_id: str) -> dict:
     # §7.8's third basis, which exists for exactly this — a threshold somebody chose, neither
     # a server fact nor a model's judgment.
     _suggest_visual_matches(conn, never_appeared, new)
+    unjudged = _unjudged_drift(conn, campaign_id, never_appeared, new, judged)
 
     return {
         "campaign_id": campaign_id,
@@ -5399,11 +5528,274 @@ def compare_execution(conn, *, campaign_id: str) -> dict:
         "another_view": another_view,
         "not_compared": [{"asset_id": a["id"], "file": a["file_path"], "phase": a["phase"]}
                          for a in missing],
-        "drift": drift,
+        "drift": drift_score,
+        # §9.4: what has been made of this drift, and how much of it nobody has judged yet.
+        # The server records classifications and makes none — "presence and absence are facts;
+        # whether a change was good is a judgment".
+        "classified": judged,
+        # DIFFERENCES, not assets, and the same list the offer below is drawn from — so
+        # answering the question the server asks moves the number it shows. The pair "this was
+        # briefed and did not come back / this came back and was not briefed" is one difference
+        # a person would judge once.
+        "unclassified": len(unjudged),
+        "unclassified_items": unjudged,
         "what_it_means": _execution_sentence(as_briefed, never_appeared, new, another_view),
+        "next_actions": _drift_offers(conn, campaign_id, unjudged),
         "warnings": notices.collapse(warnings),
     }
 
+
+def _snapshot_execution_drift(conn, campaign_id: str) -> None:
+    """Record how faithfully this campaign ran, beside the result it produced (§9.5).
+
+    Run at every moment the answer can CHANGE — results arriving, photographs arriving, a
+    classification being made — because the ordinary sequence is results first and the wrap
+    deck weeks later. Snapshotting only on `add_metrics` froze every real campaign at
+    `never_checked`: the photographs turned up afterwards and nothing looked again, so §9.5's
+    whole point never fired for the common case.
+
+    A snapshot rather than a read-time computation, because it is a fact about the evidence AS
+    IT STOOD, and the stored figure is what a judgment saved at the time rested on.
+    """
+    record = store.get_campaign(conn, campaign_id)
+    # Nothing to say until there is a result for the drift to qualify. This also keeps a bulk
+    # import of five hundred rows from running five hundred comparisons: the campaigns in a KPI
+    # workbook almost never have delivered photographs.
+    if not record or not record.get("has_actual_metrics"):
+        return
+    try:
+        out = compare_execution(conn, campaign_id=campaign_id)
+    except Exception:                    # noqa: BLE001 — a result must still file
+        # A result filing is more important than its drift figure, so this does not raise. It
+        # does not vanish either: swallowed, a comparison that broke left the campaign reading
+        # `never_checked` forever, which is indistinguishable from nobody having looked — and
+        # §9.5's whole point is that those two are different. The stale figure stays, and the
+        # failure is on the record.
+        # stderr, not stdout: stdout is the MCP protocol channel on the transport that matters.
+        import traceback
+        print(f"[campaign-intelligence] execution drift snapshot failed for {campaign_id}; "
+              f"the stored figure is unchanged.\n{traceback.format_exc()}",
+              file=sys.stderr, flush=True)
+        return
+    relative = (out.get("drift") or {}).get("relative_to_brief_spread")
+    # Determined by the COUNTS, not by the score. A threshold on the relative figure was in
+    # here too and the mutation pass showed it was unreachable: every briefed image coming back
+    # by fingerprint means the files are the same files, so the sets cannot also be far apart.
+    # An untestable branch with a chosen constant in it is exactly the thing that quietly
+    # becomes wrong, and "something briefed did not come back, or something unbriefed did" is
+    # the fact this status rests on anyway.
+    if out["status"] == "nothing_to_check":
+        status = "never_checked"
+    elif out["counts"].get("never_appeared") or out["counts"].get("new"):
+        status = "drifted"
+    else:
+        status = "as_briefed"
+    judged = out.get("classified") or {}
+    store.record_execution_drift(
+        conn, campaign_id, score=(out.get("drift") or {}).get("score"), relative=relative,
+        # `unclassified` beside the image counts, because a reader of the stored figure needs
+        # to know how much of this drift nobody has looked at. Without it, a campaign whose
+        # single corrected difference sat beside four unexamined ones read as fully corrected.
+        counts={**(out.get("counts") or {}), "unclassified": out.get("unclassified", 0)},
+        classified=judged.get("counts") or {},
+        # §9.5 verbatim: "the score, the counts, and the CLASSIFIED ITEMS". Counts alone cannot
+        # say what was judged good, which is the half a reader needs.
+        items=[{"about": i.get("about") or i.get("item"),
+                "classification": i["classification"], "why": i["why"],
+                "classified_by": i["classified_by"], "outcome_known": i["outcome_known"]}
+               for i in judged.get("items") or []],
+        status=status)
+
+
+_EXECUTION_MEANING = {
+    "as_briefed": ("This campaign ran as it was briefed, so its result is evidence about the "
+                   "BRIEF."),
+    "drifted": ("This campaign's execution moved away from its brief, so its result is "
+                "evidence that something worked and the brief may not have been it. Weigh it "
+                "as precedent accordingly — it is not disqualified, and the change may be "
+                "exactly why it worked."),
+    "never_checked": ("Nobody has checked what this campaign actually ran against what it "
+                      "briefed, so whether its result is evidence about the brief is unknown. "
+                      "That is not the same as it having run faithfully."),
+}
+
+
+def _execution_note(conn, campaign_id: str) -> dict:
+    """The caveat that travels with a citation (§9.5, D19's shape).
+
+    It reads the CLASSIFICATIONS, not only the status. Keyed on status alone, a drift somebody
+    named had judged an improvement carried the identical "the brief may not have been it"
+    caveat as one judged a degradation — so the UAE claw machine, judged better than the plan
+    by a person, was still discounted at the one layer where drift changes a verdict. §9.4
+    exists to stop the library punishing improvement, and that is where it was punished.
+    """
+    stored = store.execution_drift_for(conn, campaign_id)
+    # Only the non-zero ones. The counts dict carries a key per classification whatever the
+    # numbers are, so `if judged:` was true of a campaign nobody had judged at all.
+    judged = {value: count for value, count in (stored["classified"] or {}).items() if count}
+    said = _EXECUTION_MEANING[stored["status"]]
+    if stored["status"] == "drifted" and judged:
+        said = _judged_drift_sentence(judged, stored)
+    return {"status": stored["status"], "score": stored["score"],
+            "relative_to_brief_spread": stored["relative"],
+            # The image counts AND how much of the drift nobody has looked at — a reader
+            # weighing "somebody says this matched" has to be able to see what else is sitting
+            # unexamined beside it.
+            "counts": stored.get("counts") or {},
+            "classified": judged, "classified_items": stored.get("items") or [],
+            "basis": "computed", "what_it_means": said}
+
+
+def _reads_as_briefed(note: dict) -> bool:
+    """Whether this campaign's result is evidence about its BRIEF (§9.5).
+
+    Two ways to be: the fingerprints matched, or somebody who looked at the photographs said
+    the fingerprints were wrong. §9.2's own comments say a photograph of a built claw machine
+    will not match the briefed render, so the second route is not an escape hatch — it is the
+    only route the motivating case has.
+    """
+    if note["status"] == "as_briefed":
+        return True
+    judged = {v: c for v, c in (note.get("classified") or {}).items() if c}
+    if not judged or set(judged) != {"not_drift"}:
+        return False
+    # And nothing left over. One corrected difference out of two does not make the campaign
+    # faithful — the second is still a difference the comparison saw and nobody disputed, and
+    # counting the campaign as faithful on the strength of the first is the same over-reach in
+    # the opposite direction. A missing count is unknown, not zero.
+    return (note.get("counts") or {}).get("unclassified") == 0
+
+
+def _judged_drift_sentence(judged: dict, stored: dict) -> str:
+    """What a drift somebody has actually looked at means for a citation (§9.4/§9.5)."""
+    improvement = judged.get("improvement", 0)
+    degradation = judged.get("degradation", 0)
+    neutral = judged.get("neutral", 0)
+    too_early = judged.get("too_early", 0)
+    not_drift = judged.get("not_drift", 0)
+    named = ", ".join(f"{count} {value}" for value, count in judged.items() if count)
+    if not_drift and len(judged) == 1:
+        return (f"The comparison could not match this campaign's delivered photographs to its "
+                f"briefed images, and somebody who looked said they DO match ({named}) — a "
+                f"photograph of a thing that was built rarely fingerprints like the render of "
+                f"it. Read this as having run as briefed: its result is evidence about the "
+                f"BRIEF, and the difference the comparison reported is an artefact of the "
+                f"instrument rather than a fact about the campaign.")
+    if not_drift:
+        return (f"Part of what the comparison read as drift here was disputed by somebody who "
+                f"looked — they say it matched and the instrument could not see it ({named}). "
+                f"Read the items: some of this campaign's result is evidence about the brief "
+                f"as written, and the rest about what was done differently.")
+    if improvement and not degradation:
+        return (f"This campaign's execution moved away from its brief, and somebody who "
+                f"looked read the difference as an improvement ({named}). Its result is "
+                f"evidence that the change worked — which may be the most useful thing here, "
+                f"and is not a reason to discount it.")
+    if degradation and not improvement:
+        return (f"This campaign's execution moved away from its brief, and somebody who "
+                f"looked read the difference as a degradation ({named}). Its result was "
+                f"achieved despite that, so the brief may have been better than the outcome "
+                f"suggests.")
+    if neutral and not (improvement or degradation):
+        return (f"This campaign's execution moved away from its brief and somebody who "
+                f"looked read the difference as making no difference ({named}), so its "
+                f"result is still largely evidence about the brief.")
+    if too_early and len(judged) == 1:
+        return (f"This campaign's execution moved away from its brief, and the difference was "
+                f"looked at before any result existed ({named}) — so nobody has yet said "
+                f"whether it mattered. Worth revisiting now the numbers are in.")
+    return (f"This campaign's execution moved away from its brief, and what was made of the "
+            f"difference is mixed ({named}). Read the items rather than the headline: part of "
+            f"this result may be evidence about the brief and part about the change.")
+
+
+def _drift_events(never_appeared, new) -> list:
+    """The differences a PERSON would count, not the assets they are made of.
+
+    One conceptual event — the claw machine was replaced by something else — appears twice in
+    the lists: as a briefed image that did not come back, and as a delivered photograph
+    matching nothing. Counting assets asked for seventeen decisions where a human sees three
+    or four, and §9.2's own analysis says a photograph of a built thing will rarely
+    fingerprint-match its render, so `new` approximates "every wrap photo you uploaded".
+    Paired by the visual resemblance the second pass already nominated.
+    """
+    paired, events = set(), []
+    for item in never_appeared:
+        looks_like = (item.get("looks_like") or {}).get("asset_id")
+        if looks_like:
+            paired.add(looks_like)
+        events.append({"subject": item["asset_id"],
+                       "about": "a briefed image that did not come back",
+                       "replaced_by": looks_like})
+    events += [{"subject": item["asset_id"],
+                "about": "a delivered photograph matching nothing that was briefed",
+                "replaced_by": None}
+               for item in new if item["asset_id"] not in paired]
+    return events
+
+
+def _unjudged_drift(conn, campaign_id, never_appeared, new, judged) -> list:
+    """Every difference between this brief and what ran that nobody has judged yet (§9.4).
+
+    ONE list, feeding both the displayed count and the offer. They were built separately — the
+    count over asset-keyed events, the offer over commitments — so the two never referred to the
+    same things: answering the question the server asked left its own `unclassified` figure
+    exactly where it was, and the next call re-asked it with the same prefilled subject. A nag
+    that cannot be satisfied is worse than no offer at all, because the count beside it reads as
+    a running tally of unexplained failure.
+
+    Two kinds of difference, because they are found two different ways and a person judges each
+    on its own: a promise the deck named that is not visible in the photographs (§9.3), and a
+    briefed image that did not come back or a delivered one matching nothing (§9.2).
+    """
+    already = {i["subject"] for i in judged["items"]}
+    unjudged = [
+        {"subject": promise["commitment_id"],
+         "about": f"“{promise['text'][:60]}” was promised and is not visible",
+         "replaced_by": None}
+        for promise in _promises_not_visible(conn, campaign_id)
+        if promise["commitment_id"] not in already]
+    unjudged += [e for e in _drift_events(never_appeared, new) if e["subject"] not in already]
+    return unjudged
+
+
+def _promises_not_visible(conn, campaign_id: str) -> list:
+    """The deck's own promises the visual pass could not find (§9.3), as drift to judge.
+
+    `not_visible` only. Offering to judge a promise that WAS visible asks somebody to explain a
+    difference that is not there, and a question with no true answer gets a made-up one.
+    """
+    try:
+        report = commitments.check(conn, campaign_id=campaign_id)
+    except Exception:                        # noqa: BLE001 — the comparison must still return
+        return []
+    return [i for i in report.get("items") or [] if i.get("verdict") == "not_visible"]
+
+
+def _drift_offers(conn, campaign_id, unjudged) -> list:
+    """Offer to judge what the server will not (§9.4).
+
+    The library can say a briefed element did not come back. Whether that was a loss is the
+    thing it must not guess, and the offer is how the question reaches somebody who can answer
+    it — rather than leaving a count of unexplained differences that quietly reads as failure.
+
+    A PROMISE first where there is one, because "a claw machine loaded with branded
+    merchandise" is a subject somebody can still read in six months and an asset id is not.
+    `_unjudged_drift` already orders them that way.
+    """
+    if not unjudged:
+        return []
+    return actions.trim([actions.action(
+        f"Say whether {unjudged[0]['about']} was a loss", "classify_drift",
+        why="The library can see the execution differed from the brief. Whether that was an "
+            "improvement, made no difference or cost something is a judgment it will not "
+            "make — and treating every difference as a defect teaches it to punish "
+            "anything that went better than planned.",
+        consent="ask",
+        needs=["classification — improvement, neutral, degradation or too_early",
+               "why — what makes it that",
+               "classified_by — whose judgment this is"],
+        campaign_id=campaign_id, subject=unjudged[0]["subject"])])
 
 def _nothing_to_compare(campaign_id, briefed, delivered, said, *, title="",
                         offers=None) -> dict:
@@ -5422,7 +5814,7 @@ def _nothing_to_compare(campaign_id, briefed, delivered, said, *, title="",
         "next_actions": offers or [],
         "briefed_count": len(briefed), "delivered_count": len(delivered),
         "as_briefed": [], "never_appeared": [], "new": [], "another_view": [],
-        "not_compared": [],
+        "not_compared": [], "classified": {"counts": {}, "items": []}, "unclassified": 0,
         "drift": {"score": None, "code": "nothing_to_compare", "basis": "computed",
                   "what_it_means": "There is nothing to measure a distance between."},
         "what_it_means": said, "warnings": [],
@@ -5756,7 +6148,8 @@ def _execution_sentence(as_briefed, never_appeared, new, another_view) -> str:
 
 
 def check_image_provenance(conn, *, asset_ref: dict, campaign_id: Optional[str] = None,
-                           threshold: Optional[int] = None) -> dict:
+                           threshold: Optional[int] = None,
+                           phase: Optional[str] = None) -> dict:
     """
     Check whether an image matches one already in the memory (§6.6 — the SVP's creative-reuse
     question). Works on an image that isn't stored yet — call this before upload_campaign's
@@ -5778,19 +6171,42 @@ def check_image_provenance(conn, *, asset_ref: dict, campaign_id: Optional[str] 
     except Exception as exc:
         return {"error": f"could not process image: {exc}"}
     matches = _phash_matches(conn, query_hash, exclude_campaign_id=campaign_id,
-                             current=current, threshold=threshold)
+                             current=current, threshold=threshold, phase=phase)
     return {"query_hash": query_hash, "matches": matches, "warnings": warnings}
 
 
+# §9.1/D121: what a matched asset IS, said rather than left to the caller. This corpus was
+# built when every asset was creative; §9.1 put photographs of executions in the same table,
+# and without this a reuse check answered "this image is already in the library" about a
+# photograph OF an event exactly as it would about a reused hero render. Both are real matches
+# and they are not the same finding.
+_PHASE_MEANING = {
+    "proposed": "a briefed image — creative that was planned",
+    "delivered": "a photograph of what actually ran",
+}
+
+
+def _what_the_match_is(phase: Optional[str]) -> str:
+    """The fallback cannot be reached from the database — `assets.phase` is NOT NULL with a
+    `proposed` default, which is §9.1's load-bearing decision. It is here for the next value
+    somebody adds to the vocabulary: an unrecognised phase described as "a briefed image"
+    would invent provenance, and naming it is the one safe thing to say about it.
+    """
+    return _PHASE_MEANING.get(phase or "", f"an asset recorded as {phase!r} — this reader "
+                                           f"does not know what that phase means")
+
+
 def _phash_matches(conn, query_hash: str, *, exclude_campaign_id: Optional[str],
-                   current: Optional[dict], threshold: Optional[int] = None) -> list[dict]:
+                   current: Optional[dict], threshold: Optional[int] = None,
+                   phase: Optional[str] = None) -> list[dict]:
     """Shared by check_image_provenance and the automatic deck-embedded-image path in
     ingest_campaign — same pHash-match + region-flag logic either way."""
     threshold = config.PHASH_MATCH_THRESHOLD if threshold is None else threshold
     superseded_ids = store.get_superseded_campaign_ids(conn)
 
     matches = []
-    for cand in store.get_all_fingerprints(conn, exclude_campaign_id=exclude_campaign_id):
+    for cand in store.get_all_fingerprints(conn, exclude_campaign_id=exclude_campaign_id,
+                                           phase=phase):
         if cand["campaign_id"] in superseded_ids:
             continue
         dist = images.hamming_distance(query_hash, cand["phash"])
@@ -5802,6 +6218,8 @@ def _phash_matches(conn, query_hash: str, *, exclude_campaign_id: Optional[str],
         matches.append({
             "campaign_id": cand["campaign_id"], "title": c["title"], "region": c["region"],
             "asset_id": cand["asset_id"], "hamming_distance": dist,
+            "phase": cand.get("phase"),
+            "what_it_is": _what_the_match_is(cand.get("phase")),
             "flag": _region_mismatch_flag(current, c),
         })
     matches.sort(key=lambda m: m["hamming_distance"])
@@ -5809,7 +6227,8 @@ def _phash_matches(conn, query_hash: str, *, exclude_campaign_id: Optional[str],
 
 
 def find_similar_images(conn, *, asset_ref: dict, campaign_id: Optional[str] = None,
-                        top_k: int = 5, region: Optional[str] = None) -> dict:
+                        top_k: int = 5, region: Optional[str] = None,
+                        phase: Optional[str] = None) -> dict:
     """
     Aesthetic/regional visual similarity (CLIP) — catches "same product, different photo,"
     "looks like the APAC shoot," NOT exact/near-duplicate reuse (that's
@@ -5839,13 +6258,15 @@ def find_similar_images(conn, *, asset_ref: dict, campaign_id: Optional[str] = N
     if region:
         # filter_campaign_ids already excludes superseded campaigns.
         candidate_ids = store.filter_campaign_ids(conn, region=region, exclude_campaign_id=campaign_id)
-        assets = store.list_assets(conn, campaign_ids=candidate_ids)
+        assets = store.list_assets(conn, campaign_ids=candidate_ids, phase=phase)
     else:
         superseded_ids = store.get_superseded_campaign_ids(conn)
-        assets = [a for a in store.list_assets(conn, exclude_campaign_id=campaign_id)
+        assets = [a for a in store.list_assets(conn, exclude_campaign_id=campaign_id,
+                                               phase=phase)
                  if a["campaign_id"] not in superseded_ids]
 
     asset_to_campaign = {a["id"]: a["campaign_id"] for a in assets}
+    asset_phase = {a["id"]: a.get("phase") for a in assets}
     vecs = vectorstore.get_many(conn, list(asset_to_campaign), space="asset")
     hits = embedding.rank(qvec, list(vecs.items()), top_k=top_k)
 
@@ -5858,6 +6279,11 @@ def find_similar_images(conn, *, asset_ref: dict, campaign_id: Optional[str] = N
         matches.append({
             "campaign_id": cid, "title": c["title"], "region": c["region"],
             "asset_id": asset_id, "similarity": round(sim, 4),
+            # §9.1/D121. "Looks like the APAC shoot" and "looks like a photograph of the
+            # Bogotá activation" are different answers to the same query, and this corpus
+            # could not tell them apart because it predates the field.
+            "phase": asset_phase.get(asset_id),
+            "what_it_is": _what_the_match_is(asset_phase.get(asset_id)),
             "flag": _region_mismatch_flag(current, c),
         })
     return {"matches": matches, "warnings": warnings}
