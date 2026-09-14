@@ -265,6 +265,7 @@ def upgrade(conn: sqlite3.Connection) -> None:
     _migrate_schema(conn)
     conn.executescript(_INDEXES)
     conn.commit()
+    _seed_metric_registry(conn)
 
 
 def connect() -> sqlite3.Connection:
@@ -373,6 +374,30 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
         for column, clause in _declared_ddl(table).items():
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {clause}")
+
+
+def _seed_metric_registry(conn: sqlite3.Connection) -> None:
+    """Put the shipped measures on file as part of bringing a database up to date.
+
+    Seeded HERE rather than on first read, which is where it was. `metrics._registry` seeded
+    an empty table, so the first caller to ask a question wrote twelve rows — and §8.7's
+    `replay.run` is a REPORT whose whole claim is that it writes nothing. It did, on exactly
+    the database a customer runs it against first: an upgraded library, where the registry is
+    empty until something seeds it.
+
+    The seed list is a shipped payload like the schema, so it belongs with the schema. The
+    late import is the cycle: `metrics` reads `store` everywhere, and this is the one edge
+    pointing back.
+    """
+    import metrics
+
+    if conn.execute("SELECT 1 FROM metric_registry LIMIT 1").fetchone():
+        return
+    for canonical, (display, unit, direction, aliases) in metrics.SEED_REGISTRY.items():
+        # `known`, not `expected`: a shipped name is a recognised measure, not something every
+        # brief must carry. See §8.3.
+        register_metric(conn, canonical=canonical, display_name=display, unit=unit,
+                        direction=direction, aliases=list(aliases), status="known")
 
 
 def _demote_unconfirmed_seed_metrics(conn: sqlite3.Connection) -> None:
@@ -1856,9 +1881,12 @@ def touch_correction(conn, correction_id: str, *, campaign_id: Optional[str] = N
 
 
 def graduate_correction(conn, correction_id: str, *, markets: list, confirmed_by: str) -> None:
+    # COALESCE, for the reason `graduate_metric` gives: the first confirmation is when this
+    # became a rule, and rewriting it makes §8.7 assert that a judgment which CITES the rule
+    # was never checked against it.
     conn.execute("UPDATE corrections SET status = 'expected', expected_in = ?, "
-                 "confirmed_by = ?, confirmed_at = ?, retired_at = NULL, offered = 1 "
-                 "WHERE id = ?",
+                 "confirmed_by = ?, confirmed_at = COALESCE(confirmed_at, ?), "
+                 "retired_at = NULL, offered = 1 WHERE id = ?",
                  (json.dumps(sorted(markets)), confirmed_by, _now(), correction_id))
     conn.commit()
 
@@ -1971,8 +1999,14 @@ def graduate_metric(conn, canonical: str, *, markets: list, confirmed_by: str) -
     # `answered` too: putting a measure on the checklist is a stronger answer than §8.2's
     # question asks for, and a measure that is expected of every brief while still asking "is
     # this a new measure?" is the product asking a question it has already acted on.
+    # COALESCE on `confirmed_at`: the first confirmation is when this became a rule, and
+    # §8.7 compares it against when each judgment was saved. Overwriting it made a measure
+    # graduated, judged against, retired and graduated again look NEWER than the judgment that
+    # was checked against it — so the report asserted the judgment had never seen it, which is
+    # the confident unfounded claim the report exists to avoid.
     conn.execute("UPDATE metric_registry SET status = 'expected', expected_in = ?, "
-                 "answered = 1, surfaced = 1, confirmed_by = ?, confirmed_at = ?, "
+                 "answered = 1, surfaced = 1, confirmed_by = ?, "
+                 "confirmed_at = COALESCE(confirmed_at, ?), "
                  "retired_at = NULL WHERE canonical = ?",
                  (json.dumps(sorted(markets)), confirmed_by, _now(), canonical))
     conn.commit()

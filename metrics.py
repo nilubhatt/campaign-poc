@@ -37,6 +37,7 @@ import re
 import time
 from typing import Optional
 
+import actions
 import learning
 
 # The measured cutoff from §5.1: below this a suggestion is noise, and a wrong alias merges
@@ -151,18 +152,11 @@ def _registry(conn) -> dict:
     """
     import store
 
-    rows = store.metric_registry(conn)
-    if not rows:
-        for canonical, (display, unit, direction, aliases) in SEED_REGISTRY.items():
-            # `known`, not `expected`. A shipped name is a recognised measure with no question
-            # pending against it — it is not something every brief must carry. Collapsing the
-            # two would put twelve measures on every checklist the day the product is
-            # installed, and a check that fires on everything is one nobody reads (§8.3).
-            store.register_metric(conn, canonical=canonical, display_name=display, unit=unit,
-                                  direction=direction, aliases=list(aliases),
-                                  status="known")
-        rows = store.metric_registry(conn)
-    return rows
+    # No seeding here. This is read by `canonical`, `describe`, `expected_for` and everything
+    # downstream of them — including §8.7's replay, whose entire claim is that it writes
+    # nothing — and seeding on first read made every one of those a write on a fresh database.
+    # `store.upgrade` seeds it now, which is where a shipped payload belongs.
+    return store.metric_registry(conn)
 
 
 def canonical(conn, key: str) -> Optional[str]:
@@ -492,9 +486,17 @@ def graduation(conn, name: str) -> dict:
         campaigns=learning.distinct_briefs(conn, campaigns_with(conn, name)),
         markets=entry["markets"], status=entry["status"],
         expected_in=entry["expected_in"], confirmed_by=entry.get("confirmed_by"))
-    # `measure` as well as `name`: this key is what callers and the MCP surface already read,
-    # and `learning` speaks about learned things in general.
-    return {**gate, "measure": gate["name"]}
+    out = {**gate, "measure": gate["name"]}
+    # D104/§8.7: the blast radius, ON the gate rather than in a separate tool nobody would
+    # think to call. The person confirming needs "this shows 14 stored campaigns as missing
+    # it" BEFORE they confirm; afterwards it is a surprise rather than a decision. Only when
+    # there is a decision to make — computing it for an already-expected measure is work
+    # nobody asked for.
+    if out["eligible"]:
+        import replay
+        out["if_confirmed"] = replay.if_graduated(conn, measure=name,
+                                                  markets=out["seen_in"])
+    return out
 
 
 def _newly_eligible(conn, name: str) -> Optional[dict]:
@@ -507,14 +509,23 @@ def _newly_eligible(conn, name: str) -> Optional[dict]:
     import actions
     import store
 
+    # The offered check FIRST, so the blast radius — a full library scan — is computed only
+    # when it is about to be shown, rather than on every write touching an eligible measure.
+    if store.metric_was_offered(conn, name):
+        return None
     gate = graduation(conn, name)
-    if not gate["eligible"] or store.metric_was_offered(conn, name):
+    if not gate["eligible"]:
         return None
     store.mark_metric_offered(conn, name)
     return {
         "measure": name,
         "campaigns": gate["campaigns"],
         "seen_in": gate["seen_in"],
+        # D104, on the surface where the decision is actually made. It was on `graduation()`,
+        # which the model reaches through `measure_status` — the tool §8.4 described as one a
+        # user would have to know exists and think to call. The offer riding on the write is
+        # the route §8.4 built after finding the gate unreachable, and the number belongs on it.
+        "if_confirmed": gate.get("if_confirmed"),
         "what_it_means": (
             f"{name} has now been reported by {gate['campaigns']} campaigns across "
             f"{', '.join(gate['seen_in'])}. It can become part of what briefs in those "
@@ -556,6 +567,9 @@ def graduate(conn, name: str, *, confirmed_by: str) -> dict:
                           confirmed_by=confirmed_by)
     entry = describe(conn, gate["measure"])
     return {**entry, "graduated": True,
+            # §8.7: the moment the replay becomes non-empty is the moment to point at it.
+            "next_actions": actions.after_graduation(what=gate["measure"],
+                                                     markets=entry["expected_in"]),
             "what_it_means": (
                 f"Briefs in {', '.join(entry['expected_in'])} are now checked for "
                 f"{gate['measure']}, on {confirmed_by.strip()}'s confirmation. Ones that do "

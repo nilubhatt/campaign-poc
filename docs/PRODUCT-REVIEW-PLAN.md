@@ -2128,8 +2128,54 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       (five mentions with no `campaign_id` showed 5 while the gate read 0). The rendered rule
       list and the joined provenance were both unbounded. `list_corrections(status="expectd")`
       returned an empty list with no error.
-- [ ] **8.7 Replay as a report** — which campaigns now fail a new expectation; which past
+- [x] **8.7 Replay as a report** — which campaigns now fail a new expectation; which past
       verdicts would change. Never silently rewrite old verdicts.
+      **"The replay is a report" is the whole design.** Nothing is written, nothing is marked,
+      and running it twice changes nothing — so "never silently rewritten" is true by
+      construction rather than by discipline, and there is no stored judgment carrying a
+      verdict about itself that a reader has to trust.
+      **"Which past verdicts would change" is a claim this server cannot honestly make**, and
+      saying it would be the confident unfounded assertion the whole review is written
+      against — it cannot re-run the model, and §7.7 exists precisely because a model asked
+      twice does not always answer the same way. What it knows exactly is what judging again
+      would MECHANICALLY meet, and each row carries that as a `consequence` from a closed
+      vocabulary: `stated_basis_withdrawn` (the verdict rested only on rules somebody has
+      since set aside — the most urgent row this report can produce), `rests_on_withdrawn`,
+      `gap_appears` (the subject has no measured value for something that became expected
+      after it was judged), `rule_not_applied`. Each is a fact about the EVIDENCE, computed
+      identically for every reader. A check that would simply pass is not listed at all.
+      **The review's premise does not hold yet and the implementation does not rest on it.**
+      *"Every verdict is stamped with its rulebook version"* — and `RULEBOOK_VERSION` is one
+      literal string, identical on every judgment, until §12.1 ships a rulebook. The report is
+      built from WHEN each measure and rule was confirmed instead, which says *which* rule
+      arrived and when rather than only that something did. D115 records what breaks when a
+      real rulebook lands.
+      **The backlog is grouped by who to ask and what for**, because one conversation per
+      partner per measure is the unit of work the review describes. Campaigns that have not
+      concluded are counted separately rather than listed: you cannot ask a partner for a
+      number that does not exist yet, and dropping them silently would confuse "nothing to
+      chase" with "I did not look".
+      Closes **D104** — the blast radius, on the offer where somebody actually decides.
+      *Found by review:* **`replay.run()` wrote twelve rows on its first call.** The metric
+      registry seeded itself on first read, so a report whose entire claim is that it writes
+      nothing wrote — on exactly the database a customer meets first, an upgraded library
+      where the registry is empty until something touches it. Seeding moved to
+      `store.upgrade`, where a shipped payload belongs.
+      **Re-confirming a rule made the server assert something false about a judgment that
+      CITED it.** `confirmed_at` was overwritten on every graduation, so a rule graduated,
+      cited by a blocking finding, set aside and re-graduated looked newer than the judgment
+      citing it — and the report said it had never been checked against it. `COALESCE` keeps
+      the first confirmation, because that is when the thing became a rule.
+      Also: a judgment whose subject ALREADY carried the measure was listed with the same
+      sentence as a real gap (a non-event, and `expected_check` was right there); a verdict
+      resting entirely on withdrawn rules read identically to one mentioning one in passing;
+      superseded versions made one conversation look like two; a rule reopened but not
+      re-confirmed vanished from the report entirely; and the payload was unbounded — the
+      third time this phase has had to bound a model-facing list.
+      **And `replay_rules` was reachable from nothing but its own definition** — the third
+      instance this phase of a tool the model would have to know existed and spontaneously
+      call (§8.3's gate, §8.6's `note_correction`, this). Graduation is the exact instant the
+      report stops being empty, so that is where it is offered.
 - [ ] **8.8 `bulk_import_metrics` diffs columns against the registry before writing.**
 
 ## Phase 9 — Execution drift and context events

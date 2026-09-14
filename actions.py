@@ -257,6 +257,24 @@ def _note_what_the_client_said(campaign_id: str, commentary: Optional[list],
     return out
 
 
+def after_graduation(*, what: str, markets: list) -> list[dict]:
+    """After a measure or a rule joins the checklist (§8.7).
+
+    This is the exact instant the replay becomes non-empty, and it was the only instant
+    nothing pointed at it. `replay_rules` was referenced nowhere in the product but its own
+    definition — the third time this phase has shipped a tool the model would have to know
+    existed and spontaneously call (§8.3's gate, §8.6's `note_correction`, and this).
+    """
+    where = ", ".join(markets) or "these markets"
+    return trim([action(
+        f"See which stored campaigns and judgments \u201c{what[:50]}\u201d now applies to",
+        "replay_rules",
+        why=f"Briefs in {where} are checked against it from here on. Nothing already on file "
+            f"is rewritten — this reports which records are missing it and which judgments "
+            f"were written before it, so they can be chased or judged again.",
+        consent="ask")])
+
+
 def to_first_upload() -> list[dict]:
     """The one thing an empty library needs. In one place because `gaps()` and `coverage()`
     both offer it and had the sentence written out twice — two sources of truth for one

@@ -125,7 +125,7 @@ Offline smoke test (no Ollama): `CAMPAIGN_POC_EMBED_PROVIDER=hash python -m http
 `list_evaluations` · `reconcile_evaluation` · `save_reconciliation` · `resolve_measure` ·
 `measure_status` · `graduate_measure` · `note_correction` · `list_corrections` ·
 `correction_status` · `resolve_correction` · `graduate_correction` ·
-`set_aside_correction` · `reopen_correction` · `keep_correction` ·
+`set_aside_correction` · `reopen_correction` · `keep_correction` · `replay_rules` ·
 `finish_indexing` ·
 `health_check`
 
@@ -142,6 +142,16 @@ chunking.py      packs text units into embeddable chunks (server-side, per slide
 images.py        perceptual hashing (pHash) for exact/near-duplicate creative-reuse detection
 clip_embed.py    CLIP visual embeddings for aesthetic/regional similarity (torch, heavy)
 core.py          ingest + chunk + semantic retrieval + evidence packaging (LLM-first)
+facts.py         the mechanical checks the SERVER establishes about a brief (dates, budget,
+                 engagement rates, channels) — computed facts, not judgments
+enums.py         the vocabularies, and refusals that name the valid set and the near miss
+notices.py       one shape for "this is degraded and here is what you lose"
+actions.py       the offers a result carries — every one a call that can actually be made
+learning.py      the shared loop: how a measure or a rule becomes expected, and of whom
+metrics.py       the metric registry and typed values (canonical names, units, targets)
+corrections.py   standing corrections — client feedback on the same loop, with provenance
+replay.py        what changed when the rules changed, as a report; never a rewrite
+agreement.py     the golden-set harness: verdict agreement and self-consistency
 mcp_server.py    MCPServer tools (the API Claude calls)
 http_app.py      Streamable-HTTP app (/mcp) + /upload + /healthz
 auth.py          no-op auth seam (OAuth goes here)

@@ -28,6 +28,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+import actions
 import learning
 
 # Read from `learning`, never re-declared. A constant beside the one it mirrors is the copy
@@ -396,13 +397,18 @@ def graduation(conn, correction_id: str) -> dict:
     entry = describe(conn, correction_id)
     if not entry:
         raise ValueError(f"{correction_id!r} is not a correction on file")
-    return {**learning.gate(
+    gate = {**learning.gate(
         name=entry["text"], noun="rule",
         campaigns=learning.distinct_briefs(conn, store.correction_campaigns(conn,
                                                                             correction_id)),
         markets=entry["markets"], status=entry["status"],
         expected_in=entry["expected_in"], confirmed_by=entry["confirmed_by"]),
         "correction_id": correction_id}
+    if gate["eligible"]:
+        import replay
+        gate["if_confirmed"] = replay.if_graduated(conn, correction_id=correction_id,
+                                                   markets=gate["seen_in"])
+    return gate
 
 
 def graduate(conn, correction_id: str, *, confirmed_by: str) -> dict:
@@ -417,6 +423,8 @@ def graduate(conn, correction_id: str, *, confirmed_by: str) -> dict:
     store.graduate_correction(conn, correction_id, markets=gate["seen_in"], confirmed_by=who)
     entry = describe(conn, correction_id)
     return {**entry, "graduated": True,
+            "next_actions": actions.after_graduation(what=entry["text"],
+                                                     markets=entry["expected_in"]),
             "what_it_means": (
                 f"Briefs in {', '.join(entry['expected_in'])} are now judged against this, on "
                 f"{who}'s confirmation. It is shown with the judgment as a standing correction "
@@ -433,8 +441,10 @@ def _newly_eligible(conn, correction_id: str) -> Optional[dict]:
     import actions
     import store
 
+    if store.correction_was_offered(conn, correction_id):
+        return None
     gate = graduation(conn, correction_id)
-    if not gate["eligible"] or store.correction_was_offered(conn, correction_id):
+    if not gate["eligible"]:
         return None
     store.mark_correction_offered(conn, correction_id)
     return {
@@ -442,6 +452,7 @@ def _newly_eligible(conn, correction_id: str) -> Optional[dict]:
         "text": gate["name"],
         "campaigns": gate["campaigns"],
         "seen_in": gate["seen_in"],
+        "if_confirmed": gate.get("if_confirmed"),
         "what_it_means": (
             f"This has now come up in {gate['campaigns']} campaigns across "
             f"{', '.join(gate['seen_in'])}. It can become a standing correction every brief in "

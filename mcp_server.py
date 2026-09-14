@@ -20,6 +20,7 @@ import corrections
 import core
 import enums
 import metrics
+import replay
 import store
 
 # The version goes in the server's own description because that is where a host shows it,
@@ -1238,6 +1239,43 @@ def graduate_measure(measure: str, confirmed_by: str) -> dict:
     conn = store.connect()
     try:
         return metrics.graduate(conn, measure, confirmed_by=confirmed_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def replay_rules(market: Optional[str] = None) -> dict:
+    """What changed when the rules changed — as a REPORT, never a rewrite (§8.7).
+
+    Two answers:
+
+      • `backlog` — stored campaigns that do not carry something now expected of them. This is
+        the list to go and ask partners for: records with names on them, not a count.
+      • `judgments` — saved judgments that were written before a measure or a rule became
+        standing, so they were never checked against it, plus any that rest on a standing
+        correction somebody has since set aside.
+
+    **Nothing is rewritten and nothing is marked.** The report is derived every time it is
+    asked, so no stored judgment carries a verdict about itself.
+
+    It does NOT say a past verdict "would change" — the server cannot re-run a judgment, and
+    claiming to know the answer would be exactly the confident unfounded assertion this product
+    is built against. It says what a judgment was not checked against, which is a fact. If the
+    user wants to know whether a verdict changes, judge it again: each row offers that, and a
+    new judgment is written beside the old one rather than replacing it.
+
+    `backlog` is grouped by market and measure, because one conversation per partner per
+    measure is the unit of work — each group names a few campaigns and says how many more.
+    Pass `market` to scope the whole report to one.
+
+    Say the group and then its names. "Fourteen LATAM campaigns are missing footfall uplift"
+    is a statistic; naming three of them is a morning's work. Lead with any judgment whose
+    `consequence` is `stated_basis_withdrawn` — that is a verdict whose entire stated basis is
+    a rule somebody has since withdrawn."""
+    conn = store.connect()
+    try:
+        return replay.run(conn, market=market)
     finally:
         conn.close()
 
