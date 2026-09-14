@@ -122,7 +122,8 @@ Offline smoke test (no Ollama): `CAMPAIGN_POC_EMBED_PROVIDER=hash python -m http
 `bulk_import_metrics` · `upload_image_asset` · `check_image_provenance` ·
 `find_similar_images` · `upload_image_assets` · `compare_execution` · `check_commitments` ·
 `list_commitments` · `add_commitment` · `drop_commitment` ·
-`classify_drift` · `drift_readings` · `list_campaigns` · `get_campaign` · `find_similar_campaigns` ·
+`classify_drift` · `drift_readings` · `record_context_event` · `campaign_context` · `withdraw_context_event` ·
+`list_campaigns` · `get_campaign` · `find_similar_campaigns` ·
 `diff_campaigns` · `coverage` · `gaps` · `getting_started` · `prepare_evaluation` · `save_evaluation` · `get_evaluation` ·
 `list_evaluations` · `reconcile_evaluation` · `save_reconciliation` · `resolve_measure` ·
 `measure_status` · `graduate_measure` · `note_correction` · `list_corrections` ·
@@ -154,6 +155,7 @@ metrics.py       the metric registry and typed values (canonical names, units, t
 corrections.py   standing corrections — client feedback on the same loop, with provenance
 commitments.py   the promises a brief names, and whether the photographs show them
 drift.py         what somebody made of the difference — recorded, never inferred
+context.py       what else was going on: events by market and date, linked by overlap
 replay.py        what changed when the rules changed, as a report; never a rewrite
 agreement.py     the golden-set harness: verdict agreement and self-consistency
 mcp_server.py    MCPServer tools (the API Claude calls)

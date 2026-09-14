@@ -2414,8 +2414,56 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       **The snapshot swallowed every exception**, leaving the campaign reading `never_checked`
       forever — indistinguishable from nobody having looked, which is the distinction the whole
       item rests on. It still does not raise (a result must file), and it no longer disappears.
-- [ ] **9.6 `context_events` table** — date range, scope, kind, description, source, stated
+- [x] **9.6 `context_events` table** — date range, scope, kind, description, source, stated
       impact; auto-linked by market + window overlap.
+      **"No one should have to remember to connect them" is the item**, so there is no join
+      table — a maintained link IS the remembering. The overlap is computed from (scope, range)
+      against (market, window) on every read, because both halves keep arriving: an earthquake
+      is recorded weeks after the campaigns it overlapped, and a campaign is uploaded months
+      after its market's calendar was seeded. A link written at either moment is wrong about
+      the other.
+      **A campaign had no window, and that was the load-bearing gap.** Dates existed only as
+      prose `facts.py` parses for contradictions, so there was nothing for a date range to
+      overlap WITH. `starts_on`/`ends_on` is what this item turns on, the way `phase` was
+      §9.1's — settable at upload, at update, and from a workbook's own date columns (D119,
+      closed here: a `Month` column was being dropped as "not a measurement").
+      **The link is an overlap and nothing more.** "Ran during" is a fact; "affected by" is an
+      assertion, and a model asked to explain a disappointing number will reach for whatever
+      is nearby. §9.8 owns `confounded`; this owns not getting there early.
+      *Found by review, all reproduced:*
+      **Three routes to a false clean bill, in the class the module was built to prevent.** The
+      `nothing_to_check`/`checked` split exists so an empty list never reads as a claim — and a
+      window read out of prose defeated it (a stray asset-spec date became a one-day window,
+      found nothing, and the product said "that is a real answer"), as did a record naming no
+      market (only global events could reach it), as did a window inverted across two calls
+      (validated only when both ends arrived together, so a one-field typo stored 2026-12-01 to
+      2026-03-31 and printed it backwards inside the sentence asserting nothing had happened).
+      **The two directions were two implementations and gave two answers.** SQLite's
+      `COLLATE NOCASE` folds ASCII only and Python's `.lower()` folds Unicode, so recording an
+      event said it reached a campaign and opening that campaign said nothing had. One stored
+      fold now, matched identically from both sides.
+      **The item's own headline was false in practice.** The link is automatic, but the WINDOW
+      it trades for was asked for nowhere: not at upload, not in `after_upload`, and absent
+      from every gap — so the fraction of campaigns with no context forever was whatever
+      fraction nobody made a second deliberate call for, silently. §9.5 gave itself
+      `execution_never_checked` for exactly this reason; this now has `no_window`.
+      **The caveat reached nobody.** §9.5 wires `_execution_note` into four read paths; §9.6
+      was wired into none, so a reader looking at an evidence row saw nothing about the port
+      closure that ran through half the flight. `context` now travels beside `execution`.
+      **Truncation hid the one event that mattered.** Ordered by date and cut at eight,
+      "earliest eight" becomes "eight holidays" the moment §9.7 seeds a calendar — and the
+      flood with a stated fourteen-day delay, precisely what §9.8 needs linked, is what
+      disappears. Ordered by salience now, with the kinds surviving the cut.
+      **A wrong event was permanent and contagious** — worse than the hand-maintained join it
+      replaces, which at least lets you unlink. `withdraw_context_event` is §8.5's shape: kept,
+      not deleted, and it says how many campaigns stop carrying it.
+      **A monthly workbook made a twelve-month campaign a January one**, labelled `stated` so
+      nothing downstream doubted it. A workbook window widens as its rows arrive, and never
+      over dates a person typed.
+      *Built for what comes next:* `context.for_window` takes a window and markets with no
+      campaign involved — §9.7 checks a PROPOSED window that may not be stored, and §9.8 needs
+      a measurement period narrower than an always-on campaign's year. `seed_key` makes §9.7's
+      seeder idempotent and lets a corrected Ramadan date replace a wrong one on upgrade.
 - [ ] **9.7 Seed fixed calendar events per market**; `prepare_evaluation` checks every
       proposed window against them as a computed fact.
 - [ ] **9.8 Record overlap, never assert cause** — mark outcomes `confounded`; the caveat

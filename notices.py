@@ -126,6 +126,16 @@ _REGISTRY: dict[str, tuple] = {
         "on the way in.",
         "",
     ),
+    # §9.6. `global` plus a market is a contradiction somebody probably did not mean, and
+    # keeping the market silently would make the event match one market while reading as
+    # global everywhere it is shown. Dropping it is the right call; dropping it without
+    # saying so leaves the recorder believing they scoped something they did not.
+    "scope_value_ignored": (
+        "degraded", "call",
+        "{affects}",
+        "Record it again with scope `market` if the event was local to one market.",
+        "Say it once, on the write. The event IS stored — global — so this is a correction "
+        "offer, not a failure."),
     "image_not_embedded": (
         "degraded", "call",
         "{count_phrase} will not come back in 'looks like this' searches.",

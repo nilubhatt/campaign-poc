@@ -17,6 +17,7 @@ from mcp.server.mcpserver import MCPServer
 
 import config
 import commitments
+import context
 import corrections
 import core
 import drift
@@ -296,15 +297,19 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
                     market: Optional[str] = None, markets: Optional[list[str]] = None,
                     collection: Optional[str] = None,
                     supersedes: Optional[str] = None, asset_ref: Optional[dict] = None,
-                    confirm: bool = False) -> dict:
+                    confirm: bool = False,
+                    starts_on: Optional[str] = None, ends_on: Optional[str] = None) -> dict:
     """Store a past or proposed campaign in the memory.
 
     The user is a non-technical marketer, not someone filling out a form — have a
     conversation, don't demand structured fields. Ask things like: is this a *finished
     campaign or a future/proposed one* (record_type/status)? What do you *like* about it,
     what don't you like, what are you trying to *achieve* (fold into detail)? Where does it
-    run (region/market)? Is it a market/version variant of something already in the memory
-    (collection)? Any tags that fit — two independent axes that commonly BOTH apply to the
+    run (region/market)? **When did it run** (starts_on/ends_on, ISO dates) — worth asking for
+    any finished campaign, because without a window nothing can be checked against what else
+    was happening, and "this launch overlapped Ramadan" or "the port was shut for half of it"
+    become findings the library cannot produce about it. Is it a market/version variant of
+    something already in the memory (collection)? Any tags that fit — two independent axes that commonly BOTH apply to the
     same campaign: creative reaction (liked / not_liked / mixed_reaction) and performance
     (performed_well / underperformed / performed_as_expected / no_data_yet). If they answer
     in one free-text paragraph instead of field-by-field, parse it into these fields
@@ -401,7 +406,8 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
                                     record_type=record_type, status=status, tags=tags,
                                     region=region, market=market, markets=markets,
                                     collection=collection, supersedes=supersedes,
-                                    asset_ref=asset_ref, confirm=confirm)
+                                    asset_ref=asset_ref, confirm=confirm,
+                                    starts_on=starts_on, ends_on=ends_on)
     finally:
         conn.close()
 
@@ -413,7 +419,8 @@ def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optio
                     tags: Optional[Union[TagInput, list[TagInput]]] = None, region: Optional[str] = None,
                     market: Optional[str] = None, markets: Optional[list[str]] = None,
                     collection: Optional[str] = None,
-                    supersedes: Optional[str] = None) -> dict:
+                    supersedes: Optional[str] = None,
+                    starts_on: Optional[str] = None, ends_on: Optional[str] = None) -> dict:
     """Edit a campaign's metadata (title, detail, record_type, status, tags, region, market,
     markets, collection, supersedes). Only the fields you pass change. tags/markets, if given, fully
     REPLACE the existing list (not a merge) — pass the complete new list, including any
@@ -435,13 +442,20 @@ def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optio
     user hears "link these versions" and agrees, unseen, to hide one of them. Pass `""` to
     take it back if it was set by mistake. Setting it returns `earlier_judgment` when the
     replaced record carries a judgment nobody has checked yet — that is the moment to ask
-    which of its predictions held."""
+    which of its predictions held.
+
+    `starts_on`/`ends_on` are WHEN IT RAN, as ISO dates (§9.6). Worth asking for on any
+    concluded campaign: without a window nothing can be checked against the calendar, so
+    "this launch overlapped Ramadan" and "the port was shut for the first half of it" are
+    findings the library cannot produce. Absent one, a window is read out of the brief's own
+    dates and clearly labelled as a reading of prose — entering them settles it."""
     conn = store.connect()
     try:
         return core.update_campaign(conn, campaign_id, title=title, detail=detail,
                                     record_type=record_type, status=status, tags=tags,
                                     region=region, market=market, markets=markets,
-                                    collection=collection, supersedes=supersedes)
+                                    collection=collection, supersedes=supersedes,
+                                    starts_on=starts_on, ends_on=ends_on)
     finally:
         conn.close()
 
@@ -508,6 +522,96 @@ def upload_image_asset(campaign_id: str, asset_ref: dict, phase: AssetPhase = "p
     try:
         return core.ingest_image_asset(conn, campaign_id=campaign_id, asset_ref=asset_ref,
                                        phase=phase, captured_on=captured_on)
+    finally:
+        conn.close()
+
+
+ContextKind = _enum("conflict", "natural_disaster", "regulatory_change", "supply_chain",
+                    "platform_outage", "competitor_launch", "macro_shock", "fixed_calendar")
+ContextScope = _enum("market", "region", "global")
+
+
+@mcp.tool()
+@_catch_value_errors
+def record_context_event(starts_on: str, scope: ContextScope, kind: ContextKind,
+                         description: str, recorded_by: str,
+                         ends_on: Optional[str] = None, scope_value: Optional[str] = None,
+                         source: Optional[str] = None, delay_days: Optional[int] = None,
+                         budget_change_pct: Optional[float] = None,
+                         channels_disrupted: Optional[list[str]] = None) -> dict:
+    """Put on the record what else was going on in a market (§9.6).
+
+    Conflict, natural disaster, regulatory change, supply-chain or port disruption, platform
+    outage, competitor launch, macro shock, or a fixed calendar event — anything that was
+    happening around a campaign and is not in its brief.
+
+    **You do not have to link it to anything.** Any campaign whose window overlaps this event
+    in its market picks it up automatically, in both directions: an earthquake recorded weeks
+    later reaches the campaigns that ran through it, and a campaign uploaded next year reaches
+    this event. There is no join to maintain and no "connect to campaign" step to remember.
+
+    `scope` is `market`, `region` or `global`, and `scope_value` names which one (leave it off
+    for `global`). `ends_on` is optional — a port closure with no announced reopening is
+    ongoing, and inventing an end date would silently stop it matching campaigns it covers.
+
+    **The impact is what somebody TELLS you, never what you work out.** `delay_days`,
+    `budget_change_pct` and `channels_disrupted` are recorded as `stated`. Do not estimate
+    them from a campaign's numbers — that is attribution, and this library does not do it."""
+    conn = store.connect()
+    try:
+        return context.record(
+            conn, starts_on=starts_on, ends_on=ends_on, scope=scope, scope_value=scope_value,
+            kind=kind, description=description, source=source, delay_days=delay_days,
+            budget_change_pct=budget_change_pct, channels_disrupted=channels_disrupted,
+            recorded_by=recorded_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def withdraw_context_event(event_id: str, why: str, withdrawn_by: str) -> dict:
+    """Take a context event back off the record (§9.6).
+
+    Because the link is automatic, a wrong event is contagious: one typed with the wrong year
+    or the wrong market attaches itself silently to every overlapping campaign, and stays
+    there. This is how it is taken back.
+
+    It is KEPT, not deleted — "we used to think this" is an answer, and anything judged while
+    the event was on file rested on it. The response says how many campaigns stop carrying it,
+    because removing a caveat matters as much as adding one.
+
+    **Withdraw for a mistake, not for an inconvenience.** An event somebody would rather not
+    have on a campaign's record is exactly the event that record needs."""
+    conn = store.connect()
+    try:
+        return context.withdraw(conn, event_id=event_id, why=why, withdrawn_by=withdrawn_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def campaign_context(campaign_id: str) -> dict:
+    """What else was going on while this campaign ran (§9.6).
+
+    Every recorded event whose date range overlaps this campaign's window in its market,
+    computed fresh each time rather than read from a stored link.
+
+    **Read `status` before you read `events`.** `nothing_to_check` means this campaign has no
+    window, so nothing COULD be matched — it does not mean nothing was going on, and reporting
+    an empty list as "nothing overlapped" is the confident unfounded claim this field exists to
+    stop. `checked` with no events is the real answer, and it is only as complete as the
+    calendar behind it.
+
+    **This is an overlap in time and nothing more.** "Sell-through was down and there was an
+    earthquake" is not evidence the earthquake caused it. Say what ran during what; do not say
+    what caused what, and do not let a disappointing number go looking for the nearest event to
+    explain it. Read `window.basis` too: `heuristic` means the dates were read out of the
+    brief's prose rather than entered, so the match inherits that reading."""
+    conn = store.connect()
+    try:
+        return context.for_campaign(conn, campaign_id)
     finally:
         conn.close()
 

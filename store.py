@@ -45,6 +45,19 @@ CREATE TABLE IF NOT EXISTS campaigns (
                                     -- get_superseded_campaign_ids), not a maintained reverse
                                     -- pointer — a cached pointer breaks on supersession
                                     -- chains and fan-in (two records both superseding one).
+    -- §9.6: the campaign's own window. Dates existed only as prose that `facts.py` parses for
+    -- contradictions, so there was nothing for a context event's date range to overlap WITH —
+    -- this is the field §9.6 turns on, the way `phase` was §9.1's. Nullable on purpose: the
+    -- honest default is no window rather than one read out of the deck and stored as though
+    -- somebody had entered it. `context.window_of` falls back to the brief's own dates and
+    -- labels that reading `heuristic`.
+    starts_on     TEXT,            -- ISO date, or NULL
+    ends_on       TEXT,            -- ISO date, or NULL
+    window_source TEXT,            -- NULL = a person entered it; 'workbook' = read from a
+                                   -- spreadsheet's date columns (D119). A KPI workbook is one
+                                   -- row per month, so a workbook window WIDENS as rows
+                                   -- arrive — but it must never widen over one somebody typed,
+                                   -- which is the correction being undone by what it corrected
     detail        TEXT,            -- freeform: brief, audience, budget, channel, timeline, anything
     deck_text     TEXT,            -- extracted PDF/PPTX text
     commentary_checked INTEGER NOT NULL DEFAULT 0,  -- was a file actually read for comments
@@ -138,6 +151,59 @@ CREATE TABLE IF NOT EXISTS metric_registry (
     last_seen     REAL,
     times_seen    INTEGER NOT NULL DEFAULT 0,
     markets       TEXT NOT NULL DEFAULT '[]'   -- which markets it has appeared in (§8.3)
+);
+CREATE TABLE IF NOT EXISTS context_events (
+    -- §9.6: what else was going on. "Conflict, natural disaster, regulatory change,
+    -- supply-chain or port disruption, platform outage, competitor launch, macro shock, and
+    -- fixed calendar events."
+    --
+    -- There is deliberately NO join table to campaigns. "Any campaign whose window overlaps an
+    -- event in its market links automatically — no one should have to remember to connect
+    -- them", and a maintained link is exactly the remembering this replaces. Both halves keep
+    -- arriving (an earthquake is recorded weeks after the campaigns it overlapped; a campaign
+    -- is uploaded months after the event was seeded), so the link is computed from (scope,
+    -- range) against (market, window) on every read. A materialised one would be stale in both
+    -- directions, and stale here means silently wrong.
+    id            TEXT PRIMARY KEY,
+    starts_on     TEXT NOT NULL,   -- ISO date
+    ends_on       TEXT,            -- NULL = ongoing. A port closure with no announced
+                                   -- reopening is the ordinary case, and an invented end date
+                                   -- silently stops matching campaigns it still covers
+    scope         TEXT NOT NULL,   -- market | region | global
+    scope_value   TEXT,            -- the market or region named; NULL for global
+    scope_key     TEXT,            -- `scope_value` case-folded, and the column actually
+                                   -- MATCHED on. SQLite's COLLATE NOCASE folds ASCII only
+                                   -- while Python's .lower() folds Unicode, so the SQL side
+                                   -- and the Python side disagreed on "MÉXICO" vs "méxico":
+                                   -- recording an event said it reached a campaign and
+                                   -- opening that campaign said nothing had. One fold, stored
+                                   -- once, is the only way two directions stay one answer
+    kind          TEXT NOT NULL,   -- see context.KINDS
+    description   TEXT NOT NULL,
+    source        TEXT,            -- a link, so this is not a rumour on the record
+    -- The STATED impact. The server measured none of this; somebody said it, and §2.4 made
+    -- `computed` unwritable from the MCP surface exactly so the word keeps meaning what it says.
+    delay_days    INTEGER,
+    budget_change_pct REAL,
+    channels_disrupted TEXT NOT NULL DEFAULT '[]',   -- JSON array of strings
+    recorded_by   TEXT NOT NULL,   -- whose account of it this is
+    seeded        INTEGER NOT NULL DEFAULT 0,   -- §9.7: shipped with the product rather than
+                                   -- entered by this customer
+    seed_key      TEXT UNIQUE,     -- §9.7's handle on a row it wrote, e.g. 'ae.ramadan.2026'.
+                                   -- A random ctx_… id gives a seeder no way back: it cannot
+                                   -- run twice without doubling the calendar, and cannot
+                                   -- replace a corrected Ramadan date on upgrade. The
+                                   -- precedent is `_seed_metric_registry`, idempotent because
+                                   -- `canonical` is its primary key
+    -- §8.5's shape: a withdrawn event is KEPT. "We used to think this" is an answer and
+    -- deleting is a lie — a judgment saved while the event was on file rested on it. Without
+    -- a correction path an event typed with the wrong year attaches itself to every
+    -- overlapping campaign forever, which is strictly worse than the hand-maintained join
+    -- this replaces: a join table at least lets you unlink.
+    withdrawn_at  REAL,
+    withdrawn_by  TEXT,
+    withdrawn_why TEXT,
+    created_at    REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS execution_drift (
     -- §9.5: the drift figure, stored ON the outcome. "`performed_well` at low drift and
@@ -336,6 +402,10 @@ CREATE INDEX IF NOT EXISTS metric_values_metric_idx ON metric_values(metric);
 CREATE INDEX IF NOT EXISTS metric_values_campaign_idx ON metric_values(campaign_id);
 CREATE INDEX IF NOT EXISTS evals_campaign_idx   ON evaluations(campaign_id);
 CREATE INDEX IF NOT EXISTS recon_eval_idx       ON reconciliations(evaluation_id);
+-- §9.6: every overlap query filters on the range first, and the link is recomputed on every
+-- read by design, so this is the one index that carries the feature.
+CREATE INDEX IF NOT EXISTS context_range_idx     ON context_events(starts_on, ends_on);
+CREATE INDEX IF NOT EXISTS context_scope_idx     ON context_events(scope, scope_key);
 """
 
 
@@ -806,7 +876,7 @@ def _parse_tag_query(tags) -> list[tuple[str, Optional[str]]]:
 def insert_campaign(conn, *, title, record_type="campaign", status=None, detail=None,
                     deck_text=None, asset_path=None, tags=None, region=None, market=None,
                     markets=None, collection=None, supersedes=None,
-                    commentary_checked=False) -> str:
+                    commentary_checked=False, starts_on=None, ends_on=None) -> str:
     record_type = _normalise_record_type(record_type)
     status = _normalise_status(status)
     tags = normalize_tags(tags, has_actual_metrics=False)  # brand-new: no metrics can exist yet
@@ -815,14 +885,23 @@ def insert_campaign(conn, *, title, record_type="campaign", status=None, detail=
     now = _now()
     if status is None and record_type == "campaign":
         status = "concluded"  # reference/stub records have no lifecycle status by default
+    # §9.6: validated here like every other window, because this is the one path that wrote
+    # one without going through `update_campaign`.
+    starts = _checked_date(starts_on, "starts_on")
+    ends = _checked_date(ends_on, "ends_on")
+    if starts and ends and ends < starts:
+        raise ValueError(
+            f"`ends_on` ({ends}) is before `starts_on` ({starts}). A window that closes "
+            f"before it opens overlaps nothing, so it would look recorded and match no event.")
     conn.execute(
         """INSERT INTO campaigns (id, title, record_type, status, tags, region, market,
                                   markets, collection, supersedes, detail, deck_text,
-                                  asset_path, commentary_checked, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                  asset_path, commentary_checked, starts_on, ends_on,
+                                  created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (cid, title, record_type, status, json.dumps(tags), region, market,
          json.dumps(markets), collection, supersedes, detail, deck_text, asset_path,
-         1 if commentary_checked else 0, now, now),
+         1 if commentary_checked else 0, starts, ends, now, now),
     )
     conn.commit()
     return cid
@@ -1032,7 +1111,8 @@ def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Opti
 
 def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_type=None,
                     status=None, tags=None, region=None, market=None, markets=None,
-                    collection=None, supersedes=None) -> bool:
+                    collection=None, supersedes=None, starts_on=None, ends_on=None,
+                    window_source=None) -> bool:
     """Update campaign metadata (§6.4) — NOT deck_text/chunks/embeddings; re-upload (or
     supersede) for content changes. Only given fields change; tags/markets, if given, fully
     replace the existing list rather than merging. Returns whether the campaign exists.
@@ -1075,6 +1155,34 @@ def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_t
     if supersedes is not None:
         fields.append("supersedes = ?")
         params.append(checked_supersedes(conn, campaign_id, supersedes))
+    # §9.6: when it ran. Validated here rather than at the edge because every caller writes
+    # through this one function, and a window stored as "March-ish" compares as text against
+    # every event range in the library — silently, and wrongly.
+    if starts_on is not None or ends_on is not None:
+        # Checked against what is STORED, not only against what arrived in this call. Guarded
+        # on the two-field case alone, a one-field typo fix wrote 2026-12-01 to 2026-03-31 —
+        # and §9.6 then printed that window backwards inside the sentence asserting nothing
+        # had been going on. Clearing an end is still allowed: an always-on campaign is
+        # ordinary, and refusing a clear because the stored other end is later would make it
+        # unsettable.
+        current = get_campaign(conn, campaign_id) or {}
+        new_start = (_checked_date(starts_on, "starts_on") if starts_on is not None
+                     else current.get("starts_on"))
+        new_end = (_checked_date(ends_on, "ends_on") if ends_on is not None
+                   else current.get("ends_on"))
+        if new_start and new_end and new_end < new_start:
+            raise ValueError(
+                f"that would leave this campaign's window running {new_start} to {new_end}, "
+                f"which closes before it opens. A window like that overlaps nothing, so it "
+                f"looks recorded and matches no event. Pass both ends to move the whole "
+                f"window.")
+        if starts_on is not None:
+            fields.append("starts_on = ?"); params.append(new_start)
+        if ends_on is not None:
+            fields.append("ends_on = ?"); params.append(new_end)
+        # A window a PERSON set clears the workbook mark, so a later spreadsheet row cannot
+        # widen over it. Passing `window_source` explicitly is how the workbook path keeps it.
+        fields.append("window_source = ?"); params.append(window_source)
 
     if not fields:
         return get_campaign(conn, campaign_id) is not None
@@ -1085,6 +1193,23 @@ def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_t
     cur = conn.execute(f"UPDATE campaigns SET {', '.join(fields)} WHERE id = ?", params)
     conn.commit()
     return cur.rowcount > 0
+
+
+def _checked_date(value, field: str) -> Optional[str]:
+    """An ISO date, or None to clear. §9.6's arithmetic is string comparison on ISO dates —
+    which is exactly right for `YYYY-MM-DD` and silently wrong for anything else."""
+    import datetime
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return str(datetime.date.fromisoformat(text))
+    except ValueError:
+        raise ValueError(
+            f"`{field}` must be an ISO date (YYYY-MM-DD); got {value!r}. This is compared "
+            f"against every context event's range by date arithmetic, and a string that is "
+            f"not a date compares as text without failing.") from None
 
 
 def checked_supersedes(conn, campaign_id: Optional[str], supersedes) -> Optional[str]:
@@ -2127,6 +2252,123 @@ def execution_drift_for(conn, campaign_id: str) -> dict:
 def _no_drift_on_file() -> dict:
     return {"score": None, "relative": None, "counts": {}, "classified": {}, "items": [],
             "status": "never_checked", "basis": "computed"}
+
+
+# ── context events (§9.6) ────────────────────────────────────────────────────
+
+def fold(value) -> Optional[str]:
+    """The ONE way a market name is compared (§9.6).
+
+    `str.casefold` rather than `.lower()`, and stored rather than applied at query time: the
+    forward direction matches in SQL and the reverse in Python, and any difference between the
+    two folds means an event that says it reached a campaign the campaign does not list.
+    """
+    text = str(value or "").strip()
+    return text.casefold() or None
+
+
+def insert_context_event(conn, *, starts_on: str, ends_on, scope: str, scope_value,
+                         kind: str, description: str, recorded_by: str, source=None,
+                         delay_days=None, budget_change_pct=None,
+                         channels_disrupted=None, seeded: bool = False,
+                         seed_key=None) -> str:
+    """Write one event, or REPLACE the seeded row with this key (§9.6/§9.7).
+
+    Replacing rather than inserting only when a `seed_key` is given, which only the seeder
+    supplies: a calendar that doubles every time the product starts is worse than no calendar,
+    and a Ramadan date corrected upstream has to be able to reach a database that already has
+    the wrong one.
+    """
+    existing = (conn.execute("SELECT id FROM context_events WHERE seed_key = ?",
+                             (seed_key,)).fetchone() if seed_key else None)
+    eid = existing["id"] if existing else _id("ctx")
+    conn.execute(
+        "INSERT OR REPLACE INTO context_events (id, starts_on, ends_on, scope, scope_value, "
+        "scope_key, kind, description, source, delay_days, budget_change_pct, "
+        "channels_disrupted, recorded_by, seeded, seed_key, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (eid, starts_on, ends_on, scope, scope_value, fold(scope_value), kind, description,
+         source, delay_days, budget_change_pct, json.dumps(list(channels_disrupted or [])),
+         recorded_by, int(seeded), seed_key, _now()))
+    conn.commit()
+    return eid
+
+
+def withdraw_context_event(conn, event_id: str, *, why: str, withdrawn_by: str) -> None:
+    conn.execute("UPDATE context_events SET withdrawn_at = ?, withdrawn_by = ?, "
+                 "withdrawn_why = ? WHERE id = ?", (_now(), withdrawn_by, why, event_id))
+    conn.commit()
+
+
+def _context_row(row) -> dict:
+    d = dict(row)
+    d["channels_disrupted"] = json.loads(d.get("channels_disrupted") or "[]")
+    d["seeded"] = bool(d.get("seeded"))
+    return d
+
+
+def get_context_event(conn, event_id: str) -> Optional[dict]:
+    if not _columns(conn, "context_events"):
+        return None  # a lookup by id has no claim to collapse; see `context_events`
+    row = conn.execute("SELECT * FROM context_events WHERE id = ?", (event_id,)).fetchone()
+    return _context_row(row) if row else None
+
+
+def context_events(conn, *, scopes=None, starts_on=None, ends_on=None,
+                   seeded=None, include_withdrawn: bool = False) -> list[dict]:
+    """Events matching a set of scopes, optionally overlapping a window (§9.6).
+
+    The overlap is done in SQL rather than in Python because it is the whole query: a library
+    with years of seeded calendar events (§9.7 seeds Ramadan, Golden Week, Black Friday and
+    the rest for every market) would otherwise be read into memory on every citation.
+
+    Inclusive at both ends. An off-by-one here drops exactly the events that ran INTO a
+    launch, which are the ones anybody cares about. `ends_on IS NULL` is ongoing and covers
+    everything after it starts.
+    """
+    if not _columns(conn, "context_events"):
+        # NOT `[]`. An empty list here reaches `for_campaign` as "checked, nothing overlapped"
+        # — the exact collapse this module forbids — and the only way to be here is that
+        # `init_db` never ran, which is a broken install rather than a quiet answer.
+        raise RuntimeError(
+            "this database has no `context_events` table, so nothing can be checked against "
+            "the calendar. Run the server once to upgrade the schema.")
+    where, params = [], []
+    if not include_withdrawn:
+        where.append("withdrawn_at IS NULL")
+    if seeded is not None:
+        where.append("seeded = ?")
+        params.append(int(seeded))
+    if scopes is not None:
+        if not scopes:
+            return []
+        clauses = []
+        for scope, value in scopes:
+            if value is None:
+                clauses.append("(scope = ?)")
+                params.append(scope)
+            else:
+                # `scope_key`, never `scope_value COLLATE NOCASE` — see the column comment.
+                clauses.append("(scope = ? AND scope_key = ?)")
+                params += [scope, fold(value)]
+        where.append("(" + " OR ".join(clauses) + ")")
+    if ends_on is not None:
+        where.append("starts_on <= ?")
+        params.append(ends_on)
+    if starts_on is not None:
+        where.append("(ends_on IS NULL OR ends_on >= ?)")
+        params.append(starts_on)
+    sql = "SELECT * FROM context_events"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    return [_context_row(r)
+            for r in conn.execute(sql + " ORDER BY starts_on, id", params).fetchall()]
+
+
+def set_campaign_window(conn, campaign_id: str, *, starts_on, ends_on) -> None:
+    conn.execute("UPDATE campaigns SET starts_on = ?, ends_on = ?, updated_at = ? WHERE id = ?",
+                 (starts_on, ends_on, _now(), campaign_id))
+    conn.commit()
 
 
 def insert_drift_classification(conn, *, campaign_id: str, subject: str, item: str,

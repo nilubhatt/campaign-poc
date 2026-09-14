@@ -23,6 +23,7 @@ import chunking
 import clip_embed
 import commitments
 import config
+import context
 import corrections
 import drift
 import embedding
@@ -54,7 +55,8 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                     region: Optional[str] = None, market: Optional[str] = None,
                     markets: Optional[list] = None, collection: Optional[str] = None,
                     supersedes: Optional[str] = None,
-                    asset_ref: Optional[dict] = None, confirm: bool = True) -> dict:
+                    asset_ref: Optional[dict] = None, confirm: bool = True,
+                    starts_on: Optional[str] = None, ends_on: Optional[str] = None) -> dict:
     """
     Store a past/proposed campaign, chunk it, and embed each chunk for search (§6.1).
 
@@ -188,6 +190,10 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         # call, and "nobody ever read this deck's comments" is a fact somebody needs months
         # later, when they are wondering why a search misses what they remember writing.
         commentary_checked=commentary_checked,
+        # §9.6: when it ran, at the moment the record is created. The only route in was a
+        # second deliberate `update_campaign` call, which is the unreachable human step this
+        # project has now hit three times.
+        starts_on=starts_on, ends_on=ends_on,
     )
 
     # Images embedded IN the deck, extracted and processed automatically — a separate
@@ -412,7 +418,10 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
             # §8.6: a tracked client comment IS client feedback, and it arrives with its
             # provenance already assembled. Without this the correction loop had no input at
             # all — `note_correction` was a tool nothing in the product ever mentioned.
-            commentary=commentary, title=title),
+            commentary=commentary, title=title,
+            # §9.6: the window is what makes this record checkable against a calendar at all,
+            # and this is the moment somebody is present and thinking about the campaign.
+            has_window=bool(current.get("starts_on"))),
         "warnings": notices.collapse(warnings),
         # §6.3: the one moment where "was our judgment any good?" is both answerable and
         # free. Attached only when there IS an unreconciled judgment on the record this one
@@ -492,8 +501,26 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
         eligible += [written["newly_eligible"]] if written.get("newly_eligible") else []
         # §8.5/§2.1: a checklist that shrank silently is partial state nobody was told about.
         retired += written.get("retired") or []
+    # D119: a date column is not a measurement and is not rubbish either. §9.6 gave campaigns
+    # a window, which is the field it belongs in — and setting one changes which context
+    # events reach this campaign, so it is REPORTED rather than done quietly.
+    window_set = _window_from_the_workbook(conn, campaign_id, structured)
+    # D116: `update_campaign` offered the check a window makes possible and this — the other
+    # write that sets one — did not. The house rule is the write that makes a tool's output
+    # non-empty, and a workbook's date column is exactly that write.
+    context_offer = (_context_offer(conn, campaign_id, {"starts_on": True})
+                     if window_set else {})
+    if context.window_from_columns(structured or {}):
+        # A column this READ is not a column it skipped, whether or not it moved the window —
+        # a workbook's second January row adds nothing and was still understood. Saying it was
+        # skipped is a false statement about the import in the one field a reader checks to
+        # find out what the library did with their spreadsheet.
+        skipped = [s for s in skipped if s["key"] not in _date_columns(structured)]
     revisit = drift.to_revisit(conn, campaign_id) if metric_type == "actual" else []
     return {"metrics_id": mid, "campaign_id": campaign_id, "status": "stored",
+            **({"window_set": window_set} if window_set else {}),
+            **({"context_events_found": context_offer["context_events_found"]}
+               if context_offer else {}),
             **({"new_measures": asked} if asked else {}),
             **({"skipped": skipped} if skipped else {}),
             **({"newly_eligible": eligible} if eligible else {}),
@@ -505,10 +532,14 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
             **({"drift_to_revisit": revisit} if revisit else {}),
             # The moment the precondition for reconciling is satisfied. Offered at
             # save_evaluation time it simply failed: there were no actuals yet (§5.2 review).
-            "next_actions": actions.after_metrics(
-                campaign_id=campaign_id,
-                open_evaluation_id=store.unreconciled_evaluation_id(conn, campaign_id)
-                if metric_type == "actual" else None)}
+            # D116: the workbook's date column is a write that makes `campaign_context`
+            # answerable, so its offer joins the list rather than being overwritten by it.
+            "next_actions": actions.trim(
+                actions.after_metrics(
+                    campaign_id=campaign_id,
+                    open_evaluation_id=store.unreconciled_evaluation_id(conn, campaign_id)
+                    if metric_type == "actual" else None)
+                + (context_offer.get("next_actions") or []))}
 
 
 # ── retrieval / evidence for Claude ──────────────────────────────────────────
@@ -3075,6 +3106,10 @@ _GAP_RANK = {
     # checked against what ran — but above nothing, because it is the difference between
     # "this campaign worked" and "something worked, and we do not know if it was this".
     "execution_never_checked": 5,
+    # Below execution drift: not knowing what ran is worse than not knowing what else was
+    # going on while it ran, and this one is cheap to close (two dates) where that one needs
+    # photographs.
+    "no_window": 4,
     # "commentary_never_read" is recorded but not reported — see gaps() for why.
 }
 
@@ -3213,6 +3248,38 @@ def gaps(conn) -> dict:
                 consent="ask",
                 needs=["the photographs themselves"],
                 campaign_id=unchecked[0]["id"], phase="delivered")]),
+        })
+
+    # §9.6: a concluded campaign with no window is one the calendar can never reach. §9.5 gave
+    # itself `execution_never_checked` for exactly this reason — without a gap, the absence is
+    # invisible on every reporting surface and nothing ever says "none of these can be checked
+    # against what else was going on".
+    windowless = [c for c in ran if not c.get("starts_on")]
+    if windowless:
+        found.append({
+            "code": "no_window",
+            "what": f"{len(windowless)} finished campaign"
+                    f"{'s' * (len(windowless) != 1)} "
+                    f"{'have' if len(windowless) != 1 else 'has'} no dates on file, so "
+                    f"nothing can be matched to what else was happening at the time: "
+                    f"{', '.join(c['title'] for c in windowless[:_MAX_NAMED])}"
+                    + (f" (and {len(windowless) - _MAX_NAMED} more)"
+                       if len(windowless) > _MAX_NAMED else "") + ".",
+            "why_it_matters": ("“This launch overlapped Ramadan” and “the port "
+                               "was shut for half of it” are findings no model needs to "
+                               "be clever to produce — but only for a campaign that says when "
+                               "it ran. Without a window every outcome is read as though "
+                               "nothing else was going on."),
+            "counts": {"campaigns": len(windowless)},
+            "next_actions": actions.trim([actions.action(
+                f"Say when “{windowless[0]['title'][:36]}” ran",
+                "update_campaign",
+                why="A window is what lets recorded events reach it — and they reach it "
+                    "automatically once it has one, with nothing to link by hand.",
+                consent="ask",
+                needs=["starts_on — the first day it ran (YYYY-MM-DD)",
+                       "ends_on — the last day (YYYY-MM-DD)"],
+                campaign_id=windowless[0]["id"])]),
         })
 
     # A gap located in a SLICE rather than in the total. A marketer asking about Colombia
@@ -4775,8 +4842,128 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
             # look. A result from a campaign that drifted is evidence that something worked and
             # the brief may not have been it — and a result from one nobody checked is neither.
             "execution": _execution_note(conn, c["id"]),
+            # §9.6, on the same principle and for the same reason. A reader looking at this row
+            # would otherwise see nothing about the port closure that ran through half the
+            # flight, and could only find it by independently calling a tool nothing
+            # recommends. Counts and kinds rather than the events themselves: an evidence row
+            # is already long, and "one natural disaster" is what changes how the number is
+            # read. §9.8 changes what this key CONTAINS rather than having to establish, across
+            # four call sites, that it exists.
+            "context": _context_note(conn, c["id"]),
         })
     return evidence
+
+
+def _date_columns(structured) -> set:
+    """Which of these columns this library READ as dates, moved the window or not."""
+    return {key for key in (structured or {})
+            if context.window_from_columns({key: (structured or {})[key]})
+            or key.strip().lower().replace(" ", "_") in context.DATE_COLUMNS}
+
+
+def _window_from_the_workbook(conn, campaign_id: str, structured) -> Optional[dict]:
+    """Set the campaign's window from a spreadsheet's own date columns (§9.6/D119).
+
+    Never over a window somebody entered. Typed dates are the more reliable claim, and a
+    workbook cell replacing them is the correction being undone by the thing it corrected.
+    """
+    stated = context.window_from_columns(structured or {})
+    if not stated:
+        return None
+    record = store.get_campaign(conn, campaign_id) or {}
+    # A window somebody TYPED is the more reliable claim, and a spreadsheet cell replacing it
+    # is the correction being undone by the thing it corrected. `window_source` records which
+    # kind is on file so this can tell them apart — a window this function wrote is one it may
+    # widen, and one a person wrote is not.
+    if record.get("starts_on") and record.get("window_source") != "workbook":
+        return None
+    widened = context.widen(
+        {"starts_on": record.get("starts_on"), "ends_on": record.get("ends_on")}
+        if record.get("starts_on") else None, stated)
+    if not widened:
+        # The row sat inside the window already. Reporting a change that did not happen is as
+        # false as reporting a skip that did not happen.
+        return None
+    # Through `update_campaign`, which is where a window is validated — `set_campaign_window`
+    # bypassed every check, so a spreadsheet could store 2026-03-31 to 2026-03-01 and the
+    # product would print that backwards inside "nothing was going on".
+    store.update_campaign(conn, campaign_id, starts_on=widened["starts_on"],
+                          ends_on=widened["ends_on"] or "", window_source="workbook")
+    return {**widened,
+            "basis": "stated",
+            "what_it_means": (
+                f"This campaign's window is now {widened['starts_on']} to "
+                f"{widened['ends_on'] or 'open-ended'}, from the "
+                f"{', '.join(widened['from'])} column(s) in what you sent. A workbook is "
+                f"normally one row per month, so it widens as the rows arrive. That is what "
+                f"decides which recorded events overlap it — say so if it is wrong.")}
+
+
+def _context_note(conn, campaign_id: str) -> dict:
+    """What else was going on, as a citation carries it (§9.6).
+
+    The same shape decision as `_execution_note`: `status` first, so `nothing_to_check`
+    survives the trip and a reader can tell "we looked and nothing was going on" from "this
+    campaign cannot be checked at all".
+    """
+    try:
+        linked = context.for_campaign(conn, campaign_id)
+    except (ValueError, RuntimeError):
+        return {"status": "nothing_to_check", "basis": "computed", "events_total": 0,
+                "by_kind": {}, "what_it_means": "This campaign's context could not be read."}
+    return {"status": linked["status"], "basis": "computed",
+            "events_total": linked.get("events_total", 0),
+            "by_kind": linked.get("by_kind", {}),
+            "what_it_means": linked["what_it_means"]}
+
+
+def _say_the_context(evidence: list) -> str:
+    """What the model is told about `context` on each citation (§9.6).
+
+    Silent when no cited campaign has any, for §9.5's reason one item over: a standing
+    paragraph about context events on a library holding none is the note that fires on
+    everything.
+    """
+    carrying = [e for e in evidence if (e.get("context") or {}).get("events_total")]
+    if not carrying:
+        return ""
+    total = sum(e["context"]["events_total"] for e in carrying)
+    return (f"`context` on each piece of evidence says what ELSE was going on in that "
+            f"market while it ran — {total} recorded event(s) across {len(carrying)} of "
+            f"these campaigns. It is an overlap in time and NEVER a cause: \u201csell-through "
+            f"was down and there was an earthquake\u201d is not evidence the earthquake did "
+            f"it, and a disappointing number will go looking for the nearest event to "
+            f"explain it. Say what ran during what. A `nothing_to_check` there means the "
+            f"campaign has no window or no market, so nothing could be matched — not that "
+            f"nothing was happening. ")
+
+
+def _context_offer(conn, campaign_id: str, fields: dict) -> dict:
+    """"You just made this answerable, and here is what it says" (§9.6, D116's rule).
+
+    Only on a write that SET a window, and only when something overlaps. The link is computed
+    rather than stored, so nothing on screen changes when the dates go in — without this, a
+    marketer who has just recorded when a campaign ran has no way to discover that the library
+    already knew a port was shut through half of it.
+    """
+    if not (fields.get("starts_on") or fields.get("ends_on")):
+        return {}
+    try:
+        linked = context.for_campaign(conn, campaign_id)
+    except ValueError:
+        return {}
+    if linked["status"] != "checked" or not linked["events"]:
+        return {}
+    return {
+        "context_events_found": linked["events_total"],
+        "next_actions": actions.trim([actions.action(
+            f"See the {linked['events_total']} recorded event(s) this campaign ran through",
+            "campaign_context",
+            why="Now it has a window, it matches what was already on record for its market. "
+                "Nothing was linked by hand and nothing needs to be — and an overlap is a fact "
+                "about timing, never about cause.",
+            consent="ask", campaign_id=campaign_id)]),
+    }
 
 
 def _incompleteness_warnings(conn) -> list[dict]:
@@ -4822,9 +5009,15 @@ def update_campaign(conn, campaign_id: str, **fields) -> dict:
     record = store.get_campaign(conn, campaign_id)
     earlier_judgment = _judgment_to_check(conn, fields.get("supersedes") or None)
     record = {**record, **reindexed}
+    # §9.6/D116: giving a campaign a window is the write that makes `campaign_context`
+    # answerable at all — before it, every call returns `nothing_to_check`. Offered only when
+    # something actually overlaps, because "here is a tool that will tell you nothing" is the
+    # offer that teaches a reader to skip the list.
+    window_offer = _context_offer(conn, campaign_id, fields)
     if not earlier_judgment:
-        return record
+        return {**record, **window_offer} if window_offer else record
     return {**record, "earlier_judgment": earlier_judgment,
+            **{k: v for k, v in window_offer.items() if k != "next_actions"},
             "next_actions": actions.after_upload(
                 campaign_id=campaign_id, status=record["status"],
                 # ACTUAL metrics. A campaign holding only a target has not been measured, and
@@ -4832,6 +5025,7 @@ def update_campaign(conn, campaign_id: str, **fields) -> dict:
                 # made a target storable, so "has a row" and "has a result" became different
                 # questions on the one path that can see both.
                 has_metrics=record["has_actual_metrics"],
+                has_window=bool(record.get("starts_on")),
                 earlier_judgment=earlier_judgment)}
 
 
@@ -5142,7 +5336,8 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
             "evidence in front of you. "
             + _say_the_expected_measures(expected_now)
             + _say_the_standing_corrections(standing_now)
-            + _say_the_execution_drift(evidence) +
+            + _say_the_execution_drift(evidence)
+            + _say_the_context(evidence) +
             "`outcomes` splits this evidence into what WORKED and what did NOT, by measured "
             "result rather than by impression. Read both before deciding: resemblance to a "
             "strong performer is not evidence, and a brief that looks like something that "

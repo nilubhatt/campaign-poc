@@ -362,8 +362,13 @@ def test_every_registered_code_is_actually_reachable():
     import re
 
     assert len(notices.CODES) >= 10, "the loop below has to actually run"
-    sources = "".join((Path(p).read_text(encoding="utf-8"))
-                      for p in ("core.py", "extract.py", "clip_embed.py", "store.py"))
+    # Every module, derived — not a hand-typed list of four. `context.py` emitted a registered
+    # code and this test could not see it, which is the same copy-drift the deferral tracker
+    # and the README tool list are each guarded against: a list of files is a copy of the
+    # directory, and it was right on the day it was written.
+    root = Path(__file__).resolve().parent.parent
+    sources = "".join(path.read_text(encoding="utf-8")
+                      for path in sorted(root.glob("*.py")) if path.name != "notices.py")
     for code in notices.CODES:
         assert re.search(rf'["\']{re.escape(code)}["\']', sources), (
             f"{code} is registered but emitted from nowhere"

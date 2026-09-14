@@ -146,7 +146,8 @@ def after_metrics(*, campaign_id: str, open_evaluation_id: Optional[str]) -> lis
 
 def after_upload(*, campaign_id: str, status: Optional[str],
                  has_metrics: bool, earlier_judgment: Optional[dict] = None,
-                 commentary: Optional[list] = None, title: str = "") -> list[dict]:
+                 commentary: Optional[list] = None, title: str = "",
+                 has_window: bool = True) -> list[dict]:
     """After a record lands.
 
     One thing is worth offering, and only sometimes: a concluded campaign with no outcome
@@ -205,6 +206,22 @@ def after_upload(*, campaign_id: str, status: Optional[str],
                 "that cites it rests on nothing measured.",
             consent="ask", needs=["the results themselves — CTR, ROI, conversions, or "
                                   "whatever was measured"],
+            campaign_id=campaign_id))
+    # §9.6: the item's headline is "no one should have to remember to connect them", and it
+    # is true — the link is computed. What it traded for is a WINDOW, and a window nothing
+    # asks for is the unreachable human step §8.3 and §8.6 each hit once already. This is the
+    # moment somebody is present and thinking about the campaign; a second deliberate
+    # `update_campaign` call months later is not.
+    if status == "concluded" and not has_window:
+        offers.append(action(
+            "Say when this campaign ran, so it can be checked against what else was going on",
+            "update_campaign",
+            why="Without a window nothing can be matched to the calendar, so “this "
+                "launch overlapped Ramadan” and “the port was shut for half of "
+                "it” are findings the library cannot produce about it — ever, silently.",
+            consent="ask",
+            needs=["starts_on — the first day it ran (YYYY-MM-DD)",
+                   "ends_on — the last day (YYYY-MM-DD)"],
             campaign_id=campaign_id))
     offers += _note_what_the_client_said(campaign_id, commentary, title)
     return trim(offers)

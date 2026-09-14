@@ -134,7 +134,11 @@ def test_an_empty_library_says_it_is_empty_rather_than_listing_holes(conn):
 
 
 def test_a_complete_library_says_nothing_is_missing(conn):
-    _with_results(conn, "Colombia", market="LATAM")
+    # §9.6 added a window to what "complete" means: a finished campaign that never says when
+    # it ran cannot be checked against what else was happening, so a library where nothing
+    # carries dates is not complete — it just has a gap nothing was reporting.
+    cid = _with_results(conn, "Colombia", market="LATAM")
+    core.update_campaign(conn, campaign_id=cid, starts_on="2026-03-01", ends_on="2026-03-31")
 
     report = core.gaps(conn)
 
@@ -505,4 +509,5 @@ def test_every_gap_code_is_reached_by_the_test_that_checks_them_all(conn, monkey
 
     codes = {g["code"] for g in core.gaps(conn)["gaps"]}
 
-    assert codes == {"few_verified_outcomes", "market_without_outcomes", "partly_indexed"}
+    assert codes == {"few_verified_outcomes", "market_without_outcomes", "partly_indexed",
+                     "no_window"}
