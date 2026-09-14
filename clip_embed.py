@@ -35,6 +35,38 @@ def embed_image(path: Path) -> list[float]:
     raise ValueError(f"unknown CLIP provider {config.CLIP_PROVIDER!r}")
 
 
+def embed_text(text: str) -> list[float]:
+    """Embed a phrase into CLIP's space, so it can be compared with an image (§9.3).
+
+    This is what makes "is a claw machine visible in these photographs" answerable at all: CLIP
+    puts text and images in one space, so the phrase from the brief and the photograph that
+    came back are comparable without anybody labelling anything.
+
+    It is a RESEMBLANCE and never a fact. The caller marks it `heuristic` for that reason.
+    """
+    if config.CLIP_PROVIDER == "openclip":
+        return _embed_text_openclip(text)
+    if config.CLIP_PROVIDER == "hash":
+        # The hash provider has no shared space — a hash of a string and a hash of pixels are
+        # not comparable, whatever the numbers do. Returning zeros is the honest stand-in: it
+        # produces no similarity to anything, so a test cannot accidentally read a match out
+        # of noise, and the reporting can still be exercised by staging vectors directly.
+        return [0.0] * config.CLIP_EMBED_DIM
+    raise ValueError(f"unknown CLIP provider {config.CLIP_PROVIDER!r}")
+
+
+def _embed_text_openclip(text: str) -> list[float]:
+    import open_clip
+    import torch
+
+    model, _ = _load_model()
+    tokens = open_clip.tokenize([text])
+    with torch.no_grad():
+        features = model.encode_text(tokens)
+        features /= features.norm(dim=-1, keepdim=True)
+    return [float(x) for x in features[0].tolist()]
+
+
 def _load_model():
     """Loads once, guarded by a lock — MCP dispatches sync tools onto worker threads, so
     concurrent first calls could otherwise race into loading the model multiple times at

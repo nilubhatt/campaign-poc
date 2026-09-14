@@ -2302,8 +2302,54 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       thrown the near-misses away. And a half-indexed set computed a score from whatever subset
       had vectors and called it `measured`; a library that never embedded an image crashed with
       `OperationalError` rather than degrading.
-- [ ] **9.3 Named commitment checking** — extract the commitment list at upload, check each
+- [x] **9.3 Named commitment checking** — extract the commitment list at upload, check each
       against delivered photos.
+      **"Not visible in 14 delivered images" is the review's own phrasing and it is the whole
+      honesty of the item.** Not "absent", not "missing", not "was not delivered". The server
+      can say what it could not see in the photographs it was given; it cannot say the photo
+      booth was not there, and a product that reports "absent" from their silence accuses a
+      supplier who may well have delivered exactly what was promised.
+      **Two claims, two bases.** That a LINE IS IN THE DECK is a fact, so `source_line` travels
+      with every commitment and the reading can be disagreed with. That the line is a promise,
+      and that a photograph shows the thing, are inferences — `heuristic` throughout.
+      *Found by review, all reproduced:*
+      **The feature returned NOTHING on the one path it was written for.** In OOXML a bullet is
+      paragraph formatting, and on an ordinary deck it is inherited from the layout rather than
+      written on the paragraph at all — so `text_frame.text` hands back the words with no
+      list-ness, and a real PPTX experience list produced zero commitments. It worked only when
+      somebody typed markdown into `detail`. `extract` now reads the list structure, and a
+      single-paragraph placeholder is not a list, because the marker goes into the text this
+      library stores, quotes against and searches.
+      **A promise about how MANY confirms itself.** "Single colourway across all recipients" —
+      the review's own third example — run through "which photograph most resembles this
+      phrase" is guaranteed to come back `present`, because more colourways means more hero
+      images means a higher maximum. The verdict would have read as the promise being kept, on
+      exactly the evidence that it was broken. Quantified, universal and negative claims are
+      refused rather than answered wrongly.
+      **One absolute threshold cannot exist.** CLIP constrains only RELATIVE order, so every
+      phrase has its own floor: measured against the real weights, "Jan 12 — kick-off" scored
+      0.246 against a solid green square while a genuine promise scored 0.231 against noise. A
+      photograph now has to beat the phrase's own median across the delivered set, which is
+      per-phrase calibration from data already in hand — and every verdict carries the closest
+      three photographs, because "go and look at these" is true whatever the threshold does.
+      **An agenda slide produced six commitments**, a team slide four — "Maria Gonzalez,
+      Account Director: not visible in 14 delivered images" is a post-mortem line about a
+      person — and the cap took the first twelve in document order, so fifteen objective
+      bullets on slide two used every slot before the floorplan on slide twenty.
+      **And the headline sentence accused a supplier on its own.** With every item `unchecked`,
+      the report still said "0 of 4 named promises can be seen… the rest were not visible in
+      them". The summary also claimed a wider search than happened when a photograph was
+      unindexed.
+      *Also:* a title typo re-ran extraction, deleting and reinserting every open commitment,
+      so the `commitment_id`s the model had just shown went stale. And the extracted list first
+      reached a human as verdicts in a post-mortem — D116's sixth occurrence, in the item after
+      the one that recorded the process gap — so it is shown at upload now, where it can be
+      corrected before it says anything about anybody.
+      *Found separately, outside this item:* `_resolve_asset` returned bare strings in a
+      warnings list that `notices.collapse` reads as dicts, so an ordinary wrong path crashed
+      `upload_campaign` with `TypeError` — not a `ValueError`, so the model got "Error
+      executing tool" with the reason discarded, in the one case where saying "that path does
+      not exist" is the entire job.
 - [ ] **9.4 Classify drift** improvement / neutral / degradation, marked `judged`.
 - [ ] **9.5 Attach drift to the outcome record**; high-drift campaigns are weaker precedent
       and retrieval says so.

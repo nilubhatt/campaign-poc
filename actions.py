@@ -275,23 +275,34 @@ def after_graduation(*, what: str, markets: list) -> list[dict]:
         consent="ask")])
 
 
-def after_delivered_asset(*, campaign_id: str, briefed: int) -> list[dict]:
-    """A photograph of what ran has just landed (§9.2).
+def after_delivered_asset(*, campaign_id: str, briefed: int, promises: int = 0) -> list[dict]:
+    """A photograph of what ran has just landed (§9.2/§9.3).
 
-    The moment `compare_execution` stops being empty, and the moment nothing pointed at it —
-    the fourth time this project has shipped a tool the model would have to know existed and
-    spontaneously call (D116). Offered only when there IS a brief to compare against, because
-    photographs with nothing to measure them against are not a comparison.
+    The moment BOTH checks stop being empty, and the moment nothing pointed at either — the
+    fourth and fifth times this project would have shipped a tool the model has to know exists
+    and spontaneously call (D116). Each offered only when there is something to compare
+    against, because a comparison with one side missing is not a comparison.
     """
-    if not briefed:
-        return []
-    return trim([action(
-        "See what actually ran against what was briefed",
-        "compare_execution",
-        why=f"This campaign has {briefed} briefed image{'s' * (briefed != 1)} and now has "
-            f"photographs of what happened. The comparison says which briefed elements "
-            f"appeared, which did not, and which arrived unbriefed.",
-        consent="ask", campaign_id=campaign_id)])
+    offers = []
+    if promises:
+        # First: the review calls this "the richest signal", and it is the one a marketer can
+        # act on line by line.
+        offers.append(action(
+            "Check what the brief promised against the photographs",
+            "check_commitments",
+            why=f"The brief names {promises} specific thing{'s' * (promises != 1)} — this "
+                f"says which of them are visible in the photographs that came back, and which "
+                f"are not visible in them.",
+            consent="ask", campaign_id=campaign_id))
+    if briefed:
+        offers.append(action(
+            "See what actually ran against what was briefed",
+            "compare_execution",
+            why=f"This campaign has {briefed} briefed image{'s' * (briefed != 1)} and now has "
+                f"photographs of what happened. The comparison says which briefed elements "
+                f"appeared, which did not, and which arrived unbriefed.",
+            consent="ask", campaign_id=campaign_id))
+    return trim(offers)
 
 
 def to_first_upload() -> list[dict]:

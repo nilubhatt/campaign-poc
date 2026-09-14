@@ -139,6 +139,22 @@ CREATE TABLE IF NOT EXISTS metric_registry (
     times_seen    INTEGER NOT NULL DEFAULT 0,
     markets       TEXT NOT NULL DEFAULT '[]'   -- which markets it has appeared in (§8.3)
 );
+CREATE TABLE IF NOT EXISTS commitments (
+    -- §9.3: the specific, checkable promises a brief makes. "A claw machine loaded with
+    -- branded merchandise" is a thing somebody can look for in the photographs; "a premium
+    -- feel" is not.
+    id            TEXT PRIMARY KEY,
+    campaign_id   TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    text          TEXT NOT NULL,         -- the promise, in the brief's own words
+    -- The line it was taken from. That a line IS IN THE DECK is a fact and the quote is what
+    -- makes it checkable; that the line is a COMMITMENT rather than a passing mention is a
+    -- reading, and keeping the source is what lets somebody disagree with the reading.
+    source_line   TEXT NOT NULL,
+    origin        TEXT NOT NULL DEFAULT 'extracted',   -- extracted | added
+    status        TEXT NOT NULL DEFAULT 'open',        -- open | dropped
+    why_dropped   TEXT,
+    created_at    REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS corrections (
     -- §8.6: client feedback on the same loop as a measure. The lifecycle columns are
     -- deliberately the same names as `metric_registry`'s, because they are the same loop —
@@ -1075,6 +1091,21 @@ def supersession_chain(conn, campaign_id: str) -> list[str]:
     return chain
 
 
+def _forget_commitment_vectors(conn, campaign_id: str) -> None:
+    """A deleted campaign's commitment vectors go with it (§9.3).
+
+    The rows cascade on the foreign key; the vectors live in their own table keyed by a string
+    and nothing reaches them, so they would outlive the campaign as orphans — the same cleanup
+    `delete_campaign` already does for chunk and asset vectors.
+    """
+    if not _columns(conn, "commitments") or not _columns(conn, "commitment_vectors"):
+        return
+    ids = [f"commitment:{r['id']}" for r in conn.execute(
+        "SELECT id FROM commitments WHERE campaign_id = ?", (campaign_id,)).fetchall()]
+    for vid in ids:
+        conn.execute("DELETE FROM commitment_vectors WHERE vector_id = ?", (vid,))
+
+
 def delete_campaign(conn, campaign_id: str) -> bool:
     """Delete a campaign and everything that's exclusively its own (§6.4): chunks + their
     text vectors, image assets + their pHash fingerprints, CLIP vectors, and the actual
@@ -1096,6 +1127,12 @@ def delete_campaign(conn, campaign_id: str) -> bool:
     asset_ids = [a["id"] for a in assets]
     if asset_ids:
         vectorstore.delete_many(conn, asset_ids, space="asset")
+
+    # §9.3: the commitment rows cascade on the foreign key, but their vectors live in their own
+    # table keyed by a string and nothing else reaches them — so they would outlive the
+    # campaign as orphans, which is the cleanup the two lines above already do for chunks and
+    # assets.
+    _forget_commitment_vectors(conn, campaign_id)
 
     for file_path in [campaign["asset_path"]] + [a["file_path"] for a in assets]:
         if file_path:
@@ -1970,6 +2007,57 @@ def touch_metric(conn, canonical: str, *, campaign_id: Optional[str] = None) -> 
     conn.execute("UPDATE metric_registry SET first_seen = COALESCE(first_seen, ?), "
                  "last_seen = ?, times_seen = times_seen + 1, markets = ? WHERE canonical = ?",
                  (now, now, json.dumps(markets), canonical))
+    conn.commit()
+
+
+def insert_commitment(conn, *, campaign_id: str, text: str, source_line: str,
+                      origin: str = "extracted") -> str:
+    cid = _id("commit")
+    conn.execute("INSERT INTO commitments (id, campaign_id, text, source_line, origin, "
+                 "created_at) VALUES (?,?,?,?,?,?)",
+                 (cid, campaign_id, text, source_line, origin, _now()))
+    conn.commit()
+    return cid
+
+
+def commitments_for(conn, campaign_id: str, *, include_dropped: bool = False) -> list:
+    if not _columns(conn, "commitments"):
+        return []
+    sql = "SELECT * FROM commitments WHERE campaign_id = ?"
+    if not include_dropped:
+        sql += " AND status = 'open'"
+    return [dict(r) for r in conn.execute(sql + " ORDER BY created_at, id",
+                                          (campaign_id,)).fetchall()]
+
+
+def get_commitment(conn, commitment_id: str) -> Optional[dict]:
+    if not _columns(conn, "commitments"):
+        return None
+    row = conn.execute("SELECT * FROM commitments WHERE id = ?", (commitment_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def forget_commitment(conn, commitment_id: str) -> None:
+    """Remove an EXTRACTED commitment because the brief it was read from has changed.
+
+    Distinct from `drop_commitment`, which records a person's decision and is kept. This is
+    the extractor withdrawing its own earlier reading of a document that no longer says that.
+    """
+    conn.execute("DELETE FROM commitments WHERE id = ? AND origin = 'extracted'",
+                 (commitment_id,))
+    conn.execute("DELETE FROM commitment_vectors WHERE vector_id = ?"
+                 if _columns(conn, "commitment_vectors") else "SELECT 1",
+                 (f"commitment:{commitment_id}",) if _columns(conn, "commitment_vectors")
+                 else ())
+    conn.commit()
+
+
+def drop_commitment(conn, commitment_id: str, *, why: Optional[str] = None) -> None:
+    """Dropped, never deleted. Mechanical extraction will pick up lines that are not promises,
+    and the record of what the server thought was one is how somebody later understands why a
+    post-mortem said what it said."""
+    conn.execute("UPDATE commitments SET status = 'dropped', why_dropped = ? WHERE id = ?",
+                 (why, commitment_id))
     conn.commit()
 
 

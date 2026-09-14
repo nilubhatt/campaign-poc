@@ -20,6 +20,7 @@ from typing import Optional, Union
 import actions
 import chunking
 import clip_embed
+import commitments
 import config
 import corrections
 import embedding
@@ -27,6 +28,7 @@ import enums
 import extract
 import facts
 import images
+import learning
 import metrics
 import notices
 import store
@@ -113,6 +115,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                         for c in changed) if changed else ""),
         }
 
+    promised: dict = {}
     warnings: list[dict] = []
     stored_path = None
     units: list[str] = []  # natural per-page/slide units, when extraction ran
@@ -371,6 +374,17 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
     # fully embedded — in the same response whose warning says 2 of 12. That is exactly the
     # stored-versus-searchable conflation defect 05 opened with.
     store.mark_embedded(conn, cid, embedded_count == len(chunk_texts))
+    # §9.3: the promises the brief makes, taken from the list the deck almost always already
+    # has. Extracted at upload because that is when the text is in hand — and recorded with the
+    # line each came from, so the reading can be disagreed with.
+    #
+    # Campaigns only. Brand guidelines are full of bulleted lists and none of them is a promise
+    # this campaign made — §9.2 learned the same thing about which RECORD a check runs on, one
+    # item ago.
+    if record_type in learning.CHECKABLE_RECORDS:
+        commitments.extract(conn, campaign_id=cid, text="\n".join(
+            filter(None, [detail, deck_text])))
+        promised = commitments.summary_for(conn, cid)
     current = store.get_campaign(conn, cid)
     earlier_judgment = _judgment_to_check(conn, supersedes)
     return {
@@ -379,6 +393,10 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         "chunks_total": len(chunk_texts), "chunks_embedded": embedded_count,
         "image_assets": image_assets, "images_checked": images_checked,
         "images_total": len(image_assets), "images_embedded": images_embedded,
+        # §9.3/D116 (the sixth time): a mechanically-extracted list first reached a human as
+        # verdicts in a post-mortem, after the junk entries had already said something about a
+        # supplier. The correction belongs before the accusation.
+        **({"commitments": promised} if promised else {}),
         "commentary_found": len(commentary),
         "commentary_checked": commentary_checked,
         "normalised": changed,
@@ -4691,6 +4709,18 @@ def _reindex_if_content_changed(conn, campaign_id: str, fields: dict) -> dict:
         return {}
     record = store.get_campaign(conn, campaign_id)
     summary = "\n\n".join(p for p in (record["title"], record.get("detail")) if p)
+    # §9.3: the promises too. An edited brief promises something different, and checking the
+    # new deck against the old deck's commitments is the "learning from the wrong document"
+    # failure this phase exists to stop — arriving inside the fix for it. What a person decided
+    # survives: added commitments stay, dropped ones stay dropped.
+    # Only when the CONTENT changed. A title typo re-ran extraction, which deletes the open
+    # extracted rows and reinserts them with new ids — so every `commitment_id` in a list the
+    # model had just shown went stale, and `drop_commitment` on one failed with "not a
+    # commitment on file". The promises are in the body, not the title.
+    if (fields.get("detail") is not None
+            and record.get("record_type") in learning.CHECKABLE_RECORDS):
+        commitments.extract(conn, campaign_id=campaign_id, text="\n".join(
+            filter(None, [record.get("detail"), record.get("deck_text")])))
     units = (record.get("deck_text") or "").split("\n\n")
     texts = chunking.pack(([summary] if summary else []) + [u for u in units if u.strip()])
     # Commentary is a different layer and was not edited — it is not rebuilt, and its chunks
@@ -5123,7 +5153,8 @@ def ingest_image_assets(conn, *, campaign_id: str, asset_refs: list,
         (failed if result.get("error") else stored).append(result)
     offers = (actions.after_delivered_asset(
         campaign_id=campaign_id,
-        briefed=len(store.assets_in_phase(conn, campaign_id, "proposed")))
+        briefed=len(store.assets_in_phase(conn, campaign_id, "proposed")),
+        promises=len(store.commitments_for(conn, campaign_id)))
         if stored and phase == "delivered" else [])
     return {"campaign_id": campaign_id, "phase": phase, "captured_on": captured_on,
             "stored": len(stored), "assets": stored,
@@ -5155,7 +5186,9 @@ def ingest_image_asset(conn, *, campaign_id: str, asset_ref: dict,
 
     path, warnings = _resolve_asset(asset_ref)
     if not path:
-        return {"error": "; ".join(warnings) or "could not resolve asset_ref"}
+        return {"error": "; ".join(w["detail"] for w in warnings)
+                         or "could not resolve asset_ref",
+                "warnings": notices.collapse(warnings)}
 
     stored_name = _keep_asset(path)
     result = _store_and_fingerprint_image(conn, campaign_id, stored_name, phase=phase,
@@ -5245,7 +5278,8 @@ def _store_and_fingerprint_image(conn, campaign_id: str, stored_name: str, *,
             # §9.2, offered where it becomes answerable rather than left to be discovered.
             "next_actions": actions.after_delivered_asset(
                 campaign_id=campaign_id,
-                briefed=len(store.assets_in_phase(conn, campaign_id, "proposed")))
+                briefed=len(store.assets_in_phase(conn, campaign_id, "proposed")),
+                promises=len(store.commitments_for(conn, campaign_id)))
             if phase == "delivered" else [],
             "warnings": notices.collapse(warnings)}
 
@@ -5839,30 +5873,43 @@ def _region_mismatch_flag(current: Optional[dict], other: dict) -> Optional[str]
 
 # ── asset resolution (secondary path) ────────────────────────────────────────
 
-def _resolve_asset(ref: dict) -> tuple[Optional[Path], list[str]]:
+def _unreadable(detail: str) -> tuple:
+    """Every failure here returns a NOTICE, not a bare string.
+
+    They were bare strings, and `notices.collapse` reads dicts — so an ordinary wrong path
+    crashed `upload_campaign` with `TypeError: string indices must be integers`. That is not a
+    `ValueError`, so `_catch_value_errors` did not catch it and the model got "Error executing
+    tool" with the reason discarded: the one case where saying "that path does not exist" is
+    the entire job.
+    """
+    return None, [notices.notice("asset_unreadable", detail=detail)]
+
+
+def _resolve_asset(ref: dict) -> tuple[Optional[Path], list]:
     """Resolve an asset reference to a local file. Accepts {path} | {asset_id} | {filename,base64}."""
     if not isinstance(ref, dict):
-        return None, ["asset_ref must be an object"]
+        return _unreadable("asset_ref must be an object")
     if ref.get("path"):
         p = Path(ref["path"])
-        return (p, []) if p.is_file() else (None, [f"local path not found: {ref['path']}"])
+        return (p, []) if p.is_file() else _unreadable(f"local path not found: {ref['path']}")
     if ref.get("asset_id"):
         d = config.UPLOAD_DIR / ref["asset_id"]
         files = list(d.iterdir()) if d.is_dir() else []
-        return (files[0], []) if files else (None, [f"unknown asset_id {ref['asset_id']}"])
+        return (files[0], []) if files else _unreadable(
+            f"unknown asset_id {ref['asset_id']}")
     if ref.get("base64") is not None:
         try:
             data = base64.b64decode(ref["base64"], validate=True)
         except (binascii.Error, ValueError) as exc:
-            return None, [f"invalid base64: {exc}"]
+            return _unreadable(f"invalid base64: {exc}")
         if len(data) > config.MAX_INLINE_BYTES:
-            return None, ["inline asset too large; use POST /upload"]
+            return _unreadable("inline asset too large; use POST /upload")
         name = Path(ref.get("filename") or "asset.bin").name
         dest = config.UPLOAD_DIR / f"inline_{name}"
         config.ensure_dirs()
         dest.write_bytes(data)
         return dest, []
-    return None, ["asset_ref needs path, asset_id, or base64"]
+    return _unreadable("asset_ref needs path, asset_id, or base64")
 
 
 def _keep_asset(src: Path) -> str:

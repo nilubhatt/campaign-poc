@@ -16,6 +16,7 @@ from pydantic import Field
 from mcp.server.mcpserver import MCPServer
 
 import config
+import commitments
 import corrections
 import core
 import enums
@@ -497,6 +498,82 @@ def upload_image_asset(campaign_id: str, asset_ref: dict, phase: AssetPhase = "p
     try:
         return core.ingest_image_asset(conn, campaign_id=campaign_id, asset_ref=asset_ref,
                                        phase=phase, captured_on=captured_on)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def check_commitments(campaign_id: str) -> dict:
+    """Each promise the brief named, against the photographs that came back (§9.3).
+
+    A brief makes specific, checkable promises — a claw machine, a photo booth, a matcha cart.
+    They are taken from the deck's own experience or floorplan list at upload, each with the
+    line it came from, and this looks for each one in the delivered images.
+
+    **Read the verdicts exactly as they are worded.**
+
+      • `present`     — something resembling the phrase is visible in a named photograph.
+      • `not_visible` — it was NOT VISIBLE in the delivered images. That is not "absent" and
+                        not "not delivered". Fourteen photographs of a launch do not show
+                        everything at a launch, and saying otherwise accuses a supplier who may
+                        well have delivered exactly what was promised. Say "not visible in the
+                        photographs" when you report it, and say how many there were.
+      • `unchecked`   — nothing came back, or the images are not indexed. Not a finding.
+
+    It is a RESEMBLANCE, marked `heuristic` throughout — a threshold somebody chose, not a
+    fact. Use it to ask, and to tell the user what to go and look at.
+
+    Use `list_commitments` to see what the brief was read as promising, `add_commitment` for a
+    promise written in a sentence rather than a bullet, and `drop_commitment` for a line that
+    is not a promise at all."""
+    conn = store.connect()
+    try:
+        return commitments.check(conn, campaign_id=campaign_id)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def list_commitments(campaign_id: str) -> dict:
+    """What this brief was read as promising, with the line each came from (§9.3).
+
+    Extracted mechanically from the deck's list items, so it will pick up lines that are not
+    promises — show them to the user and drop the ones that are not."""
+    conn = store.connect()
+    try:
+        return {"campaign_id": campaign_id,
+                "commitments": commitments.for_campaign(conn, campaign_id)}
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def add_commitment(campaign_id: str, text: str, source_line: str) -> dict:
+    """Record a promise the extractor did not find (§9.3).
+
+    `source_line` is where in the brief it comes from, and is required — a commitment that
+    cannot show where it came from is one nobody can check. Use the brief's own words for
+    `text`; generalising "thirty influencers in identical outfits" into "consistent styling"
+    invents a promise nobody made."""
+    conn = store.connect()
+    try:
+        return commitments.add(conn, campaign_id=campaign_id, text=text,
+                               source_line=source_line)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def drop_commitment(commitment_id: str, why: Optional[str] = None) -> dict:
+    """This line is not a promise (§9.3). Kept on file rather than deleted, so a post-mortem
+    written earlier stays explicable."""
+    conn = store.connect()
+    try:
+        return commitments.drop(conn, commitment_id, why=why)
     finally:
         conn.close()
 

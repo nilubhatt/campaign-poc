@@ -167,13 +167,73 @@ def _read_pptx(path: Path) -> list[str]:
     for i, slide in enumerate(prs.slides):
         if i >= config.MAX_PPTX_SLIDES or total >= config.MAX_DOC_TEXT_CHARS:
             break
-        parts = [shape.text_frame.text for shape in slide.shapes
+        parts = [_frame_text(shape) for shape in slide.shapes
                  if shape.has_text_frame and shape.text_frame.text]
         text = "\n".join(parts).strip()
         if text:
             units.append(text)
             total += len(text)
     return units
+
+
+_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+
+
+# Placeholder kinds whose paragraphs ARE a bulleted list unless a paragraph says otherwise.
+# This is what PowerPoint does: a body or content placeholder inherits its bullet from the
+# layout and master, so the bullet is nowhere in the slide's own XML.
+_LIST_PLACEHOLDERS = {2, 3, 7, 14}     # BODY, CENTER_TITLE-adjacent body, OBJECT, VERTICAL_BODY
+
+
+def _is_list_paragraph(paragraph, *, inherits_bullets: bool) -> bool:
+    """Whether this paragraph is a bullet or a numbered item.
+
+    In OOXML a bullet is PARAGRAPH FORMATTING — `<a:buChar>` or `<a:buAutoNum>` — and never a
+    character in a run, so `text_frame.text` returns the words with no glyph in front of them.
+    §9.3 reads a deck's experience or floorplan list to find what a brief promised, and against
+    a real PPTX it found nothing at all: the list was there, the list-ness was not.
+
+    And usually the bullet is not in the slide either — a body placeholder inherits it from the
+    layout, so checking only for an explicit `buChar` still finds nothing on an ordinary deck.
+    `inherits_bullets` is that case. An explicit `buNone` overrides it, which is how a
+    deliberately unbulleted paragraph says so.
+    """
+    properties = paragraph._p.find(f"{_NS}pPr")
+    if properties is not None:
+        if properties.find(f"{_NS}buNone") is not None:
+            return False
+        if (properties.find(f"{_NS}buChar") is not None
+                or properties.find(f"{_NS}buAutoNum") is not None):
+            return True
+        if properties.get("lvl") not in (None, "0"):
+            return True
+    return inherits_bullets
+
+
+def _frame_text(shape) -> str:
+    """A shape's words, with its list structure preserved as "- " prefixes.
+
+    The marker is added rather than the original glyph because the glyph is not in the file —
+    it is drawn from the formatting, and Office writes Symbol-font code points (\uf0b7,
+    \uf0a7) that mean nothing outside the font.
+    """
+    paragraphs = [p for p in shape.text_frame.paragraphs if (p.text or "").strip()]
+    inherits = False
+    try:
+        # TWO or more paragraphs. A body placeholder inherits a bullet from the layout whatever
+        # is in it, so a single-paragraph placeholder would be marked as a list — and the
+        # marker goes into the text this library stores, quotes against and searches. One line
+        # under a heading is a statement; three are a list.
+        if shape.is_placeholder and len(paragraphs) > 1:
+            inherits = int(shape.placeholder_format.type) in _LIST_PLACEHOLDERS
+    except Exception:                  # noqa: BLE001 — a shape with no usable placeholder info
+        inherits = False
+    lines = []
+    for paragraph in paragraphs:
+        said = paragraph.text.strip()
+        lines.append(f"- {said}" if _is_list_paragraph(paragraph, inherits_bullets=inherits)
+                     else said)
+    return "\n".join(lines)
 
 
 # ── commentary: comments, annotations and speaker notes (§2.5, defect 08) ────

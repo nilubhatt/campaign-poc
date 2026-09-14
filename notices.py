@@ -94,6 +94,17 @@ _REGISTRY: dict[str, tuple] = {
         "Nothing — this finishes without you.",
         "Offer finish_indexing on the campaign; no re-upload needed.",
     ),
+    # The file a caller named could not be read. Every one of these was a BARE STRING in the
+    # warnings list, and `notices.collapse` reads dicts — so an ordinary wrong path crashed the
+    # upload tool with `TypeError: string indices must be integers`, which is not a ValueError
+    # and so reached the model as "Error executing tool" with the reason discarded.
+    "asset_unreadable": (
+        "degraded", "record",
+        "The file could not be read, so the record was stored without it: {detail}",
+        "Check the path or id and send the file again — the record is already on file, so "
+        "only the attachment is missing.",
+        "",
+    ),
     # §9.2: the comparison ran, and some images were not in it. Left silent, the three lists
     # would add up to fewer images than the campaign has and nobody would know which were
     # missing — the totals lying about what was examined.
