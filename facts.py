@@ -431,4 +431,19 @@ def for_campaign(conn, campaign_id: str) -> dict:
     on_file = store.text_on_file(conn, campaign_id)
     if on_file is None:
         return {}
-    return compute("\n\n".join(on_file["body"]))
+    computed = compute("\n\n".join(on_file["body"]))
+    # §9.6/§9.7: a window somebody ENTERED is a date this record carries, and a stronger one
+    # than any sentence — it is structured, and §9.7 names it twice in the adjacent line of
+    # the same block. Reporting "no date appears anywhere in this brief" beside it faulted the
+    # record for something the record does not lack, in the one place the model is told not to
+    # re-derive what it reads.
+    record = store.get_campaign(conn, campaign_id) or {}
+    if computed.get("date_coverage", {}).get("status") == "absent" and record.get("starts_on"):
+        computed["date_coverage"] = _fact(
+            "date_coverage", "present",
+            f"This record carries no date in its TEXT, but its window is on file as "
+            f"{record['starts_on']} to {record.get('ends_on') or 'open-ended'}, which is what "
+            f"the calendar check and every context event are matched against.",
+            evidence=[f"{record['starts_on']} to {record.get('ends_on') or 'open-ended'}"],
+            dates_found=0, from_window=True)
+    return computed

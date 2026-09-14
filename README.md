@@ -156,6 +156,7 @@ corrections.py   standing corrections — client feedback on the same loop, with
 commitments.py   the promises a brief names, and whether the photographs show them
 drift.py         what somebody made of the difference — recorded, never inferred
 context.py       what else was going on: events by market and date, linked by overlap
+calendar_seed.py the fixed calendar shipped with the product, hedged by certainty
 replay.py        what changed when the rules changed, as a report; never a rewrite
 agreement.py     the golden-set harness: verdict agreement and self-consistency
 mcp_server.py    MCPServer tools (the API Claude calls)

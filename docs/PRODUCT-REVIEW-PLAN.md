@@ -2464,8 +2464,60 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       campaign involved — §9.7 checks a PROPOSED window that may not be stored, and §9.8 needs
       a measurement period narrower than an always-on campaign's year. `seed_key` makes §9.7's
       seeder idempotent and lets a corrected Ramadan date replace a wrong one on upgrade.
-- [ ] **9.7 Seed fixed calendar events per market**; `prepare_evaluation` checks every
+- [x] **9.7 Seed fixed calendar events per market**; `prepare_evaluation` checks every
       proposed window against them as a computed fact.
+      **"Impossible to drop" is the phrase the item turns on**, and landing in `computed` is
+      only half of it. §2.4's write protection stops the model FORGING a computed fact; what
+      the review asked for is §7.8's persistence — so a clash the plan never names joins
+      `_COMPUTED_FINDINGS` and is appended after the model's own list, exempt from the caps. An
+      `approve` with no findings cannot make it disappear, and the figure is stamped onto the
+      evaluation so §9.9 can reconcile against what the calendar actually said.
+      **`should_fix`, never `blocking`.** The instruction everywhere else in this item is "do
+      not turn it into a blocking finding on its own", and the server holds itself to the rule
+      it gives the model.
+      **The finding is the SILENCE, not the clash.** Mexico's deck DID flag the World Cup. A
+      plan that names what it runs into has said what there was to say; raising one anyway is
+      the nuisance that teaches a reader to skip server findings.
+      **A shipped calendar is a claim about the world, and most of these claims are
+      approximate.** Every row carries a `certainty` — `fixed`, `announced`, `observed`,
+      `seasonal` — with the sentence that says what would settle it, and says it came from the
+      product rather than from the customer. What is not hedged is the arithmetic.
+      *Found by review, all reproduced:*
+      **Five of the first thirteen shipped dates were wrong** — Ramadan by a day (against the
+      review's own "18 Feb"), Chinese New Year by two (the row promised the published State
+      Council dates and shipped others), Japan's Golden Week by one (3 May 2026 is a Sunday, so
+      6 May is the substitute), Buen Fin by one, and the South-East Asian rainy season by half
+      a year: mainland SEA is wet May–October and DRY November–March, so a Bangkok campaign in
+      December was told it clashed and one in July was told nothing was on. Nothing tested any
+      date; shifting the World Cup by seven weeks passed the suite.
+      **The server asserted a falsehood as a computed fact.** "The proposal names all of them,
+      so this is a timing it chose" was emitted over clash sets made entirely of customer
+      records, which have no short name to look for — an affirmative claim about a document
+      nobody read. It fired for the whole of §9.6's contribution.
+      **Truncation deleted the check.** The clash reused §9.6's display list, which caps at
+      eight by salience — and salience sorts seeded rows LAST, correctly for a list somebody
+      reads and exactly wrong here. Eight customer records silently removed the World Cup,
+      Ramadan and Buen Fin, and the fact then stated "8 thing(s)" as a count of what it saw.
+      **`absent` was mostly "we do not cover your market".** Thirteen events is not the wrong
+      size, it is the wrong claim: Brazil got "nothing on record was happening" on every
+      window, under the heading telling the model not to re-derive it, with a hedge that blamed
+      the customer. `not_covered` and `calendar_expired` are now separate answers — and without
+      the second, 1 January 2027 was the day this feature started giving every window on earth
+      a silent clean bill.
+      **Ramadan was scoped globally**, so a Polish spring retail push was told as an established
+      fact that its plan failed to mention it. Scoped to the markets an event is about.
+      **The silence test was a substring match on one handle per event.** "Timed to the FIFA
+      tournament" read as silent; "Heidi Reid" silenced Eid. Word boundaries, accent folding and
+      per-event aliases now, and the affirmative half of the sentence is gone entirely — a false
+      positive lands as a neutral question, a false negative used to land as an endorsement.
+      **A heuristic window was relabelled `stated`** on the record path, so `campaign_context`
+      hedged "may have run during" while `prepare_evaluation` asserted a clash on the same
+      record from the same dates.
+      **`date_coverage: absent` fired beside a fact naming the window twice** — the brief was
+      formally faulted for carrying no dates in the same block that quoted them.
+      **Re-seeding rewrote all thirteen rows on every start**, churning `created_at` and
+      silently reverting any local edit; and `seed_key UNIQUE` did not survive the migration,
+      so upgraded databases had none of the uniqueness the schema comment promised.
 - [ ] **9.8 Record overlap, never assert cause** — mark outcomes `confounded`; the caveat
       travels with the metric wherever it is cited.
 - [ ] **9.9 Make `reconcile_evaluation` do its job** — predicted vs delivered vs actual vs

@@ -1818,6 +1818,10 @@ _PINNED_TOP_K = 5
 # `markets` is here as well as `market`: a subject whose activation spanned several countries
 # carries the list and not the single value, and deriving nothing for it meant two records
 # describing one brief retrieved different evidence depending on which field was filled in.
+# Which brief this IS — the record answers all of these, so passing one alongside a
+# `campaign_id` asks for evidence about a different subject (§7.2). §9.7's `starts_on`/
+# `ends_on` are the same kind of claim and get the same refusal, but are not in here because
+# they are not retrieval filters: see `caller_window` in `prepare_evaluation`.
 _SUBJECT_FILTERS = ("market", "region", "collection", "markets")
 
 
@@ -2347,7 +2351,24 @@ _COMPUTED_FINDINGS = {
                         "No creator profile carries an engagement rate"),
     "date_consistency": ("contradicted", "blocking",
                          "A statement about dates contradicts the calendar"),
+    # §9.7: "that flag should have come from the system and been IMPOSSIBLE TO DROP". Landing
+    # in `computed` buys §2.4's write protection — the model cannot forge one — and not this,
+    # which is what the review was actually asking for: a finding appended after the model's
+    # list, exempt from the caps, that an `approve` with no findings cannot make disappear.
+    #
+    # `should_fix`, never `blocking`. The instruction everywhere else in this item is "do not
+    # turn it into a blocking finding on its own", and the server has to hold itself to the
+    # rule it gives the model — overlapping a fixed date is the point of some campaigns.
+    "calendar_clash": ("unaddressed", "should_fix",
+                       "The launch window overlaps a fixed date the plan never names"),
 }
+
+
+def _elide(text: str, limit: int) -> str:
+    """Shorten the SERVER's own prose to fit a field. Never used on a caller's text, where
+    exceeding a limit is something the caller should be told about rather than hidden."""
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "\u2026"
 
 
 def _computed_findings(subject_text: Optional[str], computed: Optional[dict]) -> list:
@@ -2370,7 +2391,16 @@ def _computed_findings(subject_text: Optional[str], computed: Optional[dict]) ->
     raised = []
     for code, (status, severity, headline) in _COMPUTED_FINDINGS.items():
         fact = computed.get(code) or {}
-        if fact.get("status") != status:
+        if code == "calendar_clash":
+            # A clash is not a finding; the SILENCE is. "Mexico's own deck flagged that it
+            # clashed with the World Cup and then never addressed it" — a plan that names what
+            # it runs into has said what there was to say, and raising one anyway is the
+            # nuisance that teaches a reader to skip server findings.
+            if fact.get("status") != "present" or not fact.get("unaddressed"):
+                continue
+            headline = (f"The launch window overlaps "
+                        f"{', '.join(fact['unaddressed'])}, which the plan never names")
+        elif fact.get("status") != status:
             continue
         raised.append({
             "severity": severity,
@@ -2384,9 +2414,13 @@ def _computed_findings(subject_text: Optional[str], computed: Optional[dict]) ->
             # The evidence the check read, for the same reason §7.1 attaches it to a fact: a
             # finding that cannot show what it looked at is an assertion, and the server's
             # assertions carry more weight than a model's.
-            "detail": _bounded(fact.get("what_it_means", "") + (
+            # Truncated rather than refused. `_bounded` RAISES past the limit, which is right
+            # for a model's own text — a finding somebody wrote over the cap is a finding they
+            # should shorten — and wrong for the server's, where it would turn a long computed
+            # sentence into a failed write of the whole judgment.
+            "detail": _elide(fact.get("what_it_means", "") + (
                 "  Read from: " + " / ".join(fact.get("evidence") or [])
-                if fact.get("evidence") else ""), "detail", _MAX_DETAIL),
+                if fact.get("evidence") else ""), _MAX_DETAIL),
             "precedent": None,
             "fix": None,
         })
@@ -2401,7 +2435,7 @@ def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
                     campaign_id: Optional[str] = None, cited_ids: Optional[list] = None,
                     predictions: Optional[dict] = None, retrieval: Optional[str] = None,
                     model_id: Optional[str] = None, subject_text: Optional[str] = None,
-                    trusted: bool = False) -> dict:
+                    trusted: bool = False, markets: Optional[list] = None) -> dict:
     """Record a judgment as structured findings rather than an essay (defect 07).
 
     The review's diagnosis was a data-model one, not a prompting one: handed a single
@@ -2647,9 +2681,15 @@ def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
     # like any other — a later version can resolve one by id. They are appended rather than
     # merged into the caps: the model's twelve are its own, and refusing a mechanical finding
     # because the model filled the list would hide the half nobody is guessing at.
-    cleaned += _computed_findings(subject_text,
-                                  facts.for_campaign(conn, campaign_id) if campaign_id
-                                  else None)
+    established = (facts.for_campaign(conn, campaign_id) if campaign_id
+                   else (facts.compute(subject_text) if subject_text else {}))
+    # §9.7, recomputed here rather than trusted from `prepare_evaluation`: a check is only
+    # worth anything if a difference in it is a bug, which holds only when the server did it —
+    # the same reasoning §6.4 reached about who runs the disconfirming search.
+    clash = _calendar_clash(conn, campaign_id=campaign_id, proposal_text=subject_text,
+                            starts_on=None, ends_on=None, markets=list(markets or []))
+    established["calendar_clash"] = clash
+    cleaned += _computed_findings(subject_text, established or None)
     # Counted AFTER the server's own findings join the list — counting before it meant the
     # one figure that says which half of the output is the model's did not include the other
     # half at all.
@@ -2734,6 +2774,13 @@ def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
                              text="\n".join([subject_title, summary])),
         "disconfirming": disconfirming,
         **window,
+        # §9.7: what the calendar said at the moment of the verdict. §9.9 reconciles predicted
+        # against actual against CONTEXT, and it cannot do that against a check nobody stored —
+        # the same reasoning as §9.5's `execution_at_save`.
+        **({"calendar_clash": {k: clash[k] for k in
+                               ("status", "window", "unaddressed", "searched",
+                                "markets_not_covered", "what_it_means")}}
+           if clash.get("status") not in (None, "nothing_to_check") else {}),
         # §9.5's figure, STAMPED — the live `execution_drift` row is rewritten whenever the
         # answer changes (results arriving, photographs arriving, a classification being
         # made), which is right for the current reading and wrong for a saved one. A verdict
@@ -4899,6 +4946,70 @@ def _window_from_the_workbook(conn, campaign_id: str, structured) -> Optional[di
                 f"decides which recorded events overlap it — say so if it is wrong.")}
 
 
+def _calendar_clash(conn, *, campaign_id, proposal_text, starts_on, ends_on,
+                    markets: list) -> dict:
+    """§9.7's check, against the subject whichever way it arrived.
+
+    With a stored record, its own window and its own markets — §7.2's split, where the record
+    answers "which brief is this". Without one, what the caller named, falling back to the
+    proposal's own dates.
+    """
+    record = store.get_campaign(conn, campaign_id) if campaign_id else None
+    if record:
+        # The record's OWN window, basis and all. Passing only the dates threw the basis away
+        # and `_window_for_the_check` then labelled a window read out of a competitor's launch
+        # date `stated` — so `campaign_context` hedged ("may have run during") while
+        # `prepare_evaluation` asserted a clash on the same record with the same dates. Two
+        # surfaces describing one record differently is the defect; mislabelling the basis is
+        # the house rule it breaks.
+        window = context.window_of(conn, campaign_id)
+        return context.clash_check(
+            conn, window=window, markets=sorted(context._market_names(record)),
+            from_a_record=True,
+            # `deck_text` too: a plan that addresses the World Cup does it in the deck, and
+            # the silence test reading only `detail` would call that plan silent.
+            text=" ".join(filter(None, [record.get("detail"), record.get("deck_text")])))
+    return context.clash_check(conn, starts_on=starts_on, ends_on=ends_on, markets=markets,
+                               text=proposal_text)
+
+
+def _say_the_calendar(clash: dict) -> str:
+    """What the model is told about a clash (§9.7).
+
+    Silent unless there is one. It ASKS rather than judging: overlapping a fixed date is the
+    point of some campaigns and the ruin of others, and §9.4's lesson — that treating every
+    deviation as a defect teaches this library to punish improvement — applies unchanged one
+    item later.
+    """
+    if (clash or {}).get("status") != "present":
+        return ""
+    said = ("`calendar_clash` in `computed` says this window runs into fixed dates already on "
+            "the calendar. It is a fact about timing and NOT a criticism: launching into "
+            "Black Friday is the point of some campaigns and the ruin of others, and this "
+            "library cannot tell which. ")
+    if clash.get("unaddressed"):
+        said += (f"What IS worth raising is the silence — the proposal does not mention "
+                 f"{', '.join(clash['unaddressed'])}. Ask whether that is deliberate rather "
+                 f"than assuming it is an oversight, and do not turn it into a blocking "
+                 f"finding on its own. ")
+    said += ("Any clash marked `seeded` came from the calendar shipped with this product, not "
+             "from this customer — say so if you rest on one, because a shipped date can be "
+             "wrong for their market. Each carries a `certainty` and a `certainty_note`: "
+             "`fixed` does not move, `announced` is published and does get changed, "
+             "`observed` is set by sighting and differs between neighbouring countries, and "
+             "`seasonal` is not a date at all but an onset that moves by weeks. Do not quote "
+             "a `seasonal` or `observed` range as though it were a fixed date. ")
+    if clash.get("not_checked_for_silence"):
+        said += (f"{clash['not_checked_for_silence']} of these are events this customer "
+                 f"recorded, which have no short name to look for — whether the proposal "
+                 f"addresses those is not something the check can tell you, so read them. ")
+    if clash.get("markets_not_covered"):
+        said += (f"The shipped calendar has no entries for "
+                 f"{', '.join(clash['markets_not_covered'])}, so anything found there came "
+                 f"from this customer's own records. ")
+    return said
+
+
 def _context_note(conn, campaign_id: str) -> dict:
     """What else was going on, as a citation carries it (§9.6).
 
@@ -5193,7 +5304,9 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
                        region: Optional[str] = None, market: Optional[str] = None,
                        markets: Optional[Union[str, list]] = None, collection: Optional[str] = None,
                        full_detail: bool = True,
-                       campaign_id: Optional[str] = None) -> dict:
+                       campaign_id: Optional[str] = None,
+                       starts_on: Optional[str] = None,
+                       ends_on: Optional[str] = None) -> dict:
     """
     Package the evidence Claude needs to judge a new proposal: the most similar prior
     campaigns WITH their outcomes. full_detail defaults to True here (unlike find_similar) —
@@ -5214,6 +5327,11 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
                                         ("tags", tags), ("region", region),
                                         ("market", market), ("markets", markets),
                                         ("collection", collection)) if v}
+    # §9.7: WHEN it runs is the same kind of claim as WHERE — it says which brief this is, and
+    # a record answers it. Kept out of `caller_filters` because it is not a retrieval filter;
+    # it is checked for the same refusal, because silently dropping it left a caller who passed
+    # dates believing those dates were what the calendar checked.
+    caller_window = {k: v for k, v in (("starts_on", starts_on), ("ends_on", ends_on)) if v}
     if top_k is not None:
         raise ValueError(
             f"top_k is not the caller's to choose: a judgment resting on 3 precedents and "
@@ -5229,7 +5347,7 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
         # describing a different subject. `tags`, `status` and `record_type` narrow within it,
         # and every one of them is recorded on the receipt, so the choice is reproducible
         # rather than invisible, which was the actual complaint.
-        overriding = sorted(set(caller_filters) & set(_SUBJECT_FILTERS))
+        overriding = sorted((set(caller_filters) & set(_SUBJECT_FILTERS)) | set(caller_window))
         if overriding:
             raise ValueError(
                 f"{', '.join(overriding)} describes which brief this is, and the subject "
@@ -5254,6 +5372,16 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
     # note has to say what was found for THIS brief, not restate the rule for finding it.
     computed = (facts.for_campaign(conn, campaign_id) if campaign_id
                 else facts.compute(proposal_text))
+    # §9.7: "have prepare_evaluation check every proposed window against it as a COMPUTED
+    # fact". It joins `computed` rather than sitting beside it, because that is the whole of
+    # "impossible to drop" — §7.1 tells the model to treat these as established rather than
+    # re-deriving them, and a clash arriving as prose is a sentence it can decline to repeat.
+    computed["calendar_clash"] = _calendar_clash(
+        conn, campaign_id=campaign_id, proposal_text=proposal_text,
+        starts_on=starts_on, ends_on=ends_on,
+        markets=[m for m in ([market, region]
+                             + ([markets] if isinstance(markets, str)
+                                else list(markets or []))) if m])
     # §8.3/§8.4, hoisted for the same reason: the note has to say what THIS brief is missing,
     # not restate the rule that produces the list.
     expected_now = (metrics.expected_check(conn, campaign_id) if campaign_id
@@ -5337,7 +5465,8 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
             + _say_the_expected_measures(expected_now)
             + _say_the_standing_corrections(standing_now)
             + _say_the_execution_drift(evidence)
-            + _say_the_context(evidence) +
+            + _say_the_context(evidence)
+            + _say_the_calendar(computed.get("calendar_clash")) +
             "`outcomes` splits this evidence into what WORKED and what did NOT, by measured "
             "result rather than by impression. Read both before deciding: resemblance to a "
             "strong performer is not evidence, and a brief that looks like something that "

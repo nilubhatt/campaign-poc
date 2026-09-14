@@ -33,6 +33,20 @@ import core
 import store
 
 
+@pytest.fixture(autouse=True)
+def _only_what_this_file_records(conn):
+    """Clear the shipped calendar (§9.7) before every test in this file.
+
+    Not a convenience. §9.6 is the LINKING MECHANISM and these tests count what they recorded;
+    §9.7 is the pack of dates the product ships with, and its own file checks that those reach
+    a proposal by exactly this arithmetic. Leaving both in one file would mean every count here
+    silently depended on which holidays happen to fall in the window a test picked — and a test
+    whose meaning changes when somebody edits a calendar entry is not testing what it says.
+    """
+    conn.execute("DELETE FROM context_events WHERE seeded = 1")
+    conn.commit()
+
+
 def _campaign(conn, title="Mexico launch", market="LATAM", **kw):
     return core.ingest_campaign(conn, title=title, market=market, status="concluded",
                                 detail=kw.pop("detail", "A launch."), **kw)["campaign_id"]

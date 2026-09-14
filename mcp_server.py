@@ -1122,6 +1122,17 @@ _PREPARE_EVALUATION_DESCRIPTION = """Evaluate a NEW campaign proposal against th
     Read `status` first: `nothing_to_check` means no checklist applied (the record has no
     market, or is not a campaign), which is not the same as a brief that carries everything.
 
+    `starts_on`/`ends_on` say WHEN this proposal would run (ISO dates). Pass them whenever the
+    pitch names a flight: `computed.calendar_clash` then says what the window runs into —
+    Ramadan, Golden Week, Black Friday, a World Cup, a monsoon. It is a fact about TIMING and
+    not a criticism: launching into Black Friday is the point of some campaigns and the ruin of
+    others, and this library cannot tell which. What is worth raising is the SILENCE — a plan
+    that overlaps something it never mentions. Ask whether that is deliberate; do not make it a
+    blocking finding on its own. A clash marked `seeded` came from the calendar shipped with
+    this product rather than from this customer, and a shipped date can be wrong for their
+    market — say so if you rest on one. With a `campaign_id`, the record's own window and
+    markets are used and these are ignored.
+
     `standing_corrections` are the rules this client has actually repeated — each one recurred
     across markets and a person confirmed it — with the provenance it was learned from. They
     are rules, not suggestions: a brief that breaks one is a `guardrail_breach` citing
@@ -1172,7 +1183,8 @@ def prepare_evaluation(subject_title: str, proposal_text: str,
                        match_all_tags: bool = False,
                        region: Optional[str] = None, market: Optional[str] = None,
                        markets: Optional[Union[str, list[str]]] = None, collection: Optional[str] = None,
-                       full_detail: bool = True) -> dict:
+                       full_detail: bool = True,
+                       starts_on: Optional[str] = None, ends_on: Optional[str] = None) -> dict:
     """Package the evidence Claude needs to judge a new proposal.
 
     The description a client actually receives is `_PREPARE_EVALUATION_DESCRIPTION`
@@ -1187,7 +1199,8 @@ def prepare_evaluation(subject_title: str, proposal_text: str,
                                        record_type=record_type, status=status, tags=tags,
                                        match_all_tags=match_all_tags, region=region,
                                        market=market, markets=markets, collection=collection,
-                                       full_detail=full_detail)
+                                       full_detail=full_detail,
+                                       starts_on=starts_on, ends_on=ends_on)
     finally:
         conn.close()
 
@@ -1204,8 +1217,14 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
                     campaign_id: Optional[str] = None,
                     retrieval: Optional[str] = None,
                     model_id: Optional[str] = None,
-                    subject_text: Optional[str] = None) -> dict:
+                    subject_text: Optional[str] = None,
+                    markets: Optional[list[str]] = None) -> dict:
     """Persist your judgment as structured findings, not prose.
+
+    Pass `subject_text` and `markets` for a proposal that is not stored — they are what the
+    server re-runs its own checks against, including §9.7's calendar clash, which it appends
+    to your findings whether or not you mention it. With a `campaign_id` the record answers
+    both and neither is needed.
 
     Write ONE finding per problem. Each is a short line naming the problem (<=120 chars),
     with the explanation in `detail` where a reader can open it if they want it — not a
@@ -1368,7 +1387,7 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
             findings=findings, resolved=resolved, closest_precedent=closest_precedent,
             approve_if=approve_if, campaign_id=campaign_id, cited_ids=cited_ids,
             predictions=predictions, retrieval=retrieval, model_id=model_id,
-            subject_text=subject_text)
+            subject_text=subject_text, markets=markets)
     finally:
         conn.close()
 

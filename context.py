@@ -72,7 +72,7 @@ def record(conn, *, starts_on: str, scope: str, kind: str, description: str,
            scope_value: Optional[str] = None, source: Optional[str] = None,
            delay_days: Optional[int] = None, budget_change_pct: Optional[float] = None,
            channels_disrupted: Optional[list] = None, seeded: bool = False,
-           seed_key: Optional[str] = None) -> dict:
+           seed_key: Optional[str] = None, certainty: Optional[str] = None) -> dict:
     """Put an event on the record (§9.6).
 
     `basis` is `stated` and never anything else. The server did not measure a three-day delay
@@ -148,7 +148,8 @@ def record(conn, *, starts_on: str, scope: str, kind: str, description: str,
         description=description.strip(), source=(source or "").strip() or None,
         delay_days=delay_days, budget_change_pct=budget_change_pct,
         channels_disrupted=_tidy_channels(channels_disrupted),
-        recorded_by=recorded_by.strip(), seeded=seeded, seed_key=seed_key)
+        recorded_by=recorded_by.strip(), seeded=seeded, seed_key=seed_key,
+        certainty=certainty)
     saved = _public(store.get_context_event(conn, eid))
     if warnings:
         saved = {**saved, "warnings": warnings}
@@ -269,8 +270,25 @@ def _public(row: dict) -> dict:
         **row,
         # Never `computed`. Every field here is somebody's account, including the impact.
         "basis": "stated",
-        "what_it_means": said + impact,
+        "what_it_means": said + impact + _how_well_it_is_known(row),
     }
+
+
+def _how_well_it_is_known(row: dict) -> str:
+    """Whether this date is ours to be wrong about, and how wrong it could be (§9.7).
+
+    A shipped calendar is a claim about the world. Ramadan begins on a sighting and starts a
+    day apart in neighbouring countries; a monsoon has an onset that moves by weeks. Presenting
+    those with the same confidence as Singles' Day would be the confident unfounded claim this
+    product is written against — and a customer correcting one has to know it was ours.
+    """
+    if not row.get("seeded"):
+        return ""
+    import calendar_seed
+
+    return (" This came from the calendar shipped with this product rather than from anybody "
+            "here. " + calendar_seed.note_for(row.get("certainty"))
+            + " Withdraw it if it does not apply to your market.")
 
 
 def _impact_sentence(row: dict) -> str:
@@ -691,6 +709,28 @@ def withdraw(conn, *, event_id: str, why: str, withdrawn_by: str) -> dict:
 _MAX_NAMED = 5
 
 
+def overlapping_window(conn, *, starts_on: str, ends_on: Optional[str],
+                       markets: list) -> list:
+    """Every event overlapping this window in these markets — UNCAPPED (§9.7).
+
+    `for_window` is a DISPLAY answer and caps at `MAX_EVENTS_SHOWN` by salience, which sorts
+    seeded rows last: right for §9.6, where a customer's recorded flood should outrank a
+    shipped holiday in a list somebody reads, and exactly wrong for §9.7, where the shipped
+    rows are the whole point. Reusing the display list meant eight customer records silently
+    deleted the World Cup, Ramadan and Buen Fin from the check — and the fact then stated
+    "8 thing(s)" as a count of what it had seen.
+    """
+    import store
+
+    scopes = [("global", None)]
+    for value in sorted({str(m).strip() for m in (markets or []) if str(m).strip()}):
+        scopes.append(("market", value))
+        scopes.append(("region", value))
+    return [_public(e) for e in store.context_events(
+        conn, scopes=scopes, starts_on=starts_on,
+        ends_on=ends_on or str(datetime.date.max))]
+
+
 def for_window(conn, *, starts_on: str, ends_on: Optional[str], markets: list) -> dict:
     """What was going on in these markets over this window (§9.6), with no campaign involved.
 
@@ -745,4 +785,254 @@ def for_window(conn, *, starts_on: str, ends_on: Optional[str], markets: list) -
             f"Nothing on record was going on between {when}, searched against "
             f"{', '.join(searched)}. That is a real answer and only as complete as the "
             f"calendar behind it: events nobody has recorded cannot be found."),
+    }
+
+
+# ── §9.7: the calendar this product ships with ───────────────────────────────
+
+def seed(conn) -> int:
+    """Put the shipped calendar on the record (§9.7).
+
+    Through `store.insert_context_event` rather than `record`, deliberately: `record` fans out
+    over the whole library to report what it reached, which is right for one event somebody
+    typed and wrong for a loop — measured at roughly 25 seconds for a few hundred rows on a
+    large library. Nothing here needs the fan-out, because the link is computed on read.
+
+    Idempotent on `seed_key`, and it will not resurrect a row a customer withdrew.
+    """
+    import calendar_seed
+    import store
+
+    for row in calendar_seed.rows():
+        store.insert_context_event(
+            conn, starts_on=row["starts_on"], ends_on=row["ends_on"], scope=row["scope"],
+            scope_value=row["scope_value"], kind=row["kind"], description=row["description"],
+            recorded_by="shipped with this product", seeded=True, seed_key=row["seed_key"],
+            certainty=row["certainty"])
+    return len(calendar_seed.rows())
+
+
+def clash_check(conn, *, markets: list, text: str, starts_on=None, ends_on=None,
+                window: Optional[dict] = None, from_a_record: bool = False) -> dict:
+    """Does this proposed window run into anything already on the calendar? (§9.7)
+
+    A COMPUTED fact, in `facts.py`'s shape, because "impossible to drop" is what the review
+    asked for: §2.4 made `computed` unwritable from the MCP surface and §7.1 tells the model to
+    treat computed facts as established rather than re-deriving them. A clash that arrives as
+    prose is a sentence a model can decline to repeat; one that arrives in `computed` it has to
+    carry or dispute out loud.
+
+    The useful finding is not "does it clash" — Mexico's deck DID flag the World Cup. It is
+    that the plan clashes with something it never mentions, which is what "and then never
+    addressed it" describes.
+
+    Nothing here says a clash is bad. Launching into Black Friday is the point of some
+    campaigns and the ruin of others and this library cannot tell which; §9.4's lesson, that
+    treating every deviation as a defect teaches it to punish improvement, applies unchanged.
+    """
+    window = window or _window_for_the_check(starts_on, ends_on, text)
+    named = [str(m).strip() for m in (markets or []) if str(m).strip()]
+    if not window["starts_on"] or not named:
+        return _clash_fact("nothing_to_check", window, [], [], missing_market=not named,
+                           from_a_record=from_a_record)
+    import calendar_seed
+
+    searched = ["global"] + sorted({str(m).strip() for m in named})
+    # Uncapped: this is a CHECK, not a list somebody reads. See `overlapping_window`.
+    events = overlapping_window(conn, starts_on=window["starts_on"],
+                                ends_on=window["ends_on"], markets=named)
+    covered = calendar_seed.covered_markets()
+    uncovered = sorted(m for m in named if m.casefold() not in covered)
+    expired = _outside_the_shipped_span(window)
+    if not events:
+        # Three different empty answers, and collapsing them is the clean bill this item is
+        # most at risk of giving. "Nothing was happening" is a claim about the MARKET; "we
+        # have no rows for Brazil" and "the shipped calendar stops at 2026" are claims about
+        # the PRODUCT, and its own gap must not be reported as the customer's.
+        if len(uncovered) == len(named):
+            return _clash_fact("not_covered", window, [], [], searched=searched,
+                               uncovered=uncovered)
+        if expired:
+            return _clash_fact("calendar_expired", window, [], [], searched=searched,
+                               uncovered=uncovered, expired=True)
+        return _clash_fact("absent", window, [], [], searched=searched, uncovered=uncovered)
+    # What the plan itself already names. A plan discusses a thing in its OWN words, so the
+    # handles carry aliases and match on word boundaries — "we pre-bought FIFA inventory
+    # around the fixtures" addresses the World Cup, and "Eidos Media" is not Eid.
+    unaddressed, unchecked = [], []
+    for subject in dict.fromkeys(_subject_of(e) for e in events):
+        if subject is None:
+            unchecked.append(True)
+        elif not _mentions(text, subject):
+            unaddressed.append(subject)
+    return _clash_fact("present", window, events, unaddressed, searched=searched,
+                       uncovered=uncovered, expired=expired,
+                       unchecked=len([u for u in unchecked if u]))
+
+
+def _outside_the_shipped_span(window: dict) -> bool:
+    import calendar_seed
+
+    first, last = calendar_seed.COVERS
+    return bool(window["starts_on"] > last or (window["ends_on"] or window["starts_on"]) < first)
+
+
+def _mentions(text: str, subject: str) -> bool:
+    """Does this plan name the thing, in any of the words a plan would use? (§9.7)
+
+    Word boundaries and aliases, because the failure modes are not symmetric. A false positive
+    lands as a neutral question — "whether that is deliberate" — which is safe. A false
+    negative used to land as an affirmative claim that the plan named everything, which is the
+    review's own complaint restated as an endorsement.
+    """
+    import calendar_seed
+    import re
+    import unicodedata
+
+    said = _plain(text)
+    for alias in calendar_seed.ALIASES.get(subject, (subject,)):
+        if re.search(rf"(?<!\w){re.escape(_plain(alias))}(?!\w)", said):
+            return True
+    return False
+
+
+def _plain(text: str) -> str:
+    """Case- and accent-folded, because a plan writes "Dia de Muertos" as often as "Día" and
+    "Ramadán" as often as "Ramadan". An accent is not a different subject."""
+    import unicodedata
+
+    stripped = unicodedata.normalize("NFD", str(text or ""))
+    return "".join(c for c in stripped if not unicodedata.combining(c)).casefold()
+
+
+def _window_for_the_check(starts_on, ends_on, text: str) -> dict:
+    """The window to check, entered or read (§9.7).
+
+    A pitch usually names its own flight, so reading it is worth doing — under the same bound
+    and the same label as §9.6's, because a proposal deck carries competitor dates and last
+    year's recaps exactly like a wrap deck does.
+    """
+    if (starts_on or "").strip():
+        first = _a_date(starts_on, "starts_on")
+        last = _a_date(ends_on, "ends_on") if (ends_on or "").strip() else None
+        if last and last < first:
+            raise ValueError(f"`ends_on` ({last}) is before `starts_on` ({first}).")
+        return {"starts_on": str(first), "ends_on": str(last) if last else None,
+                "basis": "stated"}
+    return _window_from_the_brief({"detail": text or ""})
+
+
+def _subject_of(event: dict) -> Optional[str]:
+    """What a plan would call this, if a plan mentioned it.
+
+    Only seeded events have one: a customer's own "New labelling rules take effect" has no
+    short handle, and inventing one would produce an `unaddressed` entry naming words nobody
+    used. Those events still COUNT as clashes; they are simply not checked for silence — and
+    the caller has to carry that distinction rather than reading an empty `unaddressed` as
+    "the plan named everything", which was an affirmative claim about a plan nobody had read.
+    """
+    import calendar_seed
+
+    return calendar_seed.subject_for(event.get("seed_key") or "") or None
+
+
+def _clash_fact(status: str, window: dict, events: list, unaddressed: list,
+                missing_market: bool = False, searched: Optional[list] = None,
+                uncovered: Optional[list] = None, expired: bool = False,
+                unchecked: int = 0, from_a_record: bool = False) -> dict:
+    import calendar_seed
+
+    listed = "; ".join(
+        f"{e['description'].split('.')[0]} ({e['starts_on']}"
+        + ("" if e["ends_on"] in (None, e["starts_on"]) else f" to {e['ends_on']}") + ")"
+        for e in events)
+    when = (f"{window['starts_on']} to {window['ends_on'] or 'open-ended'}"
+            if window["starts_on"] else "an unstated window")
+    read = ("" if window.get("basis") != "heuristic" else
+            " The window was READ FROM the proposal's own dates rather than entered, so this "
+            "rests on that reading.")
+    covers = " to ".join(calendar_seed.COVERS)
+    if status == "nothing_to_check":
+        why = ("no window was given and none could be read from the proposal"
+               if not window["starts_on"] else "no market was named")
+        if missing_market and window["starts_on"]:
+            # Named differently depending on WHO could have named it. On the subject-record
+            # path the caller cannot pass a market at all — telling them "no market was named"
+            # is true of nobody and points nowhere.
+            why = ("this record names no market, region or markets, so only global events "
+                   "could be searched — `update_campaign` is where that is fixed"
+                   if from_a_record else
+                   "no market was named, so only global events could be searched")
+        said = (f"This proposal was NOT checked against the calendar: {why}. That is not the "
+                f"same as it clashing with nothing — \u201cthis launch clashes with nothing\u201d "
+                f"is a claim, and this one has not been earned.")
+    elif status == "not_covered":
+        # The product's gap, said as the product's. Reported as "nothing was happening" it
+        # reads as a checked market, under the heading that tells the model not to re-derive.
+        said = (f"The calendar shipped with this product has no entries for "
+                f"{', '.join(uncovered or [])}, so this window was checked against global "
+                f"events and this customer's own records only — and neither had anything in "
+                f"it. That is a gap in what was SHIPPED, not a finding about the market. "
+                f"Record what was going on there and it becomes checkable.")
+    elif status == "calendar_expired":
+        said = (f"The calendar shipped with this product covers {covers}, and this window "
+                f"({when}) falls outside it — so only this customer's own records could be "
+                f"checked, and they had nothing in this window. That is a gap in what was "
+                f"SHIPPED, not a finding about the market.")
+    elif status == "absent":
+        said = (f"Nothing on record was happening between {when}, searched against "
+                f"{', '.join(searched or [])}. That is a real answer and only as complete as "
+                f"the calendar behind it: events nobody has recorded cannot be found.{read}")
+        if uncovered:
+            said += (f" The shipped calendar has no entries for {', '.join(uncovered)}, so "
+                     f"{'that market was' if len(uncovered) == 1 else 'those markets were'} "
+                     f"covered only by this customer's own records.")
+    else:
+        said = (f"This window ({when}) runs into {len(events)} thing(s) already on the "
+                f"calendar: {listed}.{read}")
+        if unaddressed:
+            said += (f" The proposal does not name {', '.join(unaddressed)}. Whether that is "
+                     f"deliberate is a question for the people who wrote it — overlapping a "
+                     f"fixed date is the point of some campaigns and the ruin of others, and "
+                     f"nothing here says which this is.")
+        elif unchecked and not events[0].get("seeded"):
+            # NEVER "the proposal names all of them" over events that were never checked for
+            # silence. A customer's own "New labelling rules take effect" has no handle a plan
+            # would use, so its silence is unknowable — and asserting the plan named it is a
+            # claim about a document nobody read, carrying `basis: computed`.
+            said += (f" {unchecked} of these are events this customer recorded, which have no "
+                     f"short name a plan would use — so whether the proposal addresses them "
+                     f"is not something this check can tell you. Read them.")
+        else:
+            said += (" The proposal names them all by name; whether it ADDRESSES them is a "
+                     "question for the reader.")
+        if unchecked and unaddressed:
+            said += (f" A further {unchecked} are events this customer recorded, with no "
+                     f"short name to look for — read those rather than relying on this.")
+        if expired:
+            said += (f" Note that the shipped calendar covers {covers} and this window falls "
+                     f"outside it, so anything found here came from this customer's own "
+                     f"records.")
+        if uncovered:
+            said += (f" The shipped calendar has no entries for {', '.join(uncovered)}.")
+    return {
+        "code": "calendar_clash", "status": status, "basis": "computed", "layer": "body",
+        "evidence": [e["description"][:120] for e in events[:3]],
+        "window": window,
+        "searched": searched or [],
+        "markets_not_covered": uncovered or [],
+        "shipped_calendar_covers": list(calendar_seed.COVERS),
+        "clashes": [{"description": e["description"], "starts_on": e["starts_on"],
+                     "ends_on": e["ends_on"], "seeded": e.get("seeded", False),
+                     "certainty": e.get("certainty"),
+                     # The hedge, ON the row. It reached the reader on §9.6's path and was
+                     # dropped here, so a `seasonal` monsoon whose onset moves by weeks and a
+                     # `fixed` Singles' Day arrived as two ranges differing by one unexplained
+                     # word, rendered with identical confidence.
+                     "certainty_note": calendar_seed.note_for(e.get("certainty"))
+                     if e.get("seeded") else ""}
+                    for e in events],
+        "unaddressed": unaddressed,
+        "not_checked_for_silence": unchecked,
+        "what_it_means": said,
     }

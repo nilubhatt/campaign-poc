@@ -189,6 +189,12 @@ CREATE TABLE IF NOT EXISTS context_events (
     recorded_by   TEXT NOT NULL,   -- whose account of it this is
     seeded        INTEGER NOT NULL DEFAULT 0,   -- §9.7: shipped with the product rather than
                                    -- entered by this customer
+    certainty     TEXT,            -- §9.7, on a SEEDED row: fixed | announced | observed |
+                                   -- seasonal. A shipped calendar is a claim about the world
+                                   -- and most of these claims are approximate — Ramadan begins
+                                   -- on a sighting, a monsoon has an onset that moves by
+                                   -- weeks. Shipping those as exact facts is the confident
+                                   -- unfounded claim this product is written against
     seed_key      TEXT UNIQUE,     -- §9.7's handle on a row it wrote, e.g. 'ae.ramadan.2026'.
                                    -- A random ctx_… id gives a seeder no way back: it cannot
                                    -- run twice without doubling the calendar, and cannot
@@ -406,6 +412,13 @@ CREATE INDEX IF NOT EXISTS recon_eval_idx       ON reconciliations(evaluation_id
 -- read by design, so this is the one index that carries the feature.
 CREATE INDEX IF NOT EXISTS context_range_idx     ON context_events(starts_on, ends_on);
 CREATE INDEX IF NOT EXISTS context_scope_idx     ON context_events(scope, scope_key);
+-- SQLite cannot ADD COLUMN ... UNIQUE, so `_add_missing_columns` strips it and an UPGRADED
+-- database had no uniqueness on `seed_key` at all — the schema comment promised a guarantee
+-- half the installed base did not have, and the seeder's lookup has no ORDER BY, so which of
+-- two duplicates got replaced was undefined. A unique INDEX is the form that survives a
+-- migration.
+CREATE UNIQUE INDEX IF NOT EXISTS context_seed_key_idx ON context_events(seed_key)
+    WHERE seed_key IS NOT NULL;
 """
 
 
@@ -422,6 +435,11 @@ def upgrade(conn: sqlite3.Connection) -> None:
     conn.executescript(_INDEXES)
     conn.commit()
     _seed_metric_registry(conn)
+    # §9.7: the shipped calendar, on the same terms as the metric registry — idempotent on a
+    # stable key, so it can correct a wrong date on upgrade without doubling the calendar, and
+    # it never resurrects a row a customer withdrew.
+    import context
+    context.seed(conn)
 
 
 def connect() -> sqlite3.Connection:
@@ -2271,7 +2289,7 @@ def insert_context_event(conn, *, starts_on: str, ends_on, scope: str, scope_val
                          kind: str, description: str, recorded_by: str, source=None,
                          delay_days=None, budget_change_pct=None,
                          channels_disrupted=None, seeded: bool = False,
-                         seed_key=None) -> str:
+                         seed_key=None, certainty=None) -> str:
     """Write one event, or REPLACE the seeded row with this key (§9.6/§9.7).
 
     Replacing rather than inserting only when a `seed_key` is given, which only the seeder
@@ -2279,19 +2297,39 @@ def insert_context_event(conn, *, starts_on: str, ends_on, scope: str, scope_val
     and a Ramadan date corrected upstream has to be able to reach a database that already has
     the wrong one.
     """
-    existing = (conn.execute("SELECT id FROM context_events WHERE seed_key = ?",
+    existing = (conn.execute("SELECT * FROM context_events WHERE seed_key = ?",
                              (seed_key,)).fetchone() if seed_key else None)
+    if existing is not None and existing["withdrawn_at"] is not None:
+        # A customer withdrew this seeded row — "we do not trade in that market". Re-seeding
+        # over it on the next start would undo their correction silently and forever, which
+        # is the one thing an upgrade must never do.
+        return existing["id"]
+    if existing is not None and _same_event(existing, locals()):
+        # Nothing changed, so nothing is written. `INSERT OR REPLACE` on every start rewrote
+        # `created_at` for all of them, touched the database file on a no-op, and silently
+        # reverted any local edit to a seeded row's description or source on restart.
+        return existing["id"]
     eid = existing["id"] if existing else _id("ctx")
     conn.execute(
         "INSERT OR REPLACE INTO context_events (id, starts_on, ends_on, scope, scope_value, "
         "scope_key, kind, description, source, delay_days, budget_change_pct, "
-        "channels_disrupted, recorded_by, seeded, seed_key, created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "channels_disrupted, recorded_by, seeded, seed_key, certainty, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (eid, starts_on, ends_on, scope, scope_value, fold(scope_value), kind, description,
          source, delay_days, budget_change_pct, json.dumps(list(channels_disrupted or [])),
-         recorded_by, int(seeded), seed_key, _now()))
+         recorded_by, int(seeded), seed_key, certainty, _now()))
     conn.commit()
     return eid
+
+
+def _same_event(row, values: dict) -> bool:
+    """Is this seeded row already exactly what the pack says? (§9.7)"""
+    return all(
+        (row[column] or None) == (values.get(column) or None)
+        for column in ("starts_on", "ends_on", "scope", "scope_value", "kind", "description",
+                       "source", "certainty")
+    ) and json.loads(row["channels_disrupted"] or "[]") == list(
+        values.get("channels_disrupted") or [])
 
 
 def withdraw_context_event(conn, event_id: str, *, why: str, withdrawn_by: str) -> None:
