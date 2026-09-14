@@ -125,7 +125,7 @@ Offline smoke test (no Ollama): `CAMPAIGN_POC_EMBED_PROVIDER=hash python -m http
 `list_evaluations` · `reconcile_evaluation` · `save_reconciliation` · `resolve_measure` ·
 `measure_status` · `graduate_measure` · `note_correction` · `list_corrections` ·
 `correction_status` · `resolve_correction` · `graduate_correction` ·
-`set_aside_correction` · `keep_correction` ·
+`set_aside_correction` · `reopen_correction` · `keep_correction` ·
 `finish_indexing` ·
 `health_check`
 

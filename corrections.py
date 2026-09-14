@@ -58,8 +58,11 @@ def _normalise(text: str) -> str:
     settled — *suggest, never auto-merge*. Keeping only the refusal half was a misreading of
     both.
     """
-    folded = re.sub(r"\s+", " ", (text or "").strip().lower())
-    return re.sub(r"[^\w ]+", "", folded).strip()
+    # Punctuation becomes a SPACE, not nothing. Deleting it made "Post 3-4 times per week"
+    # and "Post 34 times per week" the same rule, and "Seed 1-2 colourways" the same as "Seed
+    # 12 colourways" — an automatic merge of two genuinely different instructions, which is
+    # the one thing this function is supposed to be too narrow to do.
+    return re.sub(r"\s+", " ", re.sub(r"[^\w]+", " ", (text or "").lower())).strip()
 
 
 # Measured on different material from §8.2's 0.75, and with a different instrument. A metric
@@ -79,7 +82,12 @@ _STOPWORDS = frozenset((
     "a an the this that these those and or but if then so as of to in on at for with from by "
     "is are was were be been being do does did should must can could would will shall may "
     "we you they it its our your their please need needs needed want wants all any each per "
-    "every not no more most").split())
+    "every more most").split())
+# NOT stopwords, and the reason is the whole point. With `not`/`no`/`never` dropped, "Do not
+# use AI imagery" and "Use AI imagery only with approval" scored 1.0 — the suggester was
+# inverted on precisely the words that invert a rule, and offering "same rule as" there merges
+# a prohibition with its permission.
+_NEGATIONS = frozenset("not no never dont doesnt cant cannot without avoid neither nor".split())
 # Small numbers written as words. "a single colourway" and "one colourway" are the same
 # instruction, and nothing else in this comparison would ever see that.
 _NUMBER_WORDS = {"one": "1", "single": "1", "sole": "1", "two": "2", "double": "2",
@@ -103,6 +111,17 @@ def _stem(word: str) -> str:
 
 def _content(text: str) -> set:
     return {_stem(w) for w in _normalise(text).split() if w and w not in _STOPWORDS}
+
+
+def negated(text: str) -> bool:
+    """Whether this rule is phrased as a prohibition.
+
+    Crude — one negation anywhere flips it — and deliberately used only to REFUSE a
+    suggestion, never to make one. A missed suggestion costs an unmerged rule somebody can
+    still merge by hand; a suggested merge of "never use AI imagery" with "use AI imagery"
+    puts the opposite of a client's rule on the checklist under their provenance.
+    """
+    return bool(_NEGATIONS & {_normalise(w) for w in _normalise(text).split()})
 
 
 def _resembles(a: set, b: set) -> float:
@@ -129,10 +148,29 @@ def _looks_like(conn, text: str, *, exclude: Optional[str] = None) -> Optional[d
         theirs = _content(row["text"])
         if len(theirs) < _MIN_CONTENT:
             continue
+        if negated(text) != negated(row["text"]):
+            continue               # a prohibition and its permission are not the same rule
         overlap = _resembles(mine, theirs)
         if overlap > score:
             best, score = row, overlap
     return best if score >= _LOOKS_LIKE_CUTOFF else None
+
+
+# Every other model-authored field in this codebase is measured. A 400 KB rule and a 200 KB
+# provenance were both accepted and stored, and they travel into the evidence package and then
+# into saved findings.
+_MAX_TEXT = 400
+_MAX_PROVENANCE_CHARS = 300
+
+
+def _bounded(value: str, field: str, limit: int) -> str:
+    value = (value or "").strip()
+    if len(value) > limit:
+        raise ValueError(
+            f"{field} is {len(value)} characters; the limit is {limit}. A standing correction "
+            f"is one rule somebody can act on — if this is several, record them separately so "
+            f"each can be counted, confirmed and cited on its own.")
+    return value
 
 
 DECISIONS = ("same_rule", "different_rule", "set_aside")
@@ -173,8 +211,21 @@ def resolve(conn, correction_id: str, *, decision: str,
             raise ValueError(f"{same_as!r} is not a correction on file")
         if target["id"] == correction_id:
             raise ValueError("A correction cannot be the same rule as itself.")
-        store.merge_correction(conn, absorbed=correction_id, into=same_as)
-        return {"correction_id": same_as, "status": "merged", "absorbed": correction_id,
+        # Onto the LIVE head of the target's chain, never onto a row that was itself folded
+        # away: C merged into an already-merged B put C's sightings on a row nothing reads.
+        target = store.live_correction(conn, same_as) or target
+        if target["id"] == correction_id:
+            # A→B then B→A. Both rows end `merged`, there is no live row left, and the rule
+            # disappears from every reader — the sightings intact and unreachable.
+            raise ValueError(
+                f"{same_as!r} was already folded into {correction_id!r}, so merging the other "
+                f"way would leave neither of them as the rule. They are already one.")
+        if target["status"] == "ignored":
+            raise ValueError(
+                f"{same_as!r} was set aside, so folding this into it would put what was said "
+                f"somewhere nothing reads. Use 'different_rule', or reopen that one first.")
+        store.merge_correction(conn, absorbed=correction_id, into=target["id"])
+        return {"correction_id": target["id"], "status": "merged", "absorbed": correction_id,
                 "what_it_means": (
                     "Folded in, with everywhere it was said. The rule now counts every market "
                     "that stated it, which is what the gate reads.")}
@@ -231,14 +282,32 @@ def note(conn, *, text: str, campaign_id: Optional[str], provenance: str) -> dic
             "and slide, or who asked for it — or a judgment citing it can say only “the "
             "library says so”, which is the unfounded confident claim this product is "
             "built against.")
+    text = _bounded(text, "text", _MAX_TEXT)
+    provenance = _bounded(provenance, "provenance", _MAX_PROVENANCE_CHARS)
+    # Before anything is written. The sighting carries a foreign key to `campaigns` and the
+    # correction row is committed first, so an id that does not exist raised IntegrityError —
+    # not a ValueError, so the reason was discarded and the caller saw "Error executing tool"
+    # — and left a correction with no sightings and no provenance behind: an opinion in a text
+    # field, which is the one thing this module says it refuses. The model supplying the id is
+    # now the ordinary path, because `after_upload` prefills it.
+    if campaign_id and not store.get_campaign(conn, campaign_id):
+        raise ValueError(
+            f"campaign_id {campaign_id!r} is not a record in this library. Pass the id of the "
+            f"brief the feedback came from, or omit it — though a correction with no campaign "
+            f"counts towards nothing, because the gate is about which campaigns and markets "
+            f"raised a rule.")
 
     normalised = _normalise(text)
     existing = store.correction_by_text(conn, normalised)
     fresh = existing is None
     correction_id = (existing or {}).get("id") or store.insert_correction(
         conn, text=text.strip(), normalised=normalised)
+    # `said_as` is what THIS mention actually said. After a merge the canonical row carries
+    # one wording and the sightings carry the others, which is the `canonical`/`raw_key` split
+    # §8.1 made for measures — and it is what makes the fold checkable afterwards rather than
+    # a claim nobody can audit.
     store.note_correction_sighting(conn, correction_id=correction_id, campaign_id=campaign_id,
-                                   provenance=provenance.strip())
+                                   provenance=provenance, said_as=text)
     store.touch_correction(conn, correction_id, campaign_id=campaign_id)
     # No revival path, deliberately. §8.5 has one because a measure is demoted AUTOMATICALLY —
     # nothing decided it, so a sighting can undo it. A correction only ever leaves the
@@ -543,6 +612,28 @@ def gone_quiet(conn) -> list:
             ]),
         })
     return sorted(quiet, key=lambda r: r["correction_id"])
+
+
+def reopen(conn, correction_id: str) -> dict:
+    """Undo a set-aside (§8.6).
+
+    Back to `provisional`, never straight to standing: whether briefs are judged against a rule
+    is the gate's question and a person's confirmation, and jumping over both would let a
+    reopen do what a graduation is for. §8.2's `different_measure` reopens an ignored measure
+    the same way, and the asymmetry — a correction with no way back at all — was the drift.
+    """
+    import store
+
+    entry = describe(conn, correction_id)
+    if not entry:
+        raise ValueError(f"{correction_id!r} is not a correction on file")
+    if entry["status"] != "ignored":
+        raise ValueError(f"{correction_id!r} is {entry['status']}, not set aside.")
+    store.reopen_correction(conn, correction_id)
+    return {"correction_id": correction_id, "text": entry["text"], "status": "provisional",
+            "what_it_means": (
+                "Back on file and countable again. It is not applied to any brief — that "
+                "still takes it recurring across markets and somebody confirming it.")}
 
 
 def keep(conn, correction_id: str) -> dict:

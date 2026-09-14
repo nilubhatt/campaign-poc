@@ -1725,8 +1725,29 @@ def get_correction(conn, correction_id: str) -> Optional[dict]:
     return next((c for c in corrections(conn) if c["id"] == correction_id), None)
 
 
+def live_correction(conn, correction_id: Optional[str]) -> Optional[dict]:
+    """Follow `merged_into` to the row that is actually the rule now.
+
+    A merged row is kept because it is somebody's words, which means it is still reachable by
+    its own wording — and a later mention of that wording landed on the dead row. The rule it
+    was folded into stayed where it was, so the fourth market saying the second market's
+    sentence advanced nothing: the review's own three-market scenario, failing on the mention
+    after the merge.
+    """
+    seen: set = set()
+    row = get_correction(conn, correction_id) if correction_id else None
+    while row and row.get("merged_into") and row["id"] not in seen:
+        seen.add(row["id"])
+        nxt = get_correction(conn, row["merged_into"])
+        if nxt is None or nxt["id"] in seen:
+            break                      # a cycle cannot exist (merge refuses one) — belt
+        row = nxt
+    return row
+
+
 def correction_by_text(conn, normalised: str) -> Optional[dict]:
-    return next((c for c in corrections(conn) if c["normalised"] == normalised), None)
+    match = next((c for c in corrections(conn) if c["normalised"] == normalised), None)
+    return live_correction(conn, match["id"]) if match else None
 
 
 def insert_correction(conn, *, text: str, normalised: str) -> str:
@@ -1846,6 +1867,13 @@ def correction_was_offered(conn, correction_id: str) -> bool:
     row = conn.execute("SELECT offered FROM corrections WHERE id = ?",
                        (correction_id,)).fetchone()
     return bool(row and row["offered"])
+
+
+def reopen_correction(conn, correction_id: str) -> None:
+    """Back to provisional — never straight to standing, which is the gate's business."""
+    conn.execute("UPDATE corrections SET status = 'provisional', offered = 0, asked = 0 "
+                 "WHERE id = ? AND status = 'ignored'", (correction_id,))
+    conn.commit()
 
 
 def correction_quiet_asked(conn, correction_id: str) -> bool:

@@ -919,6 +919,12 @@ def _clean_precedent(conn, value, where: str, *, kind=None) -> Optional[dict]:
     return cleaned
 
 
+# A floor under "quoted a fragment", not the negation check — see `_checked_correction` for
+# why a length ratio cannot catch an inversion. Not 100%, because trailing punctuation and a
+# closing clause naming an exception are legitimate to leave off.
+_MIN_RULE_QUOTE = 0.6
+
+
 def _checked_correction(conn, correction_id: str, quote: str, where: str) -> dict:
     """Verify a citation of a standing correction (§8.6).
 
@@ -944,12 +950,42 @@ def _checked_correction(conn, correction_id: str, quote: str, where: str) -> dic
             f"not standing. A guardrail breach is not debatable, and a rule nobody has "
             f"confirmed cannot carry that. Raise it as a precedent_departure against the "
             f"campaign it came from instead.")
-    # Segments and units, the same way every other citation is checked — §6.1's elision bound
-    # applies here too, and a hand-rolled `in` would have been a second, weaker check.
-    if not _quote_is_in(_quote_segments(quote, where), [entry["text"]]):
+    # STRICTER than §6.1's check on a deck, and the difference is the length of the thing
+    # quoted. §6.1's bounds — 2 gaps, 200 elided characters — are measured against a unit that
+    # can be a whole packed slide; a rule is one sentence, so both bounds sit far outside it
+    # and an elision can invert the rule outright: "Never use AI imagery … approves it in
+    # writing" verified against "Never use AI imagery unless the client approves it in
+    # writing." A plain substring drops a negation the same way, since "seed more than one
+    # colourway" is inside "Do not seed more than one colourway".
+    #
+    # So: no elision at all, and the quote has to be most of the rule. A guardrail breach is
+    # the one class of finding this product calls not debatable, and a quote that leaves out
+    # the half that reverses the meaning is the assertion §6.1 exists to refuse, carrying more
+    # authority than any other citation could.
+    segments = _quote_segments(quote, where)
+    if len(segments) > 1:
+        raise ValueError(
+            f"{where}precedent quotes correction {correction_id!r} with an elision. Quote the "
+            f"rule as it reads — it is one sentence, and leaving words out of it can reverse "
+            f"what it says. The rule on file reads: {entry['text']!r}.")
+    if not _quote_is_in(segments, [entry["text"]]):
         raise ValueError(
             f"{where}precedent quotes {quote!r}, which is not what correction "
             f"{correction_id!r} says. The rule on file reads: {entry['text']!r}.")
+    # The check that actually catches the inversion. A LENGTH ratio does not: dropping "Do
+    # not " is seven characters out of fifty and reverses the rule completely, so the quote
+    # still measures 84% of it. What matters is whether the quote carries the rule's negation,
+    # and "seed more than one colourway per recipient" is a faithful substring of "Do not seed
+    # more than one colourway per recipient" that says the opposite of it.
+    if corrections.negated(entry["text"]) and not corrections.negated(quote):
+        raise ValueError(
+            f"{where}precedent quotes correction {correction_id!r} without the part that makes "
+            f"it a prohibition, so the quote says the opposite of the rule. Quote it as it "
+            f"reads: {entry['text']!r}.")
+    if len(quote.strip()) < _MIN_RULE_QUOTE * len(entry["text"].strip()):
+        raise ValueError(
+            f"{where}precedent quotes only a fragment of correction {correction_id!r}, and a "
+            f"fragment of a rule is not the rule. Quote it as it reads: {entry['text']!r}.")
     return {
         "correction_id": correction_id,
         "quote": quote,

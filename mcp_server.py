@@ -152,7 +152,9 @@ CorrectionDecision = _enum("same_rule", "different_rule", "set_aside")
 different_rule — it stands on its own, and stops asking.
 set_aside — never apply it and stop asking. What was said is kept."""
 
-_CORRECTION_STATUSES = ("provisional", "expected", "retired", "ignored", "merged")
+# No `retired`: a correction is never demoted automatically (silence usually means the rule is
+# being followed), so the only way off the checklist is somebody setting it aside.
+_CORRECTION_STATUSES = ("provisional", "expected", "ignored", "merged")
 CorrectionStatus = _enum(*_CORRECTION_STATUSES)
 
 ReconciliationBasis = _enum("results", "superseding_version")
@@ -1275,9 +1277,11 @@ def list_corrections(status: Optional[CorrectionStatus] = None) -> dict:
     """Every standing correction the library has learned, with provenance and status (§8.6).
 
     `provisional` ones have been said but not confirmed and are applied to nothing;
-    `expected` ones are standing and are shown with every judgment in their markets;
-    `retired` ones stopped coming up and are no longer applied — never deleted, because old
-    judgments cited them and those have to stay explicable."""
+    `expected` ones are standing and shown with every judgment in their markets;
+    `ignored` ones somebody set aside — never deleted, because old judgments cited them and
+    those have to stay explicable, and `reopen_correction` brings one back;
+    `merged` ones turned out to be another rule stated differently, and their sightings moved
+    onto it."""
     if status:
         # `_enum` is advisory — a string to pydantic, an enum to the reader (D32) — so an
         # unrecognised value reached the filter and returned an empty list with no error at
@@ -1334,6 +1338,21 @@ def set_aside_correction(correction_id: str, why: Optional[str] = None) -> dict:
     conn = store.connect()
     try:
         return corrections.set_aside(conn, correction_id, why=why)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def reopen_correction(correction_id: str) -> dict:
+    """Undo a set-aside: the rule goes back to provisional and can be asked about again (§8.6).
+
+    Setting aside is a decision, and decisions are sometimes wrong. It does NOT go straight
+    back to standing — whether briefs are judged against it runs the gate again, and a person
+    confirms it again, because that is what put it there the first time."""
+    conn = store.connect()
+    try:
+        return corrections.reopen(conn, correction_id)
     finally:
         conn.close()
 

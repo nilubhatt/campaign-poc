@@ -28,6 +28,7 @@ refused since §5.1.
 """
 import pytest
 
+import core
 import corrections
 import learning
 import metrics
@@ -474,7 +475,7 @@ def test_a_finding_can_cite_a_standing_correction(conn):
     import store
 
     cid = _standing(conn)
-    saved = _save(conn, {"correction_id": cid, "quote": "Seed a single colourway"})
+    saved = _save(conn, {"correction_id": cid, "quote": SEEDING})
 
     cited = store.get_evaluation(conn, saved["evaluation_id"])["findings"][0]["precedent"]
     assert cited["correction_id"] == cid
@@ -500,13 +501,77 @@ def test_a_provisional_correction_cannot_be_cited_as_a_rule(conn):
     cid = corrections.find(conn, SEEDING)["correction_id"]
 
     with pytest.raises(ValueError) as e:
-        _save(conn, {"correction_id": cid, "quote": "Seed a single colourway"})
+        _save(conn, {"correction_id": cid, "quote": SEEDING})
     assert "not standing" in str(e.value)
+
+
+def test_a_quote_cannot_drop_the_half_that_reverses_the_rule(conn):
+    """§6.1's bounds are measured against a unit that can be a whole packed slide; a rule is
+    one sentence, so both sit far outside it. "Seed more than one colourway per recipient" is
+    a faithful substring of "Do not seed more than one colourway per recipient" — and a
+    guardrail breach is the one class of finding this product calls not debatable."""
+    _noted(conn, "Do not seed more than one colourway per recipient.",
+           markets=["LATAM", "APAC", "EMEA"])
+    cid = corrections.find(conn,
+                           "Do not seed more than one colourway per recipient.")["correction_id"]
+    corrections.graduate(conn, cid, confirmed_by="R. Vega")
+
+    with pytest.raises(ValueError) as e:
+        _save(conn, {"correction_id": cid,
+                     "quote": "seed more than one colourway per recipient"})
+    assert "opposite of the rule" in str(e.value)
+
+
+def test_a_length_ratio_would_not_have_caught_that(conn):
+    """Recorded because the first attempt used one: "Do not " is seven characters out of
+    fifty, so the inverted quote still measures 84% of the rule. The check has to be about the
+    negation, not about the length."""
+    rule = "Do not seed more than one colourway per recipient."
+    quote = "seed more than one colourway per recipient"
+    assert len(quote) / len(rule) > core._MIN_RULE_QUOTE
+    assert corrections.negated(rule) and not corrections.negated(quote)
+
+
+def test_a_quote_of_a_rule_cannot_elide(conn):
+    """"Never use AI imagery … approves it in writing" verifies against "Never use AI imagery
+    unless the client approves it in writing." One sentence has no room for an ellipsis that
+    is not changing what it says."""
+    rule = "Never use AI imagery unless the client approves it in writing."
+    _noted(conn, rule, markets=["LATAM", "APAC", "EMEA"])
+    cid = corrections.find(conn, rule)["correction_id"]
+    corrections.graduate(conn, cid, confirmed_by="R. Vega")
+
+    with pytest.raises(ValueError) as e:
+        _save(conn, {"correction_id": cid,
+                     "quote": "Never use AI imagery … approves it in writing."})
+    assert "elision" in str(e.value)
+
+
+def test_a_fragment_of_a_rule_is_not_the_rule(conn):
+    """The negation check catches the inversion; this catches the other half. "A content
+    angle" is a faithful quotation of a rule about four things and is not the rule — and a
+    guardrail breach citing it reads as though the rule said only that."""
+    rule = "Every deliverable needs a date, a content angle, and a collab handle."
+    _noted(conn, rule, markets=["LATAM", "APAC", "EMEA"])
+    cid = corrections.find(conn, rule)["correction_id"]
+    corrections.graduate(conn, cid, confirmed_by="R. Vega")
+
+    assert not corrections.negated(rule), "not the negation check doing the work"
+    with pytest.raises(ValueError) as e:
+        _save(conn, {"correction_id": cid, "quote": "a content angle"})
+    assert "fragment" in str(e.value)
+
+
+def test_a_faithful_whole_quote_is_accepted(conn):
+    """The bound has to let the legitimate citation through, or it is a refusal not a check."""
+    cid = _standing(conn)
+    saved = _save(conn, {"correction_id": cid, "quote": SEEDING})
+    assert saved["evaluation_id"]
 
 
 def test_a_correction_that_does_not_exist_cannot_be_cited(conn):
     with pytest.raises(ValueError) as e:
-        _save(conn, {"correction_id": "corr_invented", "quote": "Seed a single colourway"})
+        _save(conn, {"correction_id": "corr_invented", "quote": SEEDING})
     assert "not a standing correction" in str(e.value)
 
 
@@ -517,7 +582,7 @@ def test_a_finding_is_still_anchored_to_exactly_one_thing(conn):
     peru = _campaign(conn, "Peru precedent")
     with pytest.raises(ValueError) as e:
         _save(conn, {"correction_id": cid, "campaign_id": peru,
-                     "quote": "Seed a single colourway"})
+                     "quote": SEEDING})
     assert "one thing" in str(e.value)
 
 
@@ -526,11 +591,11 @@ def test_a_precedent_departure_still_cannot_cite_a_rule(conn):
     and making them interchangeable collapses the distinction §6.2 exists to draw."""
     cid = _standing(conn)
     with pytest.raises(ValueError) as e:
-        _save(conn, {"correction_id": cid, "quote": "Seed a single colourway"},
+        _save(conn, {"correction_id": cid, "quote": SEEDING},
               findings=[{"severity": "should_fix", "kind": "precedent_departure",
                          "departure": "regression", "finding": "Seeds four", "fix": "Seed one",
                          "precedent": {"correction_id": cid,
-                                       "quote": "Seed a single colourway"}}])
+                                       "quote": SEEDING}}])
     assert "campaign_id" in str(e.value)
 
 
@@ -605,6 +670,30 @@ def test_a_rule_that_resembles_nothing_suggests_nothing(conn):
     assert noted["new_correction"]["looks_like"] is None
 
 
+def test_a_prohibition_is_never_suggested_as_the_same_rule_as_its_permission(conn):
+    """With `not`/`no`/`never` treated as noise words, "Do not use AI imagery" and "Use AI
+    imagery only with approval" scored 1.0 — the suggester inverted on precisely the words
+    that invert a rule, offering to merge a prohibition with its permission."""
+    corrections.note(conn, text="Do not use AI imagery in any asset.",
+                     campaign_id=_campaign(conn, "Peru"), provenance="Peru slide 4")
+    noted = corrections.note(conn, text="Use AI imagery only with written approval.",
+                             campaign_id=_campaign(conn, "Chile"), provenance="CL slide 4")
+
+    assert noted["new_correction"]["looks_like"] is None
+
+
+def test_punctuation_does_not_merge_two_different_numbers(conn):
+    """Deleting punctuation rather than replacing it made "Post 3-4 times per week" and "Post
+    34 times per week" the same rule — an automatic merge of two different instructions, which
+    is the one thing exact matching is supposed to be too narrow to do."""
+    first = corrections.note(conn, text="Post 3-4 times per week.",
+                             campaign_id=_campaign(conn, "Peru"), provenance="p1")
+    second = corrections.note(conn, text="Post 34 times per week.",
+                              campaign_id=_campaign(conn, "Chile"), provenance="p2")
+
+    assert second["correction_id"] != first["correction_id"]
+
+
 def test_a_rule_that_merely_shares_a_word_suggests_nothing(conn):
     """The cutoff has to do work, not just the zero case. "Photograph the seeding boxes" and
     "seed a single colourway" are both about seeding boxes and are not the same rule — and a
@@ -636,6 +725,74 @@ def test_merging_moves_everywhere_it_was_said(conn):
     assert where == ["Peru slide 12", "AU brief"]
     assert corrections.describe(conn, a)["times_seen"] == 2
     assert corrections.describe(conn, a)["markets"] == ["LATAM", "APAC"]
+
+
+def test_a_later_mention_of_a_folded_wording_lands_on_the_live_rule(conn):
+    """A merged row is kept because it is somebody's words, which means it is still reachable
+    by its own wording — and the mention after the merge landed on the dead row. The rule it
+    was folded into stayed where it was, so the review's own three-market scenario failed on
+    the fourth mention, advancing nothing and asking nothing."""
+    a = corrections.note(conn, text=SEEDING, campaign_id=_campaign(conn, "Peru"),
+                         provenance="p1")["correction_id"]
+    b = corrections.note(conn, text="Seeding boxes should carry one colourway.",
+                         campaign_id=_campaign(conn, "Sydney", market="APAC"),
+                         provenance="p2")["correction_id"]
+    corrections.resolve(conn, b, decision="same_rule", same_as=a)
+
+    third = corrections.note(conn, text="Seeding boxes should carry one colourway.",
+                             campaign_id=_campaign(conn, "Dubai", market="EMEA"),
+                             provenance="p3")
+
+    assert third["correction_id"] == a
+    gate = corrections.graduation(conn, a)
+    assert (gate["campaigns"], gate["markets"]) == (3, 3)
+    assert gate["eligible"] is True
+
+
+def test_two_rules_cannot_be_folded_into_each_other(conn):
+    """A→B then B→A leaves both rows `merged`, no live row at all, and the rule gone from
+    every reader with its sightings intact and unreachable."""
+    a = corrections.note(conn, text=SEEDING, campaign_id=_campaign(conn, "Peru"),
+                         provenance="p1")["correction_id"]
+    b = corrections.note(conn, text="Seeding boxes should carry one colourway.",
+                         campaign_id=_campaign(conn, "Sydney", market="APAC"),
+                         provenance="p2")["correction_id"]
+    corrections.resolve(conn, b, decision="same_rule", same_as=a)
+
+    with pytest.raises(ValueError) as e:
+        corrections.resolve(conn, a, decision="same_rule", same_as=b)
+    assert "already one" in str(e.value)
+    assert corrections.describe(conn, a)["status"] == "provisional"
+
+
+def test_folding_into_an_already_folded_rule_reaches_the_live_one(conn):
+    """C merged into an already-merged B put C's sightings on a row nothing reads."""
+    a = corrections.note(conn, text=SEEDING, campaign_id=_campaign(conn, "Peru"),
+                         provenance="p1")["correction_id"]
+    b = corrections.note(conn, text="Seeding boxes should carry one colourway.",
+                         campaign_id=_campaign(conn, "Sydney", market="APAC"),
+                         provenance="p2")["correction_id"]
+    c = corrections.note(conn, text="Only one colourway per seeding box, please.",
+                         campaign_id=_campaign(conn, "Dubai", market="EMEA"),
+                         provenance="p3")["correction_id"]
+    corrections.resolve(conn, b, decision="same_rule", same_as=a)
+    result = corrections.resolve(conn, c, decision="same_rule", same_as=b)
+
+    assert result["correction_id"] == a
+    assert corrections.describe(conn, a)["times_seen"] == 3
+
+
+def test_a_rule_cannot_be_folded_into_one_somebody_set_aside(conn):
+    a = corrections.note(conn, text=SEEDING, campaign_id=_campaign(conn, "Peru"),
+                         provenance="p1")["correction_id"]
+    corrections.set_aside(conn, a)
+    b = corrections.note(conn, text="Seeding boxes should carry one colourway.",
+                         campaign_id=_campaign(conn, "Sydney", market="APAC"),
+                         provenance="p2")["correction_id"]
+
+    with pytest.raises(ValueError) as e:
+        corrections.resolve(conn, b, decision="same_rule", same_as=a)
+    assert "set aside" in str(e.value)
 
 
 def test_a_merged_rule_is_kept_not_deleted(conn):
@@ -680,6 +837,60 @@ def test_a_standing_rule_can_be_set_aside(conn):
         "where it used to apply is part of its record"
     assert corrections.standing_for(conn, _campaign(conn, "Colombia"))["standing"] == []
     assert corrections.sightings(conn, cid), "what was said is kept"
+
+
+def test_a_campaign_id_that_does_not_exist_is_refused_before_anything_is_written(conn):
+    """The sighting carries a foreign key and the correction row is committed first, so an id
+    that does not exist raised IntegrityError — not a ValueError, so the caller saw "Error
+    executing tool" with the reason discarded — and left a correction with no sightings and no
+    provenance behind. That is an opinion in a text field, which is what this module refuses.
+    The model supplying the id is now the ordinary path, because `after_upload` prefills it."""
+    with pytest.raises(ValueError) as e:
+        corrections.note(conn, text=SEEDING, campaign_id="camp_invented",
+                         provenance="somewhere")
+    assert "not a record in this library" in str(e.value)
+    assert corrections.all_of_them(conn) == [], "nothing half-written"
+
+
+def test_a_rule_longer_than_a_rule_is_refused(conn):
+    """Every other model-authored field in this codebase is measured, and this one travels into
+    the evidence package and then into saved findings."""
+    with pytest.raises(ValueError) as e:
+        corrections.note(conn, text="Seed one colourway. " * 40,
+                         campaign_id=_campaign(conn, "Peru"), provenance="p")
+    assert "record them separately" in str(e.value)
+
+
+def test_what_each_market_actually_said_is_kept(conn):
+    """After a merge the canonical row carries one wording and the sightings carry the others —
+    §8.1's canonical/raw_key split, and what makes the fold checkable rather than a claim
+    nobody can audit."""
+    a = corrections.note(conn, text=SEEDING, campaign_id=_campaign(conn, "Peru"),
+                         provenance="p1")["correction_id"]
+    b = corrections.note(conn, text="Seeding boxes should carry one colourway.",
+                         campaign_id=_campaign(conn, "Sydney", market="APAC"),
+                         provenance="p2")["correction_id"]
+    corrections.resolve(conn, b, decision="same_rule", same_as=a)
+
+    assert [s["said_as"] for s in corrections.sightings(conn, a)] == \
+        [SEEDING, "Seeding boxes should carry one colourway."]
+
+
+def test_a_rule_set_aside_by_mistake_can_be_reopened(conn):
+    """Setting aside is a decision, and decisions are sometimes wrong. §8.2's
+    `different_measure` reopens an ignored measure; a correction with no way back at all was
+    the drift."""
+    _noted(conn, SEEDING, markets=["LATAM", "APAC", "EMEA"])
+    cid = corrections.find(conn, SEEDING)["correction_id"]
+    corrections.graduate(conn, cid, confirmed_by="R. Vega")
+    corrections.set_aside(conn, cid)
+
+    corrections.reopen(conn, cid)
+
+    assert corrections.describe(conn, cid)["status"] == "provisional", \
+        "not straight back to standing — that is the gate's question and a person's answer"
+    assert corrections.standing_for(conn, _campaign(conn, "Next"))["standing"] == []
+    assert corrections.graduation(conn, cid)["eligible"] is True
 
 
 def test_a_mention_with_no_campaign_says_it_counts_towards_nothing(conn):
@@ -776,7 +987,7 @@ def test_a_learned_rule_is_not_called_a_rule_they_wrote(conn):
     person confirmed it — stating that back to the customer as their own authored rule is this
     review's central failure, arriving in the voicing rather than in a finding."""
     cid = _standing(conn)
-    saved = _save(conn, {"correction_id": cid, "quote": "Seed a single colourway"})
+    saved = _save(conn, {"correction_id": cid, "quote": SEEDING})
 
     said = saved["note"]
     assert "a rule they wrote was broken" not in said, \
@@ -791,7 +1002,7 @@ def test_the_server_still_argues_with_a_verdict_resting_on_a_learned_rule(conn):
     evidence that could ever catch a wrong inference, and suppressing the search switches off
     the one check watching it."""
     cid = _standing(conn)
-    saved = _save(conn, {"correction_id": cid, "quote": "Seed a single colourway"})
+    saved = _save(conn, {"correction_id": cid, "quote": SEEDING})
 
     assert saved["disconfirming"]["code"] != "verdict_rests_on_a_rule"
 

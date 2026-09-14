@@ -16,7 +16,13 @@ none. So the loop lives here, once, and both callers pass their counts into it.
 What is genuinely different stays with each caller: a measure is a key with numeric values and
 a correction is a sentence with provenance. What is the same is the whole of the loop —
 provisional on first sight, counted by CAMPAIGN, gated on breadth as well as count, confirmed
-by a person, retired when it stops appearing, never deleted.
+by a person, and never deleted once recorded.
+
+The one place the two deliberately part company is what happens when something stops coming
+up. For a measure, absence is disuse and §8.5 demotes it. For a rule, absence of repetition is
+usually COMPLIANCE — a client stops restating a rule when the agency starts following it — so
+§8.6 asks instead of demoting. Same gate, different signal, and `set_aside` is the status that
+branch has always had.
 
 The three thresholds live here for the same reason. A constant re-declared beside the one it
 mirrors is the copy that drifts, and `metrics` and `corrections` both read these.
