@@ -549,3 +549,79 @@ def test_the_classified_items_are_capped(conn, tmp_path):
     assert summary["items_truncated"] is True
     assert summary["items_total"] == len(subjects)
     assert summary["counts"]["neutral"] == len(subjects), "the counts stay complete"
+
+
+# ── a saved verdict can be read against the figure it rested on ─────────────
+
+def test_a_saved_verdict_keeps_the_drift_figure_it_was_written_against(conn, tmp_path):
+    """`execution_drift` is REWRITTEN whenever the answer changes — results arriving,
+    photographs arriving, a classification being made. That is right for the live reading and
+    wrong for a saved one: a verdict written when a cited campaign read `never_checked` is
+    read back months later beside a row that now says `drifted`, and nothing on the record
+    says the judgment never saw it. The figure is stamped onto the evaluation at save time,
+    the same way §9.4 stamps `outcome_known` at the moment of the judgment."""
+    cited = _campaign(conn, "Peru", market="LATAM")
+    core.add_metrics(conn, campaign_id=cited, structured={"roas": 3.9}, confirm=True)
+    assert store.execution_drift_for(conn, cited)["status"] == "never_checked"
+
+    saved = core.save_evaluation(
+        conn, subject_title="Dubai v2", verdict="approve",
+        summary="Rests on Peru, which nobody had checked against its own brief.",
+        cited_ids=[cited], findings=[])
+
+    # The photographs turn up afterwards, which is the ordinary order of events.
+    _ran_differently(conn, cited, tmp_path)
+    assert store.execution_drift_for(conn, cited)["status"] == "drifted"
+
+    record = store.get_evaluation(conn, saved["evaluation_id"])
+    stamped = {e["campaign_id"]: e for e in record["evidence"]["execution_at_save"]}
+    assert stamped[cited]["status"] == "never_checked", (
+        "the saved verdict has to keep what it actually rested on")
+    assert core._execution_note(conn, cited)["status"] == "drifted", "the live reading moves on"
+
+
+def test_the_stamp_covers_every_cited_campaign(conn, tmp_path):
+    faithful = _campaign(conn, "Peru", market="LATAM")
+    _ran_as_briefed(conn, faithful, tmp_path, tag="p")
+    core.add_metrics(conn, campaign_id=faithful, structured={"roas": 3.9}, confirm=True)
+    drifted = _campaign(conn, "UAE", market="EMEA")
+    _ran_differently(conn, drifted, tmp_path, tag="u")
+    core.add_metrics(conn, campaign_id=drifted, structured={"roas": 4.2}, confirm=True)
+
+    saved = core.save_evaluation(
+        conn, subject_title="Dubai v2", verdict="approve",
+        summary="Rests on one faithful precedent and one that drifted.",
+        cited_ids=[faithful, drifted], findings=[])
+
+    stamped = {e["campaign_id"]: e["status"]
+               for e in store.get_evaluation(conn, saved["evaluation_id"])[
+                   "evidence"]["execution_at_save"]}
+    assert stamped == {faithful: "as_briefed", drifted: "drifted"}
+
+
+def test_a_verdict_citing_nothing_stamps_nothing_rather_than_an_empty_claim(conn):
+    saved = core.save_evaluation(
+        conn, subject_title="Dubai v2", verdict="approve",
+        summary="Rests on nothing in this library at all.", cited_ids=[], findings=[])
+
+    evidence = store.get_evaluation(conn, saved["evaluation_id"])["evidence"]
+    assert "execution_at_save" not in evidence
+
+
+def test_the_stamp_reaches_a_later_reader(conn, tmp_path):
+    """A stamp nobody can read back cannot tell anyone what a judgment rested on, which is the
+    only thing it is for — the same failure §2.4 fixed for the findings themselves."""
+    cited = _campaign(conn, "Peru", market="LATAM")
+    core.add_metrics(conn, campaign_id=cited, structured={"roas": 3.9}, confirm=True)
+    saved = core.save_evaluation(
+        conn, subject_title="Dubai v2", verdict="approve",
+        summary="Rests on Peru, which nobody had checked against its own brief.",
+        cited_ids=[cited], findings=[])
+    _ran_differently(conn, cited, tmp_path)
+
+    read_back = core.get_evaluation(conn, evaluation_id=saved["evaluation_id"])
+
+    stamped = read_back["evidence"]["execution_at_save"][0]
+    assert stamped["campaign_id"] == cited
+    assert stamped["status"] == "never_checked"
+    assert "not the same as it having run faithfully" in stamped["what_it_means"]

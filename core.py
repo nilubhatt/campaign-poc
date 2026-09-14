@@ -1461,6 +1461,26 @@ def _window_check(conn, retrieval: Optional[str], cited_ids: Optional[list], *,
     }
 
 
+def _execution_at_save(conn, cited_ids: Optional[list]) -> dict:
+    """How faithfully each cited campaign had been shown to run, at the moment of the verdict.
+
+    Absent rather than empty when nothing was cited: an `execution_at_save: []` beside a
+    verdict reads as "we checked the precedent's execution and found none of it remarkable",
+    when the truth is there was no precedent to check. Every other empty list in this file is
+    settled the same way.
+    """
+    cited = list(dict.fromkeys(cited_ids or []))
+    stamped = []
+    for cid in cited:
+        if store.get_campaign(conn, cid) is None:
+            continue
+        note = _execution_note(conn, cid)
+        stamped.append({"campaign_id": cid, "status": note["status"], "score": note["score"],
+                        "classified": note["classified"],
+                        "what_it_means": note["what_it_means"]})
+    return {"execution_at_save": stamped} if stamped else {}
+
+
 def _evidence_strength(conn, *, cited_ids: Optional[list], text: str) -> dict:
     """What this judgment rests on, counted by the server (§6.6, D3).
 
@@ -2683,6 +2703,13 @@ def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
                              text="\n".join([subject_title, summary])),
         "disconfirming": disconfirming,
         **window,
+        # §9.5's figure, STAMPED — the live `execution_drift` row is rewritten whenever the
+        # answer changes (results arriving, photographs arriving, a classification being
+        # made), which is right for the current reading and wrong for a saved one. A verdict
+        # written when a cited campaign read `never_checked` is read back beside a row that
+        # now says `drifted`, with nothing saying the judgment never saw it. Same reasoning as
+        # §9.4's `outcome_known`: record what the judgment could see at the moment it was made.
+        **_execution_at_save(conn, cited_ids),
     }
     if missing:
         # §5.3 lives alongside it, and the two are deliberately different questions: this says

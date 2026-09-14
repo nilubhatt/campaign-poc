@@ -148,8 +148,13 @@ CREATE TABLE IF NOT EXISTS execution_drift (
     -- classification being made. It is a cache of the current reading, not a snapshot of what a
     -- past judgment rested on — an earlier comment here claimed the latter, which stopped being
     -- true the moment there were three call sites, and a false claim carrying the server's
-    -- authority is the failure this product is written against. D128 owns making it versioned
-    -- so a saved verdict can be read against the figure that existed when it was written.
+    -- authority is the failure this product is written against.
+    --
+    -- A saved verdict therefore does NOT read its precedents' drift from here: `save_evaluation`
+    -- stamps the figure for every cited campaign into the evaluation's own `evidence`
+    -- (`execution_at_save`), the same way §9.4 stamps `outcome_known` at the moment of a
+    -- judgment. Otherwise a verdict written when a cited campaign read `never_checked` is read
+    -- back beside a row that now says `drifted`, with nothing recording that it never saw it.
     campaign_id   TEXT PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
     score         REAL,                  -- NULL when nothing was ever checked
     relative      REAL,
