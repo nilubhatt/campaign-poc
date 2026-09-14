@@ -23,10 +23,17 @@ Three layers, in order, because they are three different claims:
    somebody to retype a word that will be rejected too.
 
 What this deliberately does NOT do is guess between values that mean different things.
-`target` is the reviewer's own example: a target is what somebody wants to happen and a
-prediction is what this library expects to happen. Filing one as the other corrupts every
-later reconciliation, which exists to compare what was predicted against what occurred. So
-that one teaches rather than normalises, and says why.
+`target` was the reviewer's own example, and it is worth following what happened to it. A
+target is what somebody wants to happen and a prediction is what this library expects to
+happen; filing one as the other corrupts every reconciliation, which exists to compare what
+was predicted against what occurred. So it was refused, with the distinction spelled out and
+the advice to put the number in the campaign's prose.
+
+§8.1/D33 then built the place it belonged — a target is a `metric_type` now, comparable
+against the actual — and the refusal outlived it. It kept telling people to put a number into
+freeform text for two more items, which is the drift this file exists to prevent, arriving in
+the file itself. `target` normalises now; the DISTINCTION it was refused for is unchanged and
+is why it is its own value rather than a synonym of `predicted`.
 """
 from __future__ import annotations
 
@@ -139,26 +146,26 @@ METRIC_TYPE_SYNONYMS = {
     "projection": "predicted",
     "estimate": "predicted",
     "expected": "predicted",
-    # NOTE: "target" is deliberately absent. See _EXPLAIN below and the module docstring.
+    # §8.1/D33 made `target` a value of its own, so these now normalise to it rather than
+    # being refused. They are NOT synonyms of `predicted`, and that distinction is the reason
+    # the refusal existed: a prediction is what this library expects to happen and is what
+    # reconciliation scores itself against, while a target is what somebody wanted. Filing one
+    # as the other scores the library against an ambition.
+    "goal": "target",
+    "objective": "target",
+    "kpi_target": "target",
+    "aim": "target",
 }
 
 # Values that look like a near-miss but mean something else, with the distinction spelled
 # out. Guessing these is how a library quietly fills up with claims nobody made.
 _EXPLAIN = {
-    ("metric_type", "target"): (
-        "A target is what you want to happen; 'predicted' is what this library expects to "
-        "happen, and reconciliation later compares predictions against actuals. Recording a "
-        "target as a prediction would score the library against somebody's ambition. If it "
-        "is genuinely a forecast, use 'predicted'. If it is a goal, it belongs in the "
-        "campaign's detail via update_campaign — which REPLACES detail, so read the current "
-        "one first and send it back with the target added."
-    ),
-    ("metric_type", "goal"): (
-        "A goal is what you want to happen; 'predicted' is what this library expects to "
-        "happen. A goal belongs in the campaign's detail via update_campaign — which "
-        "REPLACES detail, so read the current one first and send it back with the goal "
-        "added."
-    ),
+    # `target` is a value now (§8.1/D33), not a near-miss. The explanation that used to live
+    # here sent people to put the number in `detail` "where freeform text belongs" — advice
+    # that was right when there was nowhere else for it and wrong the moment D33 built the
+    # place. It is kept below as a DISTINCTION rather than a refusal, because the reason it was
+    # refused is still true: a target is not a prediction, and weighing one as the other scores
+    # the library against somebody's ambition.
     ("status", "cancelled"): (
         "This library has no status for a campaign that was called off. 'concluded' means it "
         "ran to the end, so filing a cancelled campaign there would count it in every later "
@@ -178,7 +185,8 @@ _EXPLAIN = {
     ),
     ("metric_type", "benchmark"): (
         "A benchmark is somebody else's number. This field records this campaign's own "
-        "'actual' results or its 'predicted' ones."
+        "figures: its 'actual' results, its 'predicted' ones, or the 'target' it was aiming "
+        "at. Somebody else's number belongs in the campaign's detail, as context."
     ),
 }
 

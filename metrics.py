@@ -87,13 +87,34 @@ _UNIT_SUFFIXES = {"pct": "percent", "percent": "percent", "usd": "USD",
                   "s": None, "sec": "seconds", "seconds": "seconds", "ms": "milliseconds"}
 # Scope words that appear in keys the same way. `impressions_upper_funnel` is impressions.
 _SCOPES = ("upper_funnel", "lower_funnel", "mid_funnel", "organic", "paid", "social",
-           "local", "combined", "total", "stated", "planned", "actual")
+           "local", "combined", "total", "stated")
+# A METRIC TYPE spelled into the column name, which is the ordinary shape of a KPI workbook:
+# "Target Reach" beside "Actual Reach". Read as a type rather than left in the stem, because
+# `target_reach` decorates to a stem ending in `_reach` and was therefore filed as a measured
+# reach — a target counted as a result, which is §8.1's founding distinction, arriving through
+# the door §8.8 opened. It is also the only way the sibling-column shape can be expressed at
+# all, since a row carries one `metric_type` for every column in it.
+_KEY_METRIC_TYPES = {"target": "target", "goal": "target", "objective": "target",
+                     "actual": "actual", "achieved": "actual", "delivered": "actual",
+                     "predicted": "predicted", "forecast": "predicted",
+                     "projected": "predicted"}
 # Whose figure this is. The review's clearest schema failure, given its own column.
 _SOURCES = {"stated": "stated", "recomputed": "recomputed", "reported": "stated",
             "corrected": "recomputed", "verified": "recomputed"}
 _MONTHS = ("january", "february", "march", "april", "may", "june", "july", "august",
            "september", "october", "november", "december",
            "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec")
+
+
+# Column names that are not measurements. A KPI workbook carries identifiers and dimensions
+# beside its measures — Month, Week, Store #, Campaign — and every one of them is numeric or
+# short, so each became a provisional KPI measure that accrued sightings and could graduate.
+# That is the "forty new keys" drift, produced by the tool built to stop it.
+_NOT_A_MEASUREMENT = re.compile(
+    r"^(id|ids|no|number|code|ref|reference|key|row|index|store|shop|site|branch|region|"
+    r"market|country|city|campaign|brand|partner|owner|month|week|day|year|quarter|date|"
+    r"period|start|end|launch|q[1-4]|h[12]|fy)(_.*)?$"
+    r"|.*_(id|no|number|code|ref|date)$")
 
 
 def _tokens(key: str) -> list:
@@ -107,11 +128,13 @@ def _strip_decoration(key: str) -> tuple:
     real damage: a currency in the key made two budgets incomparable, a scope in the key made
     impressions unqueryable, and a source in the key turned a correction into a new measure.
     """
-    unit = source = None
+    unit = source = metric_type = None
     scope = []
     kept = []
     for token in _tokens(key):
-        if token in _CURRENCIES:
+        if token in _KEY_METRIC_TYPES and not metric_type:
+            metric_type = _KEY_METRIC_TYPES[token]
+        elif token in _CURRENCIES:
             unit = token.upper()
         elif token in _UNIT_SUFFIXES and kept:
             # Only once something is already in `kept`: a key that IS just "pct" is not a
@@ -125,7 +148,7 @@ def _strip_decoration(key: str) -> tuple:
             continue                       # a period, not a measure
         else:
             kept.append(token)
-    return "_".join(kept), unit, source, "_".join(scope) or None
+    return "_".join(kept), unit, source, "_".join(scope) or None, metric_type
 
 
 def _lookup(registry: dict, stem: str, raw: str) -> Optional[str]:
@@ -137,6 +160,14 @@ def _lookup(registry: dict, stem: str, raw: str) -> Optional[str]:
             return canonical
         # A key that ENDS in an alias after decoration: `stated_combined_influencer_reach`
         # decorates down to `influencer_reach`, which is one.
+        #
+        # NOT against a bare provisional entry, though. A provisional measure is one nobody
+        # has confirmed, and treating it as an alias ROOT asserts a relationship nobody agreed
+        # to: `dwell` and `queue_dwell` arriving in one workbook were silently filed as one
+        # measure, with dict ordering deciding which — the silent alias merge §5.1, §8.2 and
+        # §8.8 all refuse. An exact match still holds, because that is the same name.
+        if entry["status"] == "provisional" and not entry["aliases"]:
+            continue
         for name in names:
             if stem == name or stem.endswith("_" + name) or stem.startswith(name + "_"):
                 return canonical
@@ -161,7 +192,7 @@ def _registry(conn) -> dict:
 
 def canonical(conn, key: str) -> Optional[str]:
     """Which measure this key names. None when nothing in the registry claims it (§8.2)."""
-    stem, _unit, _source, _scope = _strip_decoration(key)
+    stem, _unit, _source, _scope, _type = _strip_decoration(key)
     return _lookup(_registry(conn), stem, key)
 
 
@@ -171,7 +202,7 @@ def unit_of(conn, key: str) -> Optional[str]:
     `budget` is a currency; `total_budget_mxn` is MXN. The registry knows the kind and the key
     knows the instance, and losing the second is what made two budgets incomparable.
     """
-    _stem, unit, _source, _scope = _strip_decoration(key)
+    _stem, unit, _source, _scope, _type = _strip_decoration(key)
     if unit:
         return unit
     name = canonical(conn, key)
@@ -263,6 +294,12 @@ def unanswered(conn) -> list:
             if entry["status"] == "provisional" and not entry["answered"]]
 
 
+def is_a_measurement(key: str) -> bool:
+    """Whether a column name is a measure at all, rather than an identifier or a dimension."""
+    stem, _u, _s, _sc, _t = _strip_decoration(key)
+    return not _NOT_A_MEASUREMENT.match(stem or "_".join(_tokens(key)))
+
+
 def record(conn, *, campaign_id: str, key: str, value, metric_type: str = "actual") -> dict:
     """Store one measurement, typed and canonicalised.
 
@@ -273,7 +310,18 @@ def record(conn, *, campaign_id: str, key: str, value, metric_type: str = "actua
     """
     import store
 
-    stem, unit, source, scope = _strip_decoration(key)
+    stem, unit, source, scope, in_key_type = _strip_decoration(key)
+    # A type spelled into the column wins over the row's default, and CONFLICTS with an
+    # explicit one rather than being quietly overridden — "Target Reach" in a row marked
+    # actual is two claims about the same number, and picking one silently is how a target
+    # becomes a result.
+    if in_key_type and in_key_type != metric_type:
+        if metric_type not in ("actual", None) :
+            raise ValueError(
+                f"{key!r} says {in_key_type!r} and the row says {metric_type!r}. One number "
+                f"cannot be both — split them into separate rows, or drop the word from the "
+                f"column name.")
+        metric_type = in_key_type
     name = _lookup(_registry(conn), stem, key)
     asked = None
     if name is None:
@@ -302,10 +350,13 @@ def record(conn, *, campaign_id: str, key: str, value, metric_type: str = "actua
         unit=unit or (describe(conn, name) or {}).get("unit"),
         source=source or "stated", scope=scope, metric_type=metric_type)
     store.touch_metric(conn, name, campaign_id=campaign_id)
-    # §8.5: a retired measure somebody has recorded again is expected again. It graduated once
+    # §8.5: a retired measure somebody has MEASURED again is expected again. It graduated once
     # and a person confirmed it; asking them a second time because a quarter went by is asking
-    # the same question twice.
-    store.revive_metric(conn, name)
+    # the same question twice. A target is not a sighting of the measure being used — it is
+    # somebody writing down what they hope for, and reviving a standing requirement on that is
+    # the same mistake the gate made one function up.
+    if metric_type == "actual":
+        store.revive_metric(conn, name)
     result = {"metric": name, "value": number, "unit": unit, "source": source or "stated"}
     # §8.5, on the write that changes staleness rather than on a read. A campaign reporting its
     # measures is exactly the event that can make another measure's absence a pattern, and it
@@ -352,6 +403,107 @@ def _resolution_offers(name: str, looks_like: Optional[str]) -> list:
             "not about the data.",
         consent="ask", measure=name, decision="ignore"))
     return actions.trim(offers)
+
+
+def diff_columns(conn, rows: list) -> dict:
+    """Classify a workbook's COLUMN VOCABULARY against the registry, writing nothing (§8.8).
+
+    *"`bulk_import_metrics` should diff incoming columns against the registry and report what
+    is new, what it thinks are aliases, and what it cannot type — before writing anything. An
+    import that silently accepts 40 new keys is how the current drift started."*
+
+    Four answers, and each one is a different decision for the reader:
+
+      • **known** — it canonicalises to a measure already on file. Nothing to decide, and
+        saying which measure is what lets somebody check the claim.
+      • **looks_like** — unknown, but it resembles something. A SUGGESTION, never a merge:
+        §5.1 and §8.2 both settled that a wrong alias silently merges two measures that are
+        not the same, and a workbook is the worst place to get that wrong because it arrives
+        forty columns at a time.
+      • **new** — unknown and resembling nothing. It will be recorded provisionally and asked
+        about, exactly as a single unfamiliar key is.
+      • **cannot_type** — the values are not numbers. Otherwise this is discovered row by row
+        as the import half-fails, which is the reading this item replaces.
+
+    Once per COLUMN, however many rows carry it. A vocabulary reported forty times is the
+    row-at-a-time view the review is describing.
+    """
+    registry = _registry(conn)
+    seen: dict = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        structured = row.get("structured") or {}
+        if not isinstance(structured, dict):
+            # One malformed row killed the whole preview AND the whole import with an
+            # AttributeError — not a ValueError, so over the protocol it arrived as "Error
+            # executing tool" with no row index, against a docstring promising that a
+            # malformed row "never crashes or blocks the rest of the batch".
+            continue
+        for key, value in structured.items():
+            entry = seen.setdefault(key, {"column": key, "rows": 0, "bad": None})
+            entry["rows"] += 1
+            if entry["bad"] is None:
+                try:
+                    _as_number(value, key)
+                except ValueError:
+                    entry["bad"] = value
+
+    # What the batch itself is about to register, so a column can be compared against the ones
+    # beside it and not only against the registry. Without this, `dwell` and `queue_dwell` in
+    # one workbook were both classified `new` and then SILENTLY MERGED on write — `_lookup`'s
+    # suffix rule matching the second against a provisional entry the first had created
+    # seconds earlier, with dict ordering deciding which. A silent alias merge is the one
+    # thing §5.1, §8.2 and this item all refuse.
+    batch_stems: dict = {}
+    for key in seen:
+        stem, _u, _s, _sc, _t = _strip_decoration(key)
+        batch_stems.setdefault(stem or "_".join(_tokens(key)), key)
+
+    known, maybe, fresh, cannot, not_measures = [], [], [], [], []
+    for key, entry in seen.items():
+        stem, unit, _source, _scope, in_key_type = _strip_decoration(key)
+        name = _lookup(registry, stem, key)
+        provisional = stem or "_".join(_tokens(key))
+        if name is None and _NOT_A_MEASUREMENT.match(provisional):
+            # A KPI workbook carries identifiers and dimensions beside its measures — Month,
+            # Week, Store #, Quarter. They are numeric, so every one of them became a
+            # provisional KPI measure that accrued sightings and could graduate: the "forty
+            # new keys" drift, produced by the tool built to stop it.
+            not_measures.append({
+                "column": key, "rows": entry["rows"],
+                "what_it_means": (
+                    f"{key} looks like a dimension or an identifier rather than something "
+                    f"measured, so it is not imported as a measure. If it really is a KPI, "
+                    f"rename the column.")})
+            continue
+        if entry["bad"] is not None:
+            cannot.append({"column": key, "rows": entry["rows"],
+                           "example": repr(entry["bad"]),
+                           "what_it_means": (
+                               f"{key} carries {entry['bad']!r}, which is not a number. The "
+                               f"other figures in those rows are still imported; this column "
+                               f"is not. Put the words in `detail`, where freeform text "
+                               f"belongs.")})
+        elif name:
+            known.append({"column": key, "rows": entry["rows"], "measure": name,
+                          "unit": unit or registry[name]["unit"]})
+        else:
+            # Against the batch as well as the registry.
+            sibling = next((other for other_stem, other in batch_stems.items()
+                            if other != key and other_stem != provisional
+                            and (provisional.endswith("_" + other_stem)
+                                 or other_stem.endswith("_" + provisional))), None)
+            resembles = _suggestion(conn, provisional) or (
+                _strip_decoration(sibling)[0] if sibling else None)
+            if resembles:
+                maybe.append({"column": key, "rows": entry["rows"],
+                              "measure": provisional, "looks_like": resembles,
+                              "next_actions": _resolution_offers(provisional, resembles)})
+            else:
+                fresh.append({"column": key, "rows": entry["rows"], "measure": provisional})
+    return {"known": known, "looks_like": maybe, "new": fresh, "cannot_type": cannot,
+            "not_measures": not_measures}
 
 
 def _as_number(value, key: str) -> float:
@@ -449,8 +601,19 @@ def across_library(conn, name: str) -> list:
     return store.metric_values(conn, metric=name)
 
 
-def campaigns_with(conn, name: str) -> list:
-    return sorted({r["campaign_id"] for r in across_library(conn, name)})
+def campaigns_with(conn, name: str, *, measured_only: bool = False) -> list:
+    """Which campaigns have this measure on file.
+
+    `measured_only` is what the GATE asks. §8.3 counts campaigns that CARRIED a measure, and a
+    campaign that recorded the figure it was aiming at has not measured anything — so three
+    target rows graduated a measure nobody had ever measured, and `expected_check` (which
+    correctly counts actuals only) then reported those same three campaigns as missing it. The
+    two halves of one item disagreeing about what counts.
+    """
+    rows = across_library(conn, name)
+    if measured_only:
+        rows = [r for r in rows if r["metric_type"] == "actual"]
+    return sorted({r["campaign_id"] for r in rows})
 
 
 # ── §8.3: the graduation gate ────────────────────────────────────────────────
@@ -483,7 +646,8 @@ def graduation(conn, name: str) -> dict:
         raise ValueError(f"{name!r} is not a measure on file")
     gate = learning.gate(
         name=name, noun="metric",
-        campaigns=learning.distinct_briefs(conn, campaigns_with(conn, name)),
+        campaigns=learning.distinct_briefs(conn, campaigns_with(conn, name,
+                                                                measured_only=True)),
         markets=entry["markets"], status=entry["status"],
         expected_in=entry["expected_in"], confirmed_by=entry.get("confirmed_by"))
     out = {**gate, "measure": gate["name"]}

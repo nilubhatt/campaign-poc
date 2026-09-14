@@ -130,9 +130,13 @@ Status = _enum("proposed", "in_flight", "concluded")
 in_flight — live, running, in market, in flight, activated.
 concluded — finished, wrapped, completed, ended, done, post-campaign."""
 
-MetricType = _enum("actual", "predicted")
+MetricType = _enum("actual", "predicted", "target")
 """actual — measured, real, post-campaign, what happened.
-predicted — forecast, projected, estimated, target, what was expected."""
+predicted — forecast, projected, estimated, what this library expected to happen.
+target — the number somebody was aiming at. NOT a prediction: reconciliation scores the
+library against what it predicted, and scoring it against somebody's ambition instead would
+make every calibration figure meaningless. `against_target` compares a target to the actual,
+which is the "did we hit our number" question a marketer most wants answered."""
 
 # Suggested tag vocabulary (not enforced — tags stay freeform, this is guidance for the
 # conversational intake). Two independent axes that commonly co-occur on the same campaign
@@ -509,13 +513,16 @@ def add_metrics(campaign_id: str, detail: Optional[str] = None,
 
     detail is freeform (CTR, ROI, conversions, qualitative learnings, or just what the user
     said); structured is an optional machine-readable object for numbers you extracted.
-    metric_type is 'actual' (post-conclusion results, the default) or 'predicted' (this
-    library's own forecast, which reconciliation later scores against the actuals) —
-    reconcile_evaluation only pulls 'actual' metrics automatically.
+    metric_type is 'actual' (post-conclusion results, the default), 'predicted' (this
+    library's own forecast, which reconciliation later scores against the actuals), or
+    'target' (the number somebody was AIMING at) — reconcile_evaluation only pulls 'actual'
+    metrics automatically.
 
-    A TARGET is neither, and is rejected on purpose: a target is what somebody wants to
-    happen, and recording it as a prediction would score this library against their ambition.
-    A goal belongs in the campaign's `detail`."""
+    A target is not a prediction and must never be recorded as one: reconciliation scores this
+    library against what it PREDICTED, and scoring it against somebody's ambition instead
+    would make every calibration figure meaningless. It is its own value for exactly that
+    reason. `against_target` then answers "did we hit our number", which is the comparison a
+    marketer most wants."""
     conn = store.connect()
     try:
         return core.add_metrics(conn, campaign_id, detail=detail, structured=structured,
@@ -526,16 +533,34 @@ def add_metrics(campaign_id: str, detail: Optional[str] = None,
 
 @mcp.tool()
 @_catch_value_errors
-def bulk_import_metrics(rows: list) -> dict:
+def bulk_import_metrics(rows: list, confirm: bool = False) -> dict:
     """Load a KPI workbook in one call instead of one add_metrics per row. Each row is an
     object identifying its campaign by campaign_id (preferred) or title (exact,
     case-insensitive — ambiguous or unmatched titles are reported as errors, never guessed),
     plus detail/structured/metric_type like add_metrics. Read the workbook yourself (CSV,
-    pasted table, whatever you have) and pass the rows here. Returns {imported, errors} —
-    valid rows import even if others fail."""
+    pasted table, whatever you have) and pass the rows here.
+
+    **It previews by default and writes nothing.** A workbook carries a column VOCABULARY, and
+    this is the one moment to look at it as a vocabulary rather than forty times, one key at a
+    time, after the writes. `columns` classifies every column four ways:
+
+      • `known`        — already a measure on file; it says which.
+      • `looks_like`   — resembles one. A SUGGESTION, never applied: two names folded together
+                         wrongly make one measure out of two different things, and a workbook
+                         is the worst place for that because it arrives forty columns at once.
+      • `new`          — unfamiliar. Recorded provisionally and asked about, one at a time.
+      • `cannot_type`  — the values are not numbers, so the column is not imported. The other
+                         figures in those rows are.
+
+    Show the user what the columns mean before importing — especially the aliases, which are
+    theirs to accept or refuse. Then send the SAME rows with confirm=True.
+
+    Returns {imported, errors, columns}. Valid rows import even if others fail, and a rejected
+    metric_type carries `field`, `valid` and `suggestion` so the retry is data rather than
+    prose to parse."""
     conn = store.connect()
     try:
-        return store.bulk_import_metrics(conn, rows)
+        return store.bulk_import_metrics(conn, rows, confirm=confirm)
     finally:
         conn.close()
 

@@ -94,18 +94,21 @@ def test_a_value_with_no_near_match_still_gets_the_valid_set():
     assert "did you mean" not in message.lower(), "nothing here is close to 'bananas'"
 
 
-def test_target_is_not_silently_recorded_as_a_prediction():
-    """The reviewer's own example, and the one place normalising would be wrong. A target is
-    what somebody wants to happen; a prediction is what this library expects to happen.
-    Filing one as the other corrupts every later reconciliation — which compares what was
-    predicted against what occurred — so this teaches instead of guessing."""
-    with pytest.raises(ValueError) as exc:
-        enums.normalise("target", field="metric_type", valid=store.VALID_METRIC_TYPES,
-                        synonyms=enums.METRIC_TYPE_SYNONYMS)
+def test_target_is_still_never_a_prediction():
+    """The reviewer's own example, and the distinction has not changed even though the answer
+    has. A target is what somebody WANTS to happen; a prediction is what this library expects
+    to happen, and reconciliation scores the library against its predictions. Filing one as the
+    other would score it against somebody's ambition.
 
-    message = str(exc.value).lower()
-    assert "actual" in message and "predicted" in message
-    assert "target" in message and "aim" in message or "want" in message or "goal" in message
+    §8.1/D33 built the place a target belongs — a `metric_type` of its own, comparable against
+    the actual — so it is accepted now. What it must never be is folded into `predicted`."""
+    assert enums.normalise("target", field="metric_type", valid=store.VALID_METRIC_TYPES,
+                           synonyms=enums.METRIC_TYPE_SYNONYMS) == "target"
+    assert enums.normalise("goal", field="metric_type", valid=store.VALID_METRIC_TYPES,
+                           synonyms=enums.METRIC_TYPE_SYNONYMS) == "target"
+    assert "target" not in [v for k, v in enums.METRIC_TYPE_SYNONYMS.items()
+                            if v == "predicted"]
+    assert enums.METRIC_TYPE_SYNONYMS["forecast"] == "predicted"
 
 
 # ── through the real call paths ─────────────────────────────────────────────
@@ -185,7 +188,7 @@ def test_a_preview_validates_what_it_is_previewing(conn):
     cid = store.insert_campaign(conn, title="Colombia")
 
     with pytest.raises(ValueError) as exc:
-        core.add_metrics(conn, cid, metric_type="target", detail="CTR 2%", confirm=False)
+        core.add_metrics(conn, cid, metric_type="Targett", detail="CTR 2%", confirm=False)
 
     assert "predicted" in str(exc.value)
 
@@ -260,20 +263,35 @@ def test_bulk_import_is_as_forgiving_as_a_single_write(conn):
     cid = store.insert_campaign(conn, title="Colombia")
 
     result = store.bulk_import_metrics(conn, [
-        {"campaign_id": cid, "metric_type": "Results", "detail": "CTR 1.2%"}])
+        {"campaign_id": cid, "metric_type": "Results", "detail": "CTR 1.2%"}], confirm=True)
 
     assert result["imported"] == 1
     assert store.get_campaign(conn, cid)["metrics"][0]["metric_type"] == "actual"
 
 
 def test_bulk_import_teaches_the_same_way_too(conn):
+    """"Targett" rather than "target": the latter is a value now (§8.1/D33). A typo still has
+    to teach, and on the batch path it has to carry the retry as DATA — D47, which is the one
+    thing this path had that the single write did not."""
     cid = store.insert_campaign(conn, title="Colombia")
 
     result = store.bulk_import_metrics(conn, [
-        {"campaign_id": cid, "metric_type": "target", "detail": "CTR 2%"}])
+        {"campaign_id": cid, "metric_type": "Targett", "detail": "CTR 2%"}], confirm=True)
 
     assert result["imported"] == 0
-    assert "predicted" in result["errors"][0]["reason"]
+    assert result["errors"][0]["field"] == "metric_type"
+    assert result["errors"][0]["valid"] == list(store.VALID_METRIC_TYPES)
+
+
+def test_bulk_import_accepts_a_target_now_that_there_is_somewhere_for_it(conn):
+    cid = store.insert_campaign(conn, title="Colombia")
+
+    result = store.bulk_import_metrics(conn, [
+        {"campaign_id": cid, "metric_type": "Target", "structured": {"roas": 4.0}}],
+        confirm=True)
+
+    assert result["errors"] == []
+    assert store.get_campaign(conn, cid)["metrics"][0]["metric_type"] == "target"
 
 
 def test_past_is_not_treated_as_concluded():
@@ -307,17 +325,19 @@ def test_a_status_the_library_has_no_home_for_is_not_guessed_at():
     assert "cancel" in message.lower()
 
 
-def test_the_target_error_names_a_tool_and_says_what_it_does(conn):
-    """"Put it in the campaign's detail" is a destination Claude cannot act on without
-    knowing which tool, and update_campaign REPLACES detail rather than appending — so the
-    obvious reading of that advice deletes the brief."""
-    with pytest.raises(ValueError) as exc:
-        enums.normalise("target", field="metric_type", valid=store.VALID_METRIC_TYPES,
-                        synonyms=enums.METRIC_TYPE_SYNONYMS)
+def test_nothing_still_sends_a_target_into_freeform_prose(conn):
+    """The refusal used to say "it belongs in the campaign's detail", with careful advice about
+    `update_campaign` replacing rather than appending. §8.1/D33 then built the place it
+    actually belongs, and the refusal outlived it by two items — telling people to put a
+    number into text that nothing can compare, which is the drift this file exists to prevent,
+    in this file.
 
-    message = str(exc.value)
-    assert "update_campaign" in message
-    assert "replace" in message.lower()
+    A vocabulary's advice has to be retired when the thing it routed around gets built."""
+    import re
+
+    source = open("enums.py", encoding="utf-8").read()
+    explain = source[source.index("_EXPLAIN = {"):source.index("def _teach")]
+    assert not re.search(r'\("metric_type", "(target|goal)"\)', explain)
 
 
 def test_the_docstring_does_not_teach_the_word_the_server_refuses():
@@ -425,3 +445,19 @@ def test_a_blank_value_means_not_saying_rather_than_something_else(conn):
     store.update_campaign(conn, created, status="   ")
     assert store.get_campaign(conn, created)["status"] == \
         store.get_campaign(conn, omitted)["status"], "blank must not clear a set value"
+
+
+def test_no_tool_description_still_says_a_target_is_rejected(conn):
+    """§5.1's own defect — "the shared prompt was teaching the word the server refuses" —
+    inverted. `add_metrics`'s docstring told the model a target is "rejected on purpose" and
+    belongs in the campaign's prose, for two items after §8.1 built the place it goes. The
+    prompt is the model's authority: it overrides the teaching error, so a stale one is worse
+    than a stale comment."""
+    import mcp_server
+
+    for text in (mcp_server.add_metrics.__doc__,
+                 mcp_server.bulk_import_metrics.__doc__,
+                 str(enums._EXPLAIN.get(("metric_type", "benchmark"), ""))):
+        assert "rejected on purpose" not in (text or "")
+        assert "goal belongs in the campaign" not in (text or "")
+    assert "target" in mcp_server.add_metrics.__doc__

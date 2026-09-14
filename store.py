@@ -86,7 +86,11 @@ CREATE TABLE IF NOT EXISTS asset_fingerprints (
 CREATE TABLE IF NOT EXISTS metrics (
     id            TEXT PRIMARY KEY,
     campaign_id   TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-    metric_type   TEXT NOT NULL DEFAULT 'actual',  -- actual | predicted
+    metric_type   TEXT NOT NULL DEFAULT 'actual',  -- actual | predicted | target. A target
+                                   -- is what somebody aimed at, NOT what this library expects
+                                   -- to happen: reconciliation scores itself against its
+                                   -- predictions, and scoring it against an ambition instead
+                                   -- would make every calibration figure meaningless (§8.1)
     detail        TEXT,            -- freeform metrics / learnings, as given
     structured    TEXT,            -- optional JSON {ctr, roi, conversions, ...}
     created_at    REAL NOT NULL
@@ -768,6 +772,11 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
         "SELECT * FROM metrics WHERE campaign_id = ? ORDER BY created_at", (campaign_id,)
     ).fetchall()]
     d["has_metrics"] = len(d["metrics"]) > 0
+    # Separately, because they answer different questions and §8.8 made the difference
+    # reachable. `has_metrics` counts any row — a forecast, and now a TARGET. "Has this
+    # campaign been measured" is what decides whether to go and ask for its numbers, and a
+    # campaign carrying only the figure somebody was aiming at has not been measured at all.
+    d["has_actual_metrics"] = any(m["metric_type"] == "actual" for m in d["metrics"])
     d["has_evaluations"] = conn.execute(
         "SELECT 1 FROM evaluations WHERE campaign_id = ? LIMIT 1", (campaign_id,)
     ).fetchone() is not None
@@ -1385,7 +1394,11 @@ def list_assets(conn, *, campaign_ids: Optional[list[str]] = None,
 
 # ── metrics ──────────────────────────────────────────────────────────────────
 
-VALID_METRIC_TYPES = ("actual", "predicted")
+# §8.1/D33: `target` is a value, not a refusal. "Did we hit our number" is the comparison a
+# marketer most wants, and it needs a number stored as the thing that was aimed at — separate
+# from `predicted`, which is what the library expected and what reconciliation scores itself
+# against.
+VALID_METRIC_TYPES = ("actual", "predicted", "target")
 _VALID_METRIC_TYPES = VALID_METRIC_TYPES
 
 
@@ -1415,7 +1428,106 @@ def add_metrics(conn, campaign_id: str, *, detail=None, structured=None,
     return mid
 
 
-def bulk_import_metrics(conn, rows: list[dict]) -> dict:
+class _Batched:
+    """A connection whose `commit()` does nothing, for the duration of one import.
+
+    A commit per row is an fsync per row, which the caller's row count controls — the reason
+    `add_metrics` grew `commit=False` in the first place (defect 04's sweep). §8.8 routes the
+    batch through `core.add_metrics` so a workbook actually reaches the typed registry, and
+    that path commits several times per row on its way through `metrics.record`. Swallowing
+    the commits and issuing one at the end keeps both: the registry gets populated, and the
+    customer's laptop does one fsync rather than four hundred.
+
+    Per-row atomicity is kept by the SAVEPOINT in the loop, not by the commits — a row that
+    fails halfway leaves nothing behind, which a deferred commit alone would not give. Those
+    savepoints only nest (rather than each one committing on RELEASE) because the caller opens
+    an explicit transaction first.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def commit(self):
+        return None
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _retry_of(exc: Exception) -> dict:
+    """The retry a `BadValue` carries, as data (D47/§5.2).
+
+    `str(exc)` alone makes the caller parse "Did you mean…?" out of prose; the attributes are
+    what let a surface offer the correction.
+    """
+    return {k: getattr(exc, k) for k in ("field", "given", "valid", "suggestion")
+            if getattr(exc, k, None) is not None}
+
+
+def _row_problem(conn, row) -> Optional[dict]:
+    """Whatever would stop this row importing, found without writing anything."""
+    if not isinstance(row, dict):
+        return {"reason": f"row must be an object, got {type(row).__name__}"}
+    structured = row.get("structured")
+    if structured is not None and not isinstance(structured, dict):
+        return {"reason": f"`structured` must be an object of column/value pairs, got "
+                          f"{type(structured).__name__}"}
+    try:
+        enums.normalise(row.get("metric_type", "actual"), field="metric_type",
+                        valid=VALID_METRIC_TYPES, synonyms=enums.METRIC_TYPE_SYNONYMS,
+                        allow_none=False)
+    except ValueError as exc:
+        return {"reason": str(exc), **_retry_of(exc)}
+    cid, title = row.get("campaign_id"), row.get("title")
+    if not cid and not title:
+        return {"reason": "neither campaign_id nor title given"}
+    if cid:
+        return (None if get_campaign(conn, cid)
+                else {"reason": f"campaign_id {cid!r} not found"})
+    matches = conn.execute(
+        "SELECT id FROM campaigns WHERE LOWER(title) = LOWER(?) "
+        "AND id NOT IN (SELECT supersedes FROM campaigns WHERE supersedes IS NOT NULL)",
+        (title,)).fetchall()
+    if not matches:
+        return {"reason": f"no campaign titled {title!r} found"}
+    if len(matches) > 1:
+        return {"reason": f"title {title!r} is ambiguous ({len(matches)} matches)"}
+    return None
+
+
+def _import_preview_sentence(rows: list, columns: dict, problems: list) -> str:
+    """What the reader is deciding about, in the order it matters."""
+    parts = [f"{len(rows)} row{'s' * (len(rows) != 1)} read. Nothing has been stored."]
+    if problems:
+        parts.append(f"{len(problems)} row{'s' * (len(problems) != 1)} would not import at "
+                     f"all — see `errors`; the first is: {problems[0]['reason']}")
+    if columns["not_measures"]:
+        parts.append(f"{len(columns['not_measures'])} column"
+                     f"{'s' * (len(columns['not_measures']) != 1)} look like identifiers or "
+                     f"dimensions rather than measures and are skipped: "
+                     f"{', '.join(c['column'] for c in columns['not_measures'])}.")
+    if columns["cannot_type"]:
+        parts.append(f"{len(columns['cannot_type'])} column"
+                     f"{'s' * (len(columns['cannot_type']) != 1)} cannot be read as numbers "
+                     f"and will not be imported: "
+                     f"{', '.join(c['column'] for c in columns['cannot_type'])}.")
+    if columns["looks_like"]:
+        parts.append(f"{len(columns['looks_like'])} column"
+                     f"{'s' * (len(columns['looks_like']) != 1)} may be another name for "
+                     f"something already on file — say so and they count as one measure, or "
+                     f"leave them and each is its own: "
+                     f"{', '.join(c['column'] + ' ~ ' + c['looks_like'] for c in columns['looks_like'])}.")
+    if columns["new"]:
+        parts.append(f"{len(columns['new'])} column"
+                     f"{'s' * (len(columns['new']) != 1)} are new to this library and will be "
+                     f"recorded provisionally, then asked about one at a time.")
+    if columns["known"]:
+        parts.append(f"{len(columns['known'])} already match measures on file.")
+    parts.append("Send the same rows with confirm=True to import them.")
+    return " ".join(parts)
+
+
+def bulk_import_metrics(conn, rows: list[dict], *, confirm: bool = False) -> dict:
     """
     Load a KPI workbook in one call (§6.5) instead of one add_metrics per row. Each row
     identifies its campaign by `campaign_id` (preferred) or `title` (exact, case-insensitive,
@@ -1424,8 +1536,49 @@ def bulk_import_metrics(conn, rows: list[dict]) -> dict:
     `detail`/`structured`/`metric_type` like add_metrics. Every row is processed
     independently: a malformed row (wrong shape, bad metric_type, a nonexistent id) is
     reported in `errors` and never crashes or blocks the rest of the batch.
+
+    §8.8: **previews by default.** *"`bulk_import_metrics` should diff incoming columns
+    against the registry and report what is new, what it thinks are aliases, and what it
+    cannot type — before writing anything. An import that silently accepts 40 new keys is how
+    the current drift started."* A workbook carries a COLUMN VOCABULARY, and the moment to
+    look at a vocabulary is once, as a vocabulary. The preview is the consent step, the same
+    way it is for `upload_campaign` and `add_metrics`.
+
+    The structured values go through `metrics.record`, so a workbook actually populates the
+    typed registry — *"that is the moment the registry should be populated properly rather
+    than accreted key by key"*. It called `store.add_metrics` directly before, so the import
+    the review names as where the registry gets seeded seeded nothing, and forty columns went
+    into a JSON blob exactly as the review says they should not.
     """
+    import core
+    import metrics as metrics_module
+
+    columns = metrics_module.diff_columns(conn, rows)
+    if not confirm:
+        # The ROWS too, not only the columns. `errors: []` was asserted rather than computed,
+        # so a preview saying "nothing has been stored, send with confirm=True" could be
+        # followed by three hundred of five hundred rows failing on an unmatched title — it
+        # had previewed the wrong half. Identity and metric_type are checked here without
+        # writing anything, which is the same check the write does.
+        problems = [{"row": i, **p} for i, p in enumerate(_row_problem(conn, r) for r in rows)
+                    if p]
+        return {"preview": True, "imported": 0, "errors": problems, "rows": len(rows),
+                "would_import": len(rows) - len(problems),
+                "columns": columns,
+                "what_it_means": _import_preview_sentence(rows, columns, problems)}
     imported, errors = 0, []
+    # An explicit BEGIN, because without one the per-row SAVEPOINT was the OUTERMOST one — and
+    # releasing the outermost savepoint commits. So the batch fsynced once per row after all,
+    # exactly as it did before `commit=False` existed, while the comment below claimed
+    # otherwise. Measured: a second connection could see row 1 before row 2 started.
+    conn.execute("BEGIN")
+    # Keyed by measure, because a workbook asks the same question once per column and not once
+    # per row — the same reason `diff_columns` classifies a column once.
+    asked: dict = {}
+    eligible: dict = {}
+    retired: dict = {}
+    skipped: list = []
+    batched = _Batched(conn)
     # Bounded like every other handler (defect 04's sweep): the caller decides how many rows
     # this is, and every row previously committed on its own — one fsync each, which is
     # cheap on an SSD and much less so on the customer's Windows laptop behind AV scanning.
@@ -1452,7 +1605,11 @@ def bulk_import_metrics(conn, rows: list[dict]) -> dict:
                                               synonyms=enums.METRIC_TYPE_SYNONYMS,
                                               allow_none=False)
             except ValueError as exc:
-                errors.append({"row": i, "reason": str(exc)})
+                # D47: the structured retry, on the batch path too. It was flattened to a
+                # string here, so `field`/`valid`/`suggestion` reached the single write and
+                # not the one the plan itself named as the likeliest place "Target" arrives —
+                # the same vocabulary behaving differently depending on how many rows you sent.
+                errors.append({"row": i, "reason": str(exc), **_retry_of(exc)})
                 continue
 
             cid = row.get("campaign_id")
@@ -1477,14 +1634,48 @@ def bulk_import_metrics(conn, rows: list[dict]) -> dict:
                 errors.append({"row": i, "reason": f"campaign_id {cid!r} not found"})
                 continue
 
-            add_metrics(conn, cid, detail=row.get("detail"), structured=row.get("structured"),
-                       metric_type=metric_type, commit=False)
+            # Through `core.add_metrics`, which is what routes the structured values into the
+            # typed registry (§8.1) and asks about an unfamiliar one (§8.2). `confirm=True`
+            # because the preview above already WAS the consent step for this batch.
+            #
+            # SAVEPOINT per row, so a row that fails halfway leaves nothing behind — the old
+            # path got that from `store.add_metrics` being a single insert, and this one
+            # writes a metrics row and then a value row per column.
+            conn.execute("SAVEPOINT bulk_row")
+            try:
+                written = core.add_metrics(
+                    batched, campaign_id=cid, detail=row.get("detail"),
+                    structured=row.get("structured"), metric_type=metric_type, confirm=True)
+            except Exception:
+                conn.execute("ROLLBACK TO bulk_row")
+                raise
+            finally:
+                conn.execute("RELEASE bulk_row")
             imported += 1
+            # Everything the write path asked or refused, kept rather than dropped. The return
+            # was discarded, and the questions inside it are ONE-SHOT: `metrics.record` marks a
+            # measure surfaced and offered as a side effect, so an import consumed §8.2's "is
+            # this a new measure?" and §8.3's graduation offer for forty columns at once and
+            # showed neither. The item whose headline is "never silently accept" made forty
+            # acceptances unaskable, permanently.
+            for question in written.get("new_measures") or []:
+                asked.setdefault(question["measure"], question)
+            for offer in written.get("newly_eligible") or []:
+                eligible.setdefault(offer["measure"], offer)
+            for gone in written.get("retired") or []:
+                retired.setdefault(gone["measure"], gone)
+            for bad in written.get("skipped") or []:
+                skipped.append({"row": i, **bad})
         except Exception as exc:
-            errors.append({"row": i, "reason": str(exc)})
+            errors.append({"row": i, "reason": str(exc), **_retry_of(exc)})
 
     conn.commit()
-    result = {"imported": imported, "errors": errors, "not_processed": not_processed}
+    result = {"preview": False, "imported": imported, "errors": errors,
+              "not_processed": not_processed, "columns": columns,
+              **({"new_measures": list(asked.values())} if asked else {}),
+              **({"newly_eligible": list(eligible.values())} if eligible else {}),
+              **({"retired_measures": list(retired.values())} if retired else {}),
+              **({"skipped": skipped} if skipped else {})}
     if not_processed:
         result["note"] = (
             f"imported {imported} rows before the {config.TOOL_TIME_BUDGET_SECONDS:g}s time "

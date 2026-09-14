@@ -2176,7 +2176,77 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       instance this phase of a tool the model would have to know existed and spontaneously
       call (§8.3's gate, §8.6's `note_correction`, this). Graduation is the exact instant the
       report stops being empty, so that is where it is offered.
-- [ ] **8.8 `bulk_import_metrics` diffs columns against the registry before writing.**
+- [x] **8.8 `bulk_import_metrics` diffs columns against the registry before writing.**
+      **"Before writing anything" is the shape of the whole item.** A workbook carries a COLUMN
+      VOCABULARY, and the moment to look at a vocabulary is once, as a vocabulary — not forty
+      times, one key at a time, after the writes. The import previews by default and writes on
+      `confirm`, which is the pattern `upload_campaign` and `add_metrics` already use for
+      exactly this reason: the preview IS the consent step.
+      **Four answers, because the review asks for four.** What is already known (and which
+      measure); what it THINKS are aliases — a suggestion, never a merge, because §5.1 and §8.2
+      both settled that a wrong alias silently folds two different measures together and a
+      workbook is the worst place to get that wrong; what is genuinely new; and what it cannot
+      type, which is otherwise discovered row by row as the import half-fails.
+      *Found while reading the code:* **the bulk path called `store.add_metrics` directly**, so
+      a workbook import never reached `metrics.record` and never touched the registry at all.
+      The item the review calls "where the registry gets seeded" seeded nothing, and forty
+      columns went into a JSON blob exactly as the review says they must not. It routes through
+      `core.add_metrics` now, inside a per-row SAVEPOINT with the commits batched — a commit per
+      row is an fsync per row, which is why `commit=False` existed, and routing through the
+      registry would have reintroduced four hundred of them.
+      **`target` became a real `metric_type`.** §5.1 refused it deliberately, with the
+      distinction spelled out and advice to put the number in the campaign's prose. §8.1/D33
+      then built the place it belonged — a `metric_type` of its own, comparable against the
+      actual — and the refusal outlived it by two items, still telling people to put a number
+      into freeform text that nothing can compare. The DISTINCTION is unchanged and is why it
+      is its own value rather than a synonym of `predicted`: reconciliation scores the library
+      against what it PREDICTED, and scoring it against somebody's ambition would make every
+      calibration figure meaningless. A vocabulary's advice has to be retired when the thing it
+      routed around gets built.
+      *That change has a blast radius, and it found one:* `has_metrics` counts any row, so a
+      campaign carrying only a target looked measured and stopped being asked for its results —
+      the §8.1 lesson ("a target is not a result") one layer out, on a path that had only ever
+      seen two metric types. `has_actual_metrics` is separate now.
+      Closes **D47** — the structured retry (`field`, `valid`, `suggestion`) on the batch path,
+      which the plan itself named as the likeliest place "Target" arrives, and where it was
+      flattened to a string.
+      *Found by review, all reproduced:*
+      **The import consumed forty questions and showed none of them.** `metrics.record` marks a
+      measure surfaced and offered as a SIDE EFFECT, and the batch discarded `core.add_metrics`'s
+      return — so §8.2's "is this a new measure?" and §8.3's graduation offer were burned for
+      every column at once and could never be asked again. The item whose headline is "never
+      silently accept" made forty acceptances unaskable, permanently.
+      **"Target Reach" was stored as a measured reach.** `target_reach` decorates to a stem
+      ending in `_reach`, so the sibling-column shape every KPI workbook uses filed a target as
+      a result — §8.1's founding distinction, through the door this item opened. A metric type
+      spelled into a column name is read as one now, and CONFLICTS with the row's rather than
+      overriding it silently.
+      **Targets counted towards the graduation gate**, so three target rows could make a
+      measure nobody had ever measured a standing requirement — and `expected_check`, which
+      correctly counts actuals only, then reported those same three campaigns as missing it.
+      Two halves of one item disagreeing about what counts. A target no longer revives a
+      retired measure either.
+      **Two new columns in one workbook were silently merged.** `dwell` and `queue_dwell` both
+      classified `new`, then the suffix rule matched the second against the provisional entry
+      the first had just created, with dict ordering deciding which survived. A provisional
+      measure is no longer an alias root: nobody has confirmed it, so treating it as one
+      asserts a relationship nobody agreed to.
+      **A workbook's Month, Store # and Campaign columns became KPIs.** They are numeric, so
+      each accrued sightings and could graduate — the "forty new keys" drift, produced by the
+      tool built to stop it. A fifth class says so and they are not recorded.
+      **The preview previewed the wrong half.** `errors: []` was asserted rather than computed,
+      so "nothing has been stored, send with confirm=True" could be followed by three hundred
+      of five hundred rows failing on an unmatched title. Rows are validated now — identity,
+      `metric_type`, shape — without writing anything. A `structured` that was not an object
+      also killed the whole batch with an `AttributeError`, which is not a `ValueError` and so
+      reached the model as "Error executing tool" with no row index.
+      **A skipped cell was silent.** The preview said a column would not be imported and the
+      write skipped it without a word, which is the same silent acceptance wearing its other
+      face. `skipped` says which cell and why.
+      **And the batching was illusory.** Without an explicit `BEGIN` the per-row SAVEPOINT was
+      the outermost one, and releasing the outermost savepoint COMMITS — so the import fsynced
+      once per row exactly as it had before, while the comment claimed otherwise. A false claim
+      about cost is worse than none, because it stops anybody measuring.
 
 ## Phase 9 — Execution drift and context events
 

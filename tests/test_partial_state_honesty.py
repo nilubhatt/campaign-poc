@@ -149,7 +149,7 @@ def test_bulk_import_commits_once_not_once_per_row(conn, monkeypatch):
             return getattr(self._inner, name)
 
     rows = [{"campaign_id": cid, "detail": f"row {i}"} for i in range(50)]
-    result = store.bulk_import_metrics(CountingConn(conn), rows)
+    result = store.bulk_import_metrics(CountingConn(conn), rows, confirm=True)
 
     assert result["imported"] == 50
     assert commits["n"] <= 2, f"one commit for the batch, not {commits['n']}"
@@ -162,7 +162,7 @@ def test_bulk_import_stops_at_the_time_budget_and_says_where_it_stopped(conn, mo
     monkeypatch.setattr(config, "TOOL_TIME_BUDGET_SECONDS", 0.0)
 
     rows = [{"campaign_id": cid, "detail": f"row {i}"} for i in range(20)]
-    result = store.bulk_import_metrics(conn, rows)
+    result = store.bulk_import_metrics(conn, rows, confirm=True)
 
     assert result["imported"] < 20
     assert result["not_processed"] == 20 - result["imported"]
@@ -175,7 +175,7 @@ def test_bulk_import_still_reports_bad_rows_individually(conn):
             {"campaign_id": "nope", "detail": "bad id"},
             "not even a dict"]
 
-    result = store.bulk_import_metrics(conn, rows)
+    result = store.bulk_import_metrics(conn, rows, confirm=True)
 
     assert result["imported"] == 1
     assert len(result["errors"]) == 2

@@ -384,7 +384,10 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         "normalised": changed,
         "next_actions": actions.after_upload(
             campaign_id=cid, status=current["status"],
-            has_metrics=bool(current["metrics"]),
+            # A record being ingested has no metrics yet, so this is always False here — it
+            # reads `has_actual_metrics` anyway so the two call sites cannot answer the same
+            # question two ways, which is how they drift.
+            has_metrics=current["has_actual_metrics"],
             earlier_judgment=earlier_judgment,
             # §8.6: a tracked client comment IS client feedback, and it arrives with its
             # provenance already assembled. Without this the correction loop had no input at
@@ -429,14 +432,30 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
     # — the JSON blob above stays as the record of what was sent, and this is what makes "show
     # me every ROAS on file" answerable. An unfamiliar key asks once rather than being rejected
     # (which loses the number) or silently accepted (which is how 25 keys happened).
-    asked, eligible, retired = [], [], []
+    asked, eligible, retired, skipped = [], [], [], []
     for key, value in (structured or {}).items():
+        # A workbook's Month, Store # and Campaign columns are numeric and are not KPIs.
+        # Recording them made each one a provisional measure that accrued sightings and could
+        # graduate — the drift this phase exists to stop, arriving through the import.
+        if not metrics.is_a_measurement(key):
+            skipped.append({"key": key, "value": value,
+                            "reason": f"{key!r} looks like an identifier or a dimension "
+                                      f"rather than something measured, so it is not "
+                                      f"recorded as a measure."})
+            continue
         try:
             written = metrics.record(conn, campaign_id=campaign_id, key=key, value=value,
                                      metric_type=metric_type)
-        except ValueError:
+        except ValueError as exc:
             # A value that is not a number is still in the JSON blob and in `detail`. Failing
             # the whole write over one unparseable figure would lose the other nine.
+            #
+            # REPORTED, though. Silently continuing meant a column the §8.8 preview said would
+            # not be imported was skipped without a word, and a contradiction between a
+            # column's own metric_type and the row's was swallowed as though it were an
+            # unreadable cell. A skip nobody is told about is the silent acceptance this whole
+            # phase is written against, wearing the other face.
+            skipped.append({"key": key, "value": value, "reason": str(exc)})
             continue
         if written.get("new_measure"):
             asked.append(written["new_measure"])
@@ -449,6 +468,7 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
         retired += written.get("retired") or []
     return {"metrics_id": mid, "campaign_id": campaign_id, "status": "stored",
             **({"new_measures": asked} if asked else {}),
+            **({"skipped": skipped} if skipped else {}),
             **({"newly_eligible": eligible} if eligible else {}),
             **({"retired_measures": retired} if retired else {}),
             # The moment the precondition for reconciling is satisfied. Offered at
@@ -4608,7 +4628,11 @@ def update_campaign(conn, campaign_id: str, **fields) -> dict:
     return {**record, "earlier_judgment": earlier_judgment,
             "next_actions": actions.after_upload(
                 campaign_id=campaign_id, status=record["status"],
-                has_metrics=bool(record["metrics"]),
+                # ACTUAL metrics. A campaign holding only a target has not been measured, and
+                # the offer this gates is "record what this campaign actually achieved" — §8.8
+                # made a target storable, so "has a row" and "has a result" became different
+                # questions on the one path that can see both.
+                has_metrics=record["has_actual_metrics"],
                 earlier_judgment=earlier_judgment)}
 
 
