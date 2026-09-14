@@ -37,6 +37,8 @@ import re
 import time
 from typing import Optional
 
+import learning
+
 # The measured cutoff from §5.1: below this a suggestion is noise, and a wrong alias merges
 # two measures that are not the same thing.
 _SUGGESTION_CUTOFF = 0.75
@@ -458,33 +460,13 @@ def campaigns_with(conn, name: str) -> list:
 
 
 # ── §8.3: the graduation gate ────────────────────────────────────────────────
-# "Seen in N campaigns, across at least two partners or markets, and confirmed once by a
-# person." Three conditions, all required. The second is the one doing the work: *"count alone
-# is not enough — one partner's house metric should never quietly become a standing requirement
-# for everyone."* Fifteen sightings in one market is a habit, not a standard, and promoting it
-# makes every other market fail a checklist it never agreed to.
-GRADUATION_CAMPAIGNS = 3
-GRADUATION_MARKETS = 2
-# §8.5: how many campaigns may record measurements without this one appearing before it stops
-# being asked for. Campaigns, not months — see `store.campaigns_recording_metrics_since`.
-RETIREMENT_AFTER = 10
-
-
-def _distinct_briefs(conn, campaign_ids: list) -> int:
-    """How many separate briefs these records represent (§8.3).
-
-    Three versions of one brief are one brief. `supersedes` already says so, and counting the
-    records instead let v1, v2 and v3 of a single partner's deck satisfy a gate that means
-    "three different campaigns carried this" — the same mistake as counting writes, one level
-    up. Each record is folded onto the root of its supersession chain.
-    """
-    import store
-
-    roots = set()
-    for cid in campaign_ids:
-        chain = store.supersession_chain(conn, cid)
-        roots.add(chain[0] if chain else cid)
-    return len(roots)
+# The gate itself lives in `learning`, because §8.6 puts standing corrections on the same loop
+# and *"one learning mechanism for both"* is the requirement — a second implementation shaped
+# like this one is two mechanisms that agree today and drift by the next item. Read here, never
+# re-declared: a constant beside the one it mirrors is the copy that drifts.
+GRADUATION_CAMPAIGNS = learning.GRADUATION_CAMPAIGNS
+GRADUATION_MARKETS = learning.GRADUATION_MARKETS
+RETIREMENT_AFTER = learning.RETIREMENT_AFTER
 
 
 def graduation(conn, name: str) -> dict:
@@ -505,53 +487,14 @@ def graduation(conn, name: str) -> dict:
     entry = describe(conn, name)
     if not entry:
         raise ValueError(f"{name!r} is not a measure on file")
-    campaigns = _distinct_briefs(conn, campaigns_with(conn, name))
-    # Folded. Three spellings of one market satisfied a gate whose whole purpose is "seen in at
-    # least two markets" — one partner's house metric graduating on one market typed three
-    # ways is precisely what the requirement forbids (C16).
-    markets, seen = [], set()
-    for raw in entry["markets"]:
-        key = store.fold_market(raw)
-        if key and key not in seen:
-            seen.add(key)
-            markets.append(raw.strip())
-    base = {"measure": name, "campaigns": campaigns, "markets": len(markets),
-            "seen_in": markets, "status": entry["status"],
-            "confirmed_by": entry.get("confirmed_by")}
-
-    # Status FIRST, before the counts. Asked in the other order, a measure somebody set aside
-    # read "seen in 1 campaign, needs 3" — telling the user to keep recording something that
-    # will be refused forever, and re-asking a question they had declined. §8.2 named that
-    # failure one item ago.
-    if entry["status"] == "expected":
-        return {**base, "eligible": False, "code": "already_expected",
-                "what_it_means": (
-                    f"{name} is already expected of briefs in "
-                    f"{', '.join(entry['expected_in']) or 'no market'}"
-                    + (f", confirmed by {entry['confirmed_by']}." if entry["confirmed_by"]
-                       else "."))}
-    if entry["status"] == "ignored":
-        return {**base, "eligible": False, "code": "set_aside",
-                "what_it_means": (f"{name} was set aside, so it will not be asked for. "
-                                  f"Recording more of it will not change that — reopen it "
-                                  f"with resolve_measure if that was wrong.")}
-
-    missing = []
-    if campaigns < GRADUATION_CAMPAIGNS:
-        missing.append(f"seen in {campaigns} campaign{'s' * (campaigns != 1)}, "
-                       f"needs {GRADUATION_CAMPAIGNS}")
-    if len(markets) < GRADUATION_MARKETS:
-        missing.append(f"seen in {len(markets)} market{'s' * (len(markets) != 1)} "
-                       f"({', '.join(markets) or 'none recorded'}), "
-                       f"needs {GRADUATION_MARKETS} — one partner's house metric should not "
-                       f"become a standing requirement for everyone")
-    if missing:
-        return {**base, "eligible": False, "code": "not_yet",
-                "what_it_means": f"{name} is not ready to be expected of a brief: "
-                                 + "; ".join(missing) + "."}
-    return {**base, "eligible": True, "code": "eligible",
-            "what_it_means": (f"{name} can be added to the checklist for "
-                              f"{', '.join(markets)}, once a person confirms it.")}
+    gate = learning.gate(
+        name=name, noun="metric",
+        campaigns=learning.distinct_briefs(conn, campaigns_with(conn, name)),
+        markets=entry["markets"], status=entry["status"],
+        expected_in=entry["expected_in"], confirmed_by=entry.get("confirmed_by"))
+    # `measure` as well as `name`: this key is what callers and the MCP surface already read,
+    # and `learning` speaks about learned things in general.
+    return {**gate, "measure": gate["name"]}
 
 
 def _newly_eligible(conn, name: str) -> Optional[dict]:
@@ -600,11 +543,7 @@ def graduate(conn, name: str, *, confirmed_by: str) -> dict:
     """
     import store
 
-    if not (confirmed_by or "").strip():
-        raise ValueError(
-            "`confirmed_by` is required: the gate is 'confirmed once by a person', and a "
-            "promotion with nobody's name against it is a standing requirement nobody can "
-            "question later.")
+    confirmed_by = learning.require_a_person(confirmed_by)
     gate = graduation(conn, name)
     if not gate["eligible"]:
         # Already expected is not a failure, and saying "not ready" about something that has
@@ -614,7 +553,7 @@ def graduate(conn, name: str, *, confirmed_by: str) -> dict:
         # field this whole gate exists to create.
         raise ValueError(gate["what_it_means"])
     store.graduate_metric(conn, gate["measure"], markets=gate["seen_in"],
-                          confirmed_by=confirmed_by.strip())
+                          confirmed_by=confirmed_by)
     entry = describe(conn, gate["measure"])
     return {**entry, "graduated": True,
             "what_it_means": (
@@ -655,13 +594,6 @@ def expected_for(conn, *, market: Optional[str] = None, markets: Optional[list] 
     return out
 
 
-# A checklist is for a brief that is going to run. A reference record is brand guidelines and a
-# stub is a placeholder; telling either one it is missing footfall uplift is the check firing
-# on everything, and §7.1/D11 was careful about which TEXT a check reads while this was not
-# careful about which RECORD it runs against.
-_CHECKABLE_RECORDS = ("campaign", None)
-
-
 def expected_check(conn, campaign_id: str) -> dict:
     """Which expected measures this brief carries and which it does not (§8.3/§8.4).
 
@@ -674,14 +606,12 @@ def expected_check(conn, campaign_id: str) -> dict:
     "carries all of them" — a clean bill of health for a record with no results at all, which
     is §5.3's mistake in a new place.
     """
-    import store
-
-    record = store.get_campaign(conn, campaign_id) or {}
-    if record.get("record_type") not in _CHECKABLE_RECORDS:
-        return _not_a_brief(record)
-    named = [m for m in store.markets_of(record) if m]
-    if not named:
-        return _no_market_to_check()
+    # The three reasons a record has no checklist are `learning`'s, because §8.6 needs the same
+    # three and writing them twice is how a reference record came to be told it was missing
+    # something in one place and not the other.
+    named, refusal = learning.subject_markets(conn, campaign_id)
+    if refusal:
+        return {**refusal, "expected": [], "carried": [], "missing": []}
     expected = expected_for(conn, markets=named)
     carried, missing = [], []
     for name in expected:
@@ -699,31 +629,6 @@ def expected_check(conn, campaign_id: str) -> dict:
         "status": "checked" if expected else "nothing_to_check",
         "what_it_means": _expected_sentence(", ".join(named), expected, carried, missing),
     }
-
-
-def _unchecked(code: str, what: str) -> dict:
-    """The shape §7.1 settled on, so a reader can tell an unchecked result from a clean one.
-
-    `status: nothing_to_check` is not a pass. Every one of these returns an empty `missing`,
-    and an empty `missing` beside a missing `status` reads as "this brief carries everything
-    expected of it" — a clean bill of health the server has no basis for.
-    """
-    return {"market": None, "markets": [], "expected": [], "carried": [], "missing": [],
-            "basis": "computed", "code": code, "status": "nothing_to_check",
-            "what_it_means": what}
-
-
-def _no_market_to_check() -> dict:
-    return _unchecked("no_market", (
-        "This record names no market, and a checklist belongs to one — so there is nothing to "
-        "check it against. This is not a pass: add a market to see what briefs like it "
-        "usually carry."))
-
-
-def _not_a_brief(record: dict) -> dict:
-    return _unchecked("not_a_campaign", (
-        f"This is a {record.get('record_type')} record, not a campaign brief, so the "
-        f"checklist does not apply to it."))
 
 
 # "This brief carries none of the four" is the review's own sentence, and a server that

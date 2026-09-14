@@ -120,6 +120,46 @@ CREATE TABLE IF NOT EXISTS metric_registry (
     times_seen    INTEGER NOT NULL DEFAULT 0,
     markets       TEXT NOT NULL DEFAULT '[]'   -- which markets it has appeared in (§8.3)
 );
+CREATE TABLE IF NOT EXISTS corrections (
+    -- §8.6: client feedback on the same loop as a measure. The lifecycle columns are
+    -- deliberately the same names as `metric_registry`'s, because they are the same loop —
+    -- `learning.gate` reads both and a second vocabulary here would be a second mechanism.
+    id            TEXT PRIMARY KEY,
+    text          TEXT NOT NULL,         -- the rule, as somebody said it
+    normalised    TEXT NOT NULL,         -- what makes "the same correction" the same one
+    status        TEXT NOT NULL DEFAULT 'provisional',
+    -- provisional | expected | retired | ignored | merged. `merged` is this table's own: the
+    -- row stays because it is somebody's words, and `merged_into` says where its sightings
+    -- went.
+    merged_into   TEXT,
+    expected_in   TEXT NOT NULL DEFAULT '[]',  -- markets where it graduated; [] = no checklist
+    confirmed_by  TEXT,
+    confirmed_at  REAL,
+    retired_at    REAL,
+    offered       INTEGER NOT NULL DEFAULT 0,  -- the graduation question, asked once
+    asked         INTEGER NOT NULL DEFAULT 0,  -- the "is this the same rule?" question, once
+    quiet_asked   INTEGER NOT NULL DEFAULT 0,  -- the "still current?" question, once
+    first_seen    REAL,
+    last_seen     REAL,
+    times_seen    INTEGER NOT NULL DEFAULT 0,
+    markets       TEXT NOT NULL DEFAULT '[]'
+);
+CREATE TABLE IF NOT EXISTS correction_sightings (
+    -- One row per mention, because "Peru (30 influencers, praised); instructed independently
+    -- in Australia" is ONE correction with TWO origins, and the second is what makes it more
+    -- than a house style. A single provenance column would have to overwrite one of them.
+    id            TEXT PRIMARY KEY,
+    correction_id TEXT NOT NULL REFERENCES corrections(id) ON DELETE CASCADE,
+    campaign_id   TEXT REFERENCES campaigns(id) ON DELETE SET NULL,
+    provenance    TEXT NOT NULL,         -- "JD SEA slide 23, named by the client as the
+                                         -- standard every brief should follow"
+    said_as       TEXT,                  -- this market's OWN words. The correction row keeps
+                                         -- the canonical wording; a paraphrase folded into it
+                                         -- keeps what was actually said — the same
+                                         -- canonical/raw_key split §8.1 made for measures,
+                                         -- and what makes the fold checkable afterwards
+    noted_at      REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS metric_values (
     id            TEXT PRIMARY KEY,
     campaign_id   TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -1667,6 +1707,201 @@ def touch_metric(conn, canonical: str, *, campaign_id: Optional[str] = None) -> 
                  "last_seen = ?, times_seen = times_seen + 1, markets = ? WHERE canonical = ?",
                  (now, now, json.dumps(markets), canonical))
     conn.commit()
+
+
+def corrections(conn) -> list:
+    if not _columns(conn, "corrections"):
+        return []
+    out = []
+    for row in conn.execute("SELECT * FROM corrections ORDER BY first_seen, id").fetchall():
+        d = dict(row)
+        d["markets"] = json.loads(d["markets"] or "[]")
+        d["expected_in"] = json.loads(d["expected_in"] or "[]")
+        out.append(d)
+    return out
+
+
+def get_correction(conn, correction_id: str) -> Optional[dict]:
+    return next((c for c in corrections(conn) if c["id"] == correction_id), None)
+
+
+def correction_by_text(conn, normalised: str) -> Optional[dict]:
+    return next((c for c in corrections(conn) if c["normalised"] == normalised), None)
+
+
+def insert_correction(conn, *, text: str, normalised: str) -> str:
+    cid = _id("corr")
+    conn.execute("INSERT INTO corrections (id, text, normalised) VALUES (?,?,?)",
+                 (cid, text, normalised))
+    conn.commit()
+    return cid
+
+
+def note_correction_sighting(conn, *, correction_id: str, campaign_id: Optional[str],
+                             provenance: str, said_as: Optional[str] = None) -> str:
+    sid = _id("csight")
+    conn.execute("INSERT INTO correction_sightings (id, correction_id, campaign_id, "
+                 "provenance, said_as, noted_at) VALUES (?,?,?,?,?,?)",
+                 (sid, correction_id, campaign_id, provenance, said_as, _now()))
+    conn.commit()
+    return sid
+
+
+def merge_correction(conn, *, absorbed: str, into: str) -> None:
+    """Fold one correction into another (§8.6's "same rule").
+
+    RETROSPECTIVE, exactly as §8.2's `merge_metric` is: the sightings already recorded under
+    the absorbed wording are sightings of the rule it turned out to be, and an answer that
+    fixes the vocabulary while leaving the evidence behind has fixed nothing — the whole point
+    of saying these are one rule is that they then COUNT as one rule across three markets.
+
+    Unlike `merge_metric`, the absorbed row is not deleted. That was §8.5's "never delete"
+    broken from the direction nothing was watching, and here the row is somebody's words.
+    """
+    conn.execute("UPDATE correction_sightings SET correction_id = ? WHERE correction_id = ?",
+                 (into, absorbed))
+    conn.execute("UPDATE corrections SET status = 'merged', merged_into = ? WHERE id = ?",
+                 (into, absorbed))
+    # The count and the breadth are re-derived from the sightings that just moved, rather than
+    # added up — two numbers maintained by arithmetic drift from the rows they describe.
+    rows = conn.execute("SELECT campaign_id, noted_at FROM correction_sightings "
+                        "WHERE correction_id = ?", (into,)).fetchall()
+    markets: list = []
+    seen: set = set()
+    for row in rows:
+        for where in markets_of(get_campaign(conn, row["campaign_id"]) or {}):
+            if where and fold_market(where) not in seen:
+                seen.add(fold_market(where))
+                markets.append(where.strip())
+    times = len(rows)
+    stamps = [r["noted_at"] for r in rows if r["noted_at"] is not None]
+    conn.execute("UPDATE corrections SET times_seen = ?, markets = ?, first_seen = ?, "
+                 "last_seen = ? WHERE id = ?",
+                 (times, json.dumps(markets), min(stamps or [None], default=None),
+                  max(stamps or [None], default=None), into))
+    conn.commit()
+
+
+def set_aside_correction(conn, correction_id: str) -> None:
+    """Stop applying and stop asking, without deleting (§8.6).
+
+    `learning.gate` has always had a `set_aside` branch and nothing could reach it, so a
+    correction promoted in error blocked approvals with no inverse. The sightings stay: this
+    is a decision about the RULE, not about what the client said.
+    """
+    # `expected_in` is LEFT ALONE. Where a rule used to apply is part of its record, the same
+    # way its sightings are — a judgment that cited it while it was standing is only readable
+    # if the library can still say where it stood. `status` is what stops it being applied.
+    conn.execute("UPDATE corrections SET status = 'ignored', offered = 1 WHERE id = ?",
+                 (correction_id,))
+    conn.commit()
+
+
+def correction_sightings(conn, correction_id: str) -> list:
+    if not _columns(conn, "correction_sightings"):
+        return []
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM correction_sightings WHERE correction_id = ? ORDER BY noted_at, id",
+        (correction_id,)).fetchall()]
+
+
+def correction_campaigns(conn, correction_id: str) -> list:
+    return sorted({s["campaign_id"] for s in correction_sightings(conn, correction_id)
+                   if s["campaign_id"]})
+
+
+def touch_correction(conn, correction_id: str, *, campaign_id: Optional[str] = None) -> None:
+    """Record that a correction was said again — the count and the breadth the gate reads.
+
+    Through `markets_of` and folded, for the reasons §8.3 learned the hard way: a campaign
+    running in MX and CO counts towards both, and "SEA"/"sea" is one market.
+    """
+    row = conn.execute("SELECT markets FROM corrections WHERE id = ?",
+                       (correction_id,)).fetchone()
+    if not row:
+        return
+    markets = json.loads(row["markets"] or "[]")
+    if campaign_id:
+        seen = {fold_market(m) for m in markets}
+        for where in markets_of(get_campaign(conn, campaign_id) or {}):
+            if where and fold_market(where) not in seen:
+                markets.append(where.strip())
+                seen.add(fold_market(where))
+    now = _now()
+    conn.execute("UPDATE corrections SET first_seen = COALESCE(first_seen, ?), last_seen = ?, "
+                 "times_seen = times_seen + 1, markets = ? WHERE id = ?",
+                 (now, now, json.dumps(markets), correction_id))
+    conn.commit()
+
+
+def graduate_correction(conn, correction_id: str, *, markets: list, confirmed_by: str) -> None:
+    conn.execute("UPDATE corrections SET status = 'expected', expected_in = ?, "
+                 "confirmed_by = ?, confirmed_at = ?, retired_at = NULL, offered = 1 "
+                 "WHERE id = ?",
+                 (json.dumps(sorted(markets)), confirmed_by, _now(), correction_id))
+    conn.commit()
+
+
+def correction_was_offered(conn, correction_id: str) -> bool:
+    row = conn.execute("SELECT offered FROM corrections WHERE id = ?",
+                       (correction_id,)).fetchone()
+    return bool(row and row["offered"])
+
+
+def correction_quiet_asked(conn, correction_id: str) -> bool:
+    row = conn.execute("SELECT quiet_asked FROM corrections WHERE id = ?",
+                       (correction_id,)).fetchone()
+    return bool(row and row["quiet_asked"])
+
+
+def mark_correction_quiet_asked(conn, correction_id: str) -> None:
+    conn.execute("UPDATE corrections SET quiet_asked = 1 WHERE id = ?", (correction_id,))
+    conn.commit()
+
+
+def correction_was_asked(conn, correction_id: str) -> bool:
+    row = conn.execute("SELECT asked FROM corrections WHERE id = ?",
+                       (correction_id,)).fetchone()
+    return bool(row and row["asked"])
+
+
+def mark_correction_asked(conn, correction_id: str) -> None:
+    conn.execute("UPDATE corrections SET asked = 1 WHERE id = ?", (correction_id,))
+    conn.commit()
+
+
+def mark_correction_offered(conn, correction_id: str) -> None:
+    conn.execute("UPDATE corrections SET offered = 1 WHERE id = ?", (correction_id,))
+    conn.commit()
+
+
+def campaigns_that_skipped_correction(conn, correction_id: str, *, since: Optional[float],
+                                      markets: Optional[list] = None) -> int:
+    """Campaigns that recorded feedback of their own since `since` without repeating this one.
+
+    The measure version of this was wrong in three ways at once (writes not campaigns, every
+    campaign not the ones that skipped it, every market not the ones it is expected in). Same
+    shape, same three cares — and the shape is why they are two queries rather than one: the
+    tables differ, the question does not.
+    """
+    if not _columns(conn, "correction_sightings") or since is None:
+        return 0
+    sql = ("SELECT COUNT(DISTINCT s.campaign_id) AS n FROM correction_sightings s "
+           "WHERE s.noted_at > ? AND s.campaign_id IS NOT NULL "
+           "AND NOT EXISTS (SELECT 1 FROM correction_sightings o "
+           "                WHERE o.campaign_id = s.campaign_id AND o.correction_id = ?)")
+    params: list = [since, correction_id]
+    folded = [f for f in {fold_market(m) for m in (markets or [])} if f]
+    if folded:
+        clause = " OR ".join(
+            ["LOWER(c.market) = ?", "LOWER(c.region) = ?", "LOWER(c.markets) LIKE ?"]
+            * len(folded))
+        sql += (f" AND EXISTS (SELECT 1 FROM campaigns c WHERE c.id = s.campaign_id "
+                f"AND ({clause}))")
+        for f in folded:
+            params += [f, f, f'%"{f}"%']
+    row = conn.execute(sql, params).fetchone()
+    return int(row["n"] or 0)
 
 
 def markets_of(campaign: dict) -> list:

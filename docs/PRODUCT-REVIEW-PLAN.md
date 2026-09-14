@@ -2071,7 +2071,63 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       nobody. A column migration cannot see a change of MEANING, so
       `_demote_unconfirmed_seed_metrics` migrates it — touching only rows with no `expected_in`
       and no `confirmed_by`, so anything a person really graduated survives.
-- [ ] **8.6 Same loop for standing corrections** — one learning mechanism for both.
+- [x] **8.6 Same loop for standing corrections** — one learning mechanism for both.
+      **"One learning mechanism" is the requirement, and a second one shaped like the first
+      does not satisfy it.** The loop lives in `learning.py` — thresholds, gate, the order
+      status is asked in, the market fold, the version fold, the three reasons a record has no
+      checklist — and `metrics` and `corrections` both read it. Every §8.3 defect is therefore
+      fixed for corrections by construction, because there is only one place it could be wrong.
+      A test asserts the constants are the same OBJECTS and that neither caller re-declares
+      them.
+      **What differs is the data.** A measure is a key with numeric values; a correction is a
+      sentence. `provenance` is required — *"so a judgment can cite where the rule came from"* —
+      and every mention keeps its own, because "praised in Peru; instructed independently in
+      Australia" is one rule with two origins and the second is what makes it more than one
+      client's house style.
+      **A judgment can now actually cite one.** `guardrail_breach` demanded a `rule_id`
+      pointing at a `reference` record, so a graduated correction was shown to the model as a
+      rule and could not be cited by it — §5.2's "an offer whose write path does not exist",
+      one item after it was named. `precedent: {correction_id, quote}` is the third slot, the
+      quote is checked against the rule's own words, and the provenance and confirmer travel
+      onto the stored finding.
+      **The ten corrections are not seeded.** They are one customer's rules; §12.3 ships them
+      as an example overlay. The point of this item is the loop, so they can grow.
+      *Found by review, all reproduced:*
+      **The loop could not fire at all, in two independent places.** `note_correction` was
+      referenced nowhere in the product but its own definition — a tool the model would have to
+      know existed and spontaneously call. That is §8.3's unreachable human step one stage
+      earlier and strictly worse: nothing would ever be RECORDED for the gate to act on. The
+      input was already in hand, because §2.5 ingests tracked client comments with author and
+      anchor, which is the whole of what a correction needs; `after_upload` now offers it.
+      And **the gate was inverted**: matching was exact-string, so three markets independently
+      saying "seed a single colourway", "seeding boxes should carry one colourway" and "only
+      one colourway per box" made THREE corrections, each stuck at one campaign in one market.
+      It was satisfiable only by the identical string arriving three times — one person
+      copy-pasting, the single-source case the two-market rule exists to reject. Easy to
+      satisfy illegitimately, impossible to satisfy legitimately. §5.1 and §8.2 both settled
+      this as *suggest, never auto-merge*, and keeping only the refusal half misread both.
+      **A standing correction was given authority nobody granted it.** `not_debatable` voicing
+      says "a rule **they wrote** was broken" — false of an inference from repetition plus one
+      confirmation. Worse, a verdict resting only on rules skips the disconfirming search
+      entirely, which is right for a rule the customer wrote and backwards for one the library
+      inferred: a past campaign that did the opposite and did well is the only evidence that
+      could ever catch a wrong inference. And there was no inverse — `learning.gate` has
+      carried a `set_aside` branch since §8.3 and nothing could reach it, so a correction
+      promoted in error blocked approvals with no way back.
+      **Retirement is the one place this loop deliberately differs from §8.5's**, because the
+      same signal means opposite things. For a measure, absence is disuse. For a rule, absence
+      of repetition is usually COMPLIANCE — a client stops restating a rule exactly when the
+      agency starts following it, so retiring on silence demotes the rules that are working and
+      keeps the ones being ignored. No threshold fixes that. The question is asked once, with
+      keep/set-aside offers, and nothing is ever demoted unattended. There is no revival path
+      either: a measure is demoted automatically so a sighting can undo it, while a correction
+      only leaves the checklist because a person put it there.
+      *Also:* a proposal that was not yet a record saw no standing corrections even when the
+      caller named the market — the flagship "judge this pitch" flow, missing the client's own
+      rules. `times_seen` was the only count on the surface and is not the one the gate reads
+      (five mentions with no `campaign_id` showed 5 while the gate read 0). The rendered rule
+      list and the joined provenance were both unbounded. `list_corrections(status="expectd")`
+      returned an empty list with no error.
 - [ ] **8.7 Replay as a report** — which campaigns now fail a new expectation; which past
       verdicts would change. Never silently rewrite old verdicts.
 - [ ] **8.8 `bulk_import_metrics` diffs columns against the registry before writing.**

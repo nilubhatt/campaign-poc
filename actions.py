@@ -145,7 +145,8 @@ def after_metrics(*, campaign_id: str, open_evaluation_id: Optional[str]) -> lis
 
 
 def after_upload(*, campaign_id: str, status: Optional[str],
-                 has_metrics: bool, earlier_judgment: Optional[dict] = None) -> list[dict]:
+                 has_metrics: bool, earlier_judgment: Optional[dict] = None,
+                 commentary: Optional[list] = None, title: str = "") -> list[dict]:
     """After a record lands.
 
     One thing is worth offering, and only sometimes: a concluded campaign with no outcome
@@ -158,6 +159,14 @@ def after_upload(*, campaign_id: str, status: Optional[str],
     takes an image — so the only route is a second upload, which duplicates the campaign.
     Offering a call that cannot be made is the failure this module's tests exist to catch;
     the missing tool is tracked instead (D39).
+
+    §8.6 added the MIRROR of that failure, which had no test: a call that can be made and is
+    never offered. `note_correction` was referenced nowhere in the product but its own
+    definition — a tool the model would have to know existed and spontaneously decide to call,
+    which is §8.3's unreachable human step one stage earlier and strictly worse, because
+    nothing would ever be RECORDED for the gate to act on. The input was already in hand:
+    §2.5 ingests tracked client comments with author, anchor and date, which is the whole of
+    what a correction needs.
     """
     offers = []
     # §6.3, and FIRST: a record that replaces a judged one is the one moment where "was our
@@ -197,7 +206,55 @@ def after_upload(*, campaign_id: str, status: Optional[str],
             consent="ask", needs=["the results themselves — CTR, ROI, conversions, or "
                                   "whatever was measured"],
             campaign_id=campaign_id))
+    offers += _note_what_the_client_said(campaign_id, commentary, title)
     return trim(offers)
+
+
+# A speaker note is the agency talking to itself; a tracked comment or an annotation is
+# somebody reviewing the work, and that is where a standing correction comes from. Filtering
+# rather than offering everything, because a deck's own presenter notes would fill the list
+# with the agency's own words and teach the model that corrections mean "anything written
+# anywhere in the file".
+_CLIENT_KINDS = ("comment", "annotation")
+# At most this many, however annotated the deck. `trim` caps the whole list anyway, and a
+# returned deck can carry forty comments — offering forty is a menu nobody reads, and it would
+# crowd out the metrics offer above, which is the larger gap.
+_MAX_CORRECTION_OFFERS = 2
+
+
+def _note_what_the_client_said(campaign_id: str, commentary: Optional[list],
+                               title: str) -> list[dict]:
+    """Offer to record a tracked client comment as a correction in the making (§8.6).
+
+    The provenance is assembled here and not left to the model: author, anchor and deck are
+    all on the row already, and a provenance the model composes is one it can compose wrongly.
+    The TEXT stays the client's own words — `needs` says so, because generalising "this looks
+    like a rule" into a rule they did not state is the invented evidence this product exists
+    to stop.
+    """
+    out = []
+    for row in (commentary or []):
+        if len(out) >= _MAX_CORRECTION_OFFERS:
+            break
+        if (row.get("kind") or "") not in _CLIENT_KINDS:
+            continue
+        said = (row.get("text") or "").strip()
+        if not said:
+            continue
+        where = ", ".join(part for part in (
+            row.get("author"), row.get("anchor"), f"on “{title}”" if title else None,
+            row.get("date")) if part)
+        out.append(action(
+            f"Record “{said[:70]}” as a standing correction in the making",
+            "note_correction",
+            why="Client feedback that recurs across markets becomes a rule every brief is "
+                "judged against — but only once it recurs and somebody confirms it. Recording "
+                "it now is what lets that be noticed later. Nothing is applied to any brief "
+                "yet.",
+            consent="ask",
+            needs=["text — the rule in the client's own words, not a generalisation of them"],
+            campaign_id=campaign_id, provenance=where or "tracked comment"))
+    return out
 
 
 def to_first_upload() -> list[dict]:

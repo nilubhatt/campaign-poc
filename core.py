@@ -21,6 +21,7 @@ import actions
 import chunking
 import clip_embed
 import config
+import corrections
 import embedding
 import enums
 import extract
@@ -384,7 +385,11 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         "next_actions": actions.after_upload(
             campaign_id=cid, status=current["status"],
             has_metrics=bool(current["metrics"]),
-            earlier_judgment=earlier_judgment),
+            earlier_judgment=earlier_judgment,
+            # §8.6: a tracked client comment IS client feedback, and it arrives with its
+            # provenance already assembled. Without this the correction loop had no input at
+            # all — `note_correction` was a tool nothing in the product ever mentioned.
+            commentary=commentary, title=title),
         "warnings": notices.collapse(warnings),
         # §6.3: the one moment where "was our judgment any good?" is both answerable and
         # free. Attached only when there IS an unreconciled judgment on the record this one
@@ -835,26 +840,43 @@ def _clean_precedent(conn, value, where: str, *, kind=None) -> Optional[dict]:
                          f"quote and the id; the check is not yours to assert.")
     campaign_id = value.get("campaign_id") or value.get("id")
     rule_id = value.get("rule_id")
-    if not campaign_id and not rule_id:
+    # §8.6: a STANDING CORRECTION is the third thing a finding can rest on, and the reason the
+    # corrections carry provenance at all — *"so a judgment can cite where the rule came
+    # from"*. Without this slot a graduated correction was shown to the model as a rule and
+    # could not be cited by it: `guardrail_breach` demands a `rule_id` pointing at a
+    # `reference` record, and a correction is neither. That is §5.2's failure — an offer whose
+    # write path does not exist — arriving one item after it was named.
+    correction_id = value.get("correction_id")
+    named = [k for k, v in (("campaign_id", campaign_id), ("rule_id", rule_id),
+                            ("correction_id", correction_id)) if v]
+    if not named:
         raise ValueError(f"{where}precedent must name what it cites — a campaign_id for a "
-                         f"departure from precedent, or a rule_id for a guardrail breach")
-    # Both slots at once made the campaign_id decorative: the quote was checked against the
-    # rule and the campaign could then be anything, invented included, and still be stored
-    # beside a passing check. A finding is anchored to ONE thing; two anchors are two
-    # findings.
-    if campaign_id and rule_id:
-        raise ValueError(f"{where}precedent names both a campaign_id ({campaign_id!r}) and a "
-                         f"rule_id ({rule_id!r}). A finding is anchored to one thing: the "
-                         f"rule it breaches, or the campaign it departs from. If both are "
-                         f"true, they are two findings.")
+                         f"departure from precedent, or a rule_id or correction_id for a "
+                         f"guardrail breach")
+    # More than one slot at once made the campaign_id decorative: the quote was checked
+    # against the rule and the campaign could then be anything, invented included, and still
+    # be stored beside a passing check. A finding is anchored to ONE thing; two anchors are
+    # two findings.
+    if len(named) > 1:
+        raise ValueError(f"{where}precedent names {' and '.join(named)}. A finding is "
+                         f"anchored to one thing: the rule it breaches, the standing "
+                         f"correction it breaches, or the campaign it departs from. If more "
+                         f"than one is true, they are more than one finding.")
     quote = _bounded(value.get("quote"), "precedent.quote", _MAX_QUOTE, where=where)
     # §6.1: required, not merely bounded. A citation naming a campaign and quoting nothing is
     # the assertion this whole item was written about with an id stapled to it — and it was
     # the shape the caps alone happily accepted.
     if not quote:
         raise ValueError(f"{where}precedent needs a quote — the words from "
-                         f"{campaign_id or rule_id!r} that the finding rests on. An id "
-                         f"without a quote is an assertion with a reference attached.")
+                         f"{campaign_id or rule_id or correction_id!r} that the finding rests "
+                         f"on. An id without a quote is an assertion with a reference "
+                         f"attached.")
+    if correction_id:
+        # Checked against the CORRECTION's own text, the same way a rule is checked against
+        # the rulebook record: a citation the cited thing does not support is the assertion
+        # §6.1 was written about, with an id stapled to it. The provenance travels with it so
+        # the reader can follow the rule back to the deck it was learned from.
+        return _checked_correction(conn, correction_id, quote, where)
     # Which LAYER the quote came from (§2.5). A commentary chunk is a retrieved chunk, so
     # "I do not think the timeline is realistic" was a perfectly compliant citation against
     # the campaign — and once stored it read forever as something that campaign's own deck
@@ -897,6 +919,48 @@ def _clean_precedent(conn, value, where: str, *, kind=None) -> Optional[dict]:
     return cleaned
 
 
+def _checked_correction(conn, correction_id: str, quote: str, where: str) -> dict:
+    """Verify a citation of a standing correction (§8.6).
+
+    Three things have to be true, and each one exists because its absence would let a finding
+    claim the authority of a rule nobody set. The correction has to EXIST; it has to be
+    STANDING, because a provisional one is exactly what the gate withheld and citing it would
+    promote it by the back door; and the quote has to be the correction's own words, checked
+    the same way §6.1 checks every other citation.
+
+    The provenance comes back with it. That is the whole reason corrections carry it: a reader
+    following the finding gets to the deck the rule was learned from, rather than to the
+    library asserting it.
+    """
+    entry = corrections.describe(conn, correction_id)
+    if entry is None:
+        raise ValueError(
+            f"{where}precedent cites correction {correction_id!r}, which is not a standing "
+            f"correction in this library. Cite one from `standing_corrections`, or say it as "
+            f"a missing_information or internal_contradiction finding about the brief itself.")
+    if entry["status"] != "expected":
+        raise ValueError(
+            f"{where}precedent cites correction {correction_id!r}, which is {entry['status']}, "
+            f"not standing. A guardrail breach is not debatable, and a rule nobody has "
+            f"confirmed cannot carry that. Raise it as a precedent_departure against the "
+            f"campaign it came from instead.")
+    # Segments and units, the same way every other citation is checked — §6.1's elision bound
+    # applies here too, and a hand-rolled `in` would have been a second, weaker check.
+    if not _quote_is_in(_quote_segments(quote, where), [entry["text"]]):
+        raise ValueError(
+            f"{where}precedent quotes {quote!r}, which is not what correction "
+            f"{correction_id!r} says. The rule on file reads: {entry['text']!r}.")
+    return {
+        "correction_id": correction_id,
+        "quote": quote,
+        "layer": "rule",
+        "checked": ["record", "standing"],
+        "provenance": "; ".join(s["provenance"] for s in
+                                corrections.sightings(conn, correction_id)),
+        "confirmed_by": entry["confirmed_by"],
+    }
+
+
 def _how_to_say_it(by_class: dict, findings: list) -> str:
     """The same judgment, voiced differently depending on what is actually in it (§6.2).
 
@@ -907,9 +971,27 @@ def _how_to_say_it(by_class: dict, findings: list) -> str:
     """
     parts = ["Give the user the verdict and the one-line summary."]
     if by_class.get("not_debatable"):
-        parts.append(
-            "State the guardrail breach(es) plainly: a rule they wrote was broken, and that "
-            "is not a matter of opinion. Name the rule.")
+        # §8.6: "a rule they wrote" is false of a standing correction. Nobody wrote it — the
+        # library inferred it from repetition across markets and one person confirmed it. It
+        # is still not a matter of opinion, because a person stood behind it, but stating an
+        # inference back to the customer as their own authored rule is the confident unfounded
+        # claim this whole review is about, arriving in the voicing rather than in a finding.
+        learned = [f for f in findings
+                   if (f.get("precedent") or {}).get("correction_id")]
+        if learned and len(learned) >= by_class["not_debatable"]:
+            parts.append(
+                "State the breach(es) plainly, and say where the rule came from: this is a "
+                "rule the library learned from their own repeated feedback and somebody "
+                "confirmed — not one they wrote down. Name it and name its provenance.")
+        elif learned:
+            parts.append(
+                "State the breach(es) plainly and name each rule. Some are rules they wrote "
+                "and some the library learned from their repeated feedback and somebody "
+                "confirmed — say which is which; the provenance is on each citation.")
+        else:
+            parts.append(
+                "State the guardrail breach(es) plainly: a rule they wrote was broken, and "
+                "that is not a matter of opinion. Name the rule.")
     if by_class.get("debatable"):
         parts.append(
             "The departures are NOT rule breaches — they are places this differs from a "
@@ -1022,6 +1104,44 @@ def _say_the_expected_measures(expected: dict) -> str:
             f"gap in the brief, not a verdict on it: the measure may be meaningless for this "
             f"kind of campaign, and only you can tell. Raise it as `missing_information` if "
             f"it matters here, and say nothing if it does not. ")
+
+
+# How many rules the note itself spells out. The rest stay in `standing_corrections`, where
+# the model can read them — this bounds the STANDING INSTRUCTION, not the data.
+_MAX_STANDING_SHOWN = 5
+
+
+def _say_the_standing_corrections(standing: dict) -> str:
+    """What the model is told about the rules this client has actually repeated (§8.6).
+
+    Silent when there are none, for the same reason as the measures: explaining a mechanism to
+    a model handed an empty list is the note that fires on everything.
+
+    Unlike a missing measure, a standing correction IS a rule — it recurred across markets and
+    a person confirmed it — so this says `guardrail_breach` rather than "consider". What it
+    does not do is decide that the rule was broken; that is the judgment, and the server has
+    only established what the rules are.
+    """
+    if not standing.get("standing"):
+        return ""
+    # Bounded, most-repeated first. The example overlay §12.3 ships carries ten rules, and ten
+    # rules rendered into every note — each of which can only be expressed as a blocking
+    # breach, against a 12-finding cap — is the checklist that fires on everything.
+    ranked = sorted(standing["standing"], key=lambda c: -c.get("times_seen", 0))
+    shown = ranked[:_MAX_STANDING_SHOWN]
+    rules = "; ".join(f"[{c['correction_id']}] {c['text']}" for c in shown)
+    more = (f" ({len(ranked) - len(shown)} more are in `standing_corrections`)"
+            if len(ranked) > len(shown) else "")
+    return (f"`standing_corrections` are rules this client has repeated across markets and "
+            f"somebody has confirmed — learned from their own feedback, not written by them "
+            f"and not invented by the product. The most-repeated: {rules}.{more} Check the "
+            f"brief against each one that applies. Where one is broken, that is a "
+            f"`guardrail_breach` citing `precedent: {{correction_id, quote}}` with the quote "
+            f"taken from the rule's own words; the server attaches the provenance so the "
+            f"reader can see which deck it was learned from, and you should name it. A breach "
+            f"is blocking only where the rule plainly applies to this kind of brief — where "
+            f"it does not, say nothing, because a rule applied regardless is how a checklist "
+            f"stops being read. ")
 
 
 def _no_subject_to_check() -> dict:
@@ -1588,6 +1708,7 @@ def _pole_search(conn, *, tag: str, text: Optional[str] = None,
 
 def _disconfirming_search(conn, *, verdict: str, subject_text: str, query_basis: str,
                           cited_ids: Optional[list], by_class: dict,
+                          findings: Optional[list] = None,
                           subject_campaign_id: Optional[str] = None) -> dict:
     """One query for precedent that contradicts this verdict, run by the SERVER (§6.4).
 
@@ -1613,7 +1734,16 @@ def _disconfirming_search(conn, *, verdict: str, subject_text: str, query_basis:
     # whole item saying so. "A campaign that broke the rule and performed anyway" is real
     # information — for whoever owns the rulebook (§12.1), not as a reason to reconsider the
     # breach. Voicing it as verdict-changing would undo 6.2 from the next field over.
-    if verdict != "approve" and by_class and set(by_class) == {"not_debatable"}:
+    # §8.6: this exemption is right for a rule the customer WROTE and can edit — arguing with
+    # it is a question about the rule, and the rulebook is where that belongs. It is backwards
+    # for a rule the library INFERRED. A past campaign that did the opposite and performed
+    # well is the single best evidence that the inference is wrong, and it is the only channel
+    # by which a wrongly-graduated correction could ever be caught. Extending a rulebook-shaped
+    # exemption to inferred content would have switched off the one check that watches it.
+    rests_on_learned = any((f.get("precedent") or {}).get("correction_id")
+                           for f in (findings or []))
+    if (verdict != "approve" and by_class and set(by_class) == {"not_debatable"}
+            and not rests_on_learned):
         return outcome(
             "verdict_rests_on_a_rule",
             "This verdict rests only on rules that were broken, which is not a matter of "
@@ -2172,22 +2302,27 @@ def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         # two kinds are anchored to the subject — "the brief gives no end date" has no
         # precedent to quote, and demanding one there would send the model looking for a
         # campaign to quote at, which is the invented evidence this item exists to stop.
-        wanted = "rule_id" if kind == "guardrail_breach" else "campaign_id"
+        # §8.6: a guardrail breach rests on a RULE, and the library now holds rules in two
+        # places — the rulebook, and the standing corrections it has learned and had confirmed.
+        # Either is a rule somebody set; neither is "a campaign that did it that way".
+        wanted = (("rule_id", "correction_id") if kind == "guardrail_breach"
+                  else ("campaign_id",))
+        naming = " or a ".join(wanted)
         if kind in _CITING_KINDS and not precedent:
             raise ValueError(
                 f"{where}a {kind} has to cite what it departs from: precedent with a "
-                f"{wanted} and a quote. Without one it is an opinion in the vocabulary of a "
+                f"{naming} and a quote. Without one it is an opinion in the vocabulary of a "
                 f"citation.")
         # The SLOT has to match the kind, or the rule_id check is only half a check: the
         # comment on `_verify_quote` says a rule must not be anchored to "somebody's Q3
         # deck", and without this a guardrail_breach could cite exactly that by using the
         # campaign_id slot instead.
-        if kind in _CITING_KINDS and precedent and wanted not in precedent:
+        if kind in _CITING_KINDS and precedent and not any(w in precedent for w in wanted):
             raise ValueError(
-                f"{where}a {kind} cites a {wanted}, and this precedent has a "
-                f"{'campaign_id' if wanted == 'rule_id' else 'rule_id'}. A rule in your "
-                f"guidelines and a campaign that did it differently are not "
-                f"interchangeable — one is not debatable and the other invites a rationale.")
+                f"{where}a {kind} cites a {naming}, and this precedent does not have one. A "
+                f"rule — in your guidelines or as a standing correction — and a campaign that "
+                f"did it differently are not interchangeable: one is not debatable and the "
+                f"other invites a rationale.")
         basis = finding.get("basis") or "judged"
         if basis not in _BASES:
             raise ValueError(f"{where}basis must be one of {list(_BASES)}, got {basis!r}")
@@ -2329,7 +2464,7 @@ def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
     disconfirming = _disconfirming_search(
         conn, verdict=verdict,
         subject_text=subject_text if subject_text is not None else "",
-        query_basis=query_basis, cited_ids=cited_ids, by_class=by_class,
+        query_basis=query_basis, cited_ids=cited_ids, by_class=by_class, findings=cleaned,
         subject_campaign_id=(campaign_id if campaign_id and subject_record
                              else (receipt or {}).get("campaign_id")))
     window = _window_check(conn, retrieval, cited_ids, subject_title=subject_title,
@@ -4658,6 +4793,14 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
     # not restate the rule that produces the list.
     expected_now = (metrics.expected_check(conn, campaign_id) if campaign_id
                     else _no_subject_to_check())
+    # With a record, its own markets; without one, the markets the CALLER named. A proposal
+    # that is not stored yet is the "judge this new pitch" flow, and leaving the client's own
+    # standing rules out of it left them out of the judgment they most obviously apply to.
+    standing_now = corrections.standing_for(
+        conn, campaign_id if subject else None,
+        markets=None if subject else [m for m in ([market, region]
+                                                  + ([markets] if isinstance(markets, str)
+                                                     else list(markets or []))) if m])
     # Gathered before the receipt is written, because D18 stamps them onto the verdict: a
     # judgment made over a half-indexed library is a different judgment from one made over a
     # whole one, and the warning that said so lived for exactly one response.
@@ -4726,7 +4869,8 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
             "observation naming the code and quoting the evidence, and reason from what you "
             "can see. Do not silently re-derive it, and do not defer to it against the "
             "evidence in front of you. "
-            + _say_the_expected_measures(expected_now) +
+            + _say_the_expected_measures(expected_now)
+            + _say_the_standing_corrections(standing_now) +
             "`outcomes` splits this evidence into what WORKED and what did NOT, by measured "
             "result rather than by impression. Read both before deciding: resemblance to a "
             "strong performer is not evidence, and a brief that looks like something that "
@@ -4763,6 +4907,11 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
         # appear. A measure graduating changes what every subsequent brief is checked against
         # without anybody touching a string, which is the whole of §8.4.
         "expected_measures": expected_now,
+        # §8.6: the same loop's other half. These are what this client has actually repeated
+        # across markets, each with the provenance it was learned from — *"the most valuable
+        # content the library holds, because they are the things this client repeats"*. A rule
+        # nothing reads is a row in a table, which is the "frozen" the review is describing.
+        "standing_corrections": standing_now,
         # §6.4's other half, and the half that can actually change a verdict. The save-time
         # search RECORDS overconfidence; by then the judgment is written. What changes the
         # reasoning is seeing both sides while reasoning — so the evidence that worked and

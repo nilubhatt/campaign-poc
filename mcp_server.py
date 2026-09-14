@@ -16,6 +16,7 @@ from pydantic import Field
 from mcp.server.mcpserver import MCPServer
 
 import config
+import corrections
 import core
 import enums
 import metrics
@@ -143,6 +144,17 @@ predicted — forecast, projected, estimated, target, what was expected."""
 # §8.2's three answers.
 MeasureDecision = _enum("same_thing", "different_measure", "ignore")
 
+# §8.6's three, which are §8.2's in this item's vocabulary. Separate names rather than reusing
+# MeasureDecision: "the same thing" reads naturally of two metric keys and oddly of two
+# sentences, and one enum serving both would make a wrong value in either look valid.
+CorrectionDecision = _enum("same_rule", "different_rule", "set_aside")
+"""same_rule — one rule stated two ways; everywhere it was said moves onto the named one.
+different_rule — it stands on its own, and stops asking.
+set_aside — never apply it and stop asking. What was said is kept."""
+
+_CORRECTION_STATUSES = ("provisional", "expected", "retired", "ignored", "merged")
+CorrectionStatus = _enum(*_CORRECTION_STATUSES)
+
 ReconciliationBasis = _enum("results", "superseding_version")
 """results — measured outcomes; the campaign ran and the numbers are in.
 superseding_version — a later version of the brief showed whether the judgment held."""
@@ -217,6 +229,9 @@ class Precedent(TypedDict):
     quote: NotRequired[str]           # REQUIRED, <= 300 chars, checked against the record
     campaign_id: NotRequired[str]     # for a departure from precedent
     rule_id: NotRequired[str]         # for a guardrail breach — a rule, not a campaign
+    # §8.6: the library's other kind of rule — a standing correction it learned from repeated
+    # client feedback and had confirmed. Also a guardrail breach; also not a campaign.
+    correction_id: NotRequired[str]   # for a guardrail breach against a standing correction
     # Which layer the quote came from. Default "body" = the deck itself. Set "commentary"
     # whenever the excerpt you are quoting arrived with matched_kind "commentary", and name
     # who said it — otherwise the finding records somebody's objection as a claim the deck
@@ -730,6 +745,12 @@ _PREPARE_EVALUATION_DESCRIPTION = """Evaluate a NEW campaign proposal against th
     Read `status` first: `nothing_to_check` means no checklist applied (the record has no
     market, or is not a campaign), which is not the same as a brief that carries everything.
 
+    `standing_corrections` are the rules this client has actually repeated — each one recurred
+    across markets and a person confirmed it — with the provenance it was learned from. They
+    are rules, not suggestions: a brief that breaks one is a `guardrail_breach` citing
+    `precedent: {correction_id, quote}`, quoting the rule's own words. Say nothing where a rule
+    plainly does not apply to this kind of brief.
+
     `most_valuable_missing_input` names the single thing that would most change this
     judgment, or is null when nothing would. Say it as part of the verdict rather than as an
     aside — "this rests on three campaigns, none of which has measured results" is context
@@ -827,9 +848,11 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
     discuss. The first two are different classes of statement and must not be written in the
     same register:
 
-      • `guardrail_breach` — a rule the customer wrote was broken. Cite the rule:
+      • `guardrail_breach` — a rule the customer set was broken. Cite the rule: either
         `precedent: {rule_id, quote}`, where `rule_id` is a record stored as reference
-        material. **Not debatable**, so never a `note`. State it: "this breaks your own rule
+        material, or `precedent: {correction_id, quote}` for one of the
+        `standing_corrections` — a rule the library learned from repeated client feedback and
+        a person confirmed. Quote the rule's own words. **Not debatable**, so never a `note`. State it: "this breaks your own rule
         on AI imagery". There is no rationale that makes it not a breach; there is only a
         decision to accept it, and that is the customer's to make, not yours to pre-empt.
 
@@ -865,9 +888,12 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
     brief in front of you, which is not in the library, so they need no citation — do not go
     looking for a campaign to quote at in order to satisfy the shape.
 
-    `rule_id` means your guidelines — a record stored as reference material. It is not
-    interchangeable with `campaign_id`: doing it differently from a past campaign is a
-    `precedent_departure`, however strongly you feel about it.
+    `rule_id` means your guidelines — a record stored as reference material. `correction_id`
+    means a standing correction, which is a rule too: it recurred across markets and somebody
+    confirmed it. Neither is interchangeable with `campaign_id`: doing it differently from a
+    past campaign is a `precedent_departure`, however strongly you feel about it. A correction
+    still `provisional` is not yet a rule and is refused here — raise that as a
+    `precedent_departure` against the campaign it came from.
 
     Check which LAYER your quote came from. Evidence rows carry `matched_kind`: `body` is
     what the deck says, `commentary` is what somebody said ABOUT it — a speaker note, a PDF
@@ -1210,6 +1236,153 @@ def graduate_measure(measure: str, confirmed_by: str) -> dict:
     conn = store.connect()
     try:
         return metrics.graduate(conn, measure, confirmed_by=confirmed_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def note_correction(text: str, provenance: str, campaign_id: Optional[str] = None) -> dict:
+    """Record a piece of client feedback as a standing correction in the making (§8.6).
+
+    New client feedback is the same shape of event as a new metric, and travels the same path:
+    provisional on first mention, counted, and promoted to something every brief in its markets
+    is judged against only once it recurs across markets AND a person confirms it. "We want the
+    seeding box to carry one colourway" said once is one client's note; the same rule arriving
+    independently in a second market is a standard.
+
+    `provenance` is REQUIRED and is the point of the record: where the rule came from — the
+    deck and slide, or who asked for it ("JD SEA slide 23, named by the client as the standard
+    every brief should follow"). Without it a judgment resting on the rule can say only "the
+    library says so". Every mention keeps its own, because "praised in Peru; instructed
+    independently in Australia" is one rule with two origins and the second is what makes it
+    more than one client's house style.
+
+    Pass `campaign_id` when the feedback came from a specific brief — it is what lets the rule
+    be counted across campaigns and markets, which is the whole gate. Use the words the client
+    used; do not generalise them into a rule they did not state."""
+    conn = store.connect()
+    try:
+        return corrections.note(conn, text=text, campaign_id=campaign_id,
+                                provenance=provenance)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def list_corrections(status: Optional[CorrectionStatus] = None) -> dict:
+    """Every standing correction the library has learned, with provenance and status (§8.6).
+
+    `provisional` ones have been said but not confirmed and are applied to nothing;
+    `expected` ones are standing and are shown with every judgment in their markets;
+    `retired` ones stopped coming up and are no longer applied — never deleted, because old
+    judgments cited them and those have to stay explicable."""
+    if status:
+        # `_enum` is advisory — a string to pydantic, an enum to the reader (D32) — so an
+        # unrecognised value reached the filter and returned an empty list with no error at
+        # all. §5.1's rule is that every refusal names the valid set and the closest match.
+        status = enums.normalise(status, field="status", valid=_CORRECTION_STATUSES)
+    conn = store.connect()
+    try:
+        rows = corrections.all_of_them(conn)
+        if status:
+            rows = [r for r in rows if r["status"] == status]
+        return {"corrections": [
+            {**r, "provenance": [s["provenance"]
+                                 for s in corrections.sightings(conn, r["id"])]}
+            for r in rows], "count": len(rows)}
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def resolve_correction(correction_id: str, decision: CorrectionDecision,
+                       same_as: Optional[str] = None) -> dict:
+    """Answer the one question the library asks about a new correction (§8.6).
+
+    Client feedback arrives worded differently every time. "Seed a single colourway", "seeding
+    boxes should carry one colourway" and "only one colourway per box" are one rule stated by
+    three markets — and left apart they are three rules, each seen once, none of which ever
+    recurs. That is the difference between a rule becoming standing and never doing so.
+
+      • `same_rule` — it is the rule named in `same_as`. Everywhere it was said moves with it,
+        so the fold counts every market that stated it.
+      • `different_rule` — it stands on its own. It stays on file and stops asking.
+      • `set_aside` — stop asking about it and never apply it. What was said is KEPT: this is
+        a decision about the rule, not about the record.
+
+    Offer the three; do not choose. Which of two wordings is the rule is a judgment about
+    their vocabulary, and getting it wrong merges two rules that are not the same."""
+    conn = store.connect()
+    try:
+        return corrections.resolve(conn, correction_id, decision=decision, same_as=same_as)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def set_aside_correction(correction_id: str, why: Optional[str] = None) -> dict:
+    """Stop applying a standing correction, without deleting it (§8.6).
+
+    The inverse of `graduate_correction`, and the reason it has to exist: a correction promoted
+    in error is a blocking finding on every brief in its markets, and there would otherwise be
+    no way back except waiting for it to fall out of use. What was said stays on file — this is
+    a decision about the rule, not about the record of the feedback."""
+    conn = store.connect()
+    try:
+        return corrections.set_aside(conn, correction_id, why=why)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def keep_correction(correction_id: str) -> dict:
+    """Confirm a standing correction is still current (§8.6).
+
+    The library asks once when a rule has not come up in a while. It never demotes a rule on
+    its own: for a measure, silence means nobody tracks it any more, but for a rule silence
+    usually means the agency has started following it — so demoting on silence would drop
+    exactly the rules that are working. Answering keeps it applied and stops the asking."""
+    conn = store.connect()
+    try:
+        return corrections.keep(conn, correction_id)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def correction_status(correction_id: str) -> dict:
+    """Where a standing correction stands against the same gate measures face (§8.6): how many
+    campaigns and markets have raised it, whether it is eligible, and what is missing if not.
+
+    Read-only."""
+    conn = store.connect()
+    try:
+        return corrections.graduation(conn, correction_id)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def graduate_correction(correction_id: str, confirmed_by: str) -> dict:
+    """Make a correction standing: every brief in its markets is judged against it (§8.6).
+
+    The same gate as a measure, and for the same reason — one client contact repeating
+    themselves on five decks in one market is one opinion stated five times, and promoting it
+    makes it everybody's rule. It needs to have recurred across at least two markets, and a
+    person has to confirm it.
+
+    `confirmed_by` is who is confirming — a name, a role, a team. Ask; do not confirm on the
+    user's behalf. Call `correction_status` first to see whether it is eligible."""
+    conn = store.connect()
+    try:
+        return corrections.graduate(conn, correction_id, confirmed_by=confirmed_by)
     finally:
         conn.close()
 
