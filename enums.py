@@ -129,6 +129,17 @@ STATUS_SYNONYMS = {
     # as concluded puts it into every later "what worked" query as though it had run.
 }
 
+# §9.1. What a marketer types for a photograph that came back.
+ASSET_PHASE_SYNONYMS = {
+    "brief": "proposed", "briefed": "proposed", "concept": "proposed",
+    "mockup": "proposed", "mock_up": "proposed", "render": "proposed",
+    "planned": "proposed", "intended": "proposed",
+    "as_delivered": "delivered", "shot": "delivered", "photo": "delivered",
+    "photos": "delivered", "final": "delivered", "actual": "delivered",
+    "built": "delivered", "executed": "delivered", "on_site": "delivered",
+    "post": "delivered", "after": "delivered",
+}
+
 RECORD_TYPE_SYNONYMS = {
     "guidelines": "reference",
     "rulebook": "reference",

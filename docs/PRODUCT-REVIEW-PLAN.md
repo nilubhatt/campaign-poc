@@ -2250,9 +2250,58 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 
 ## Phase 9 — Execution drift and context events
 
-- [ ] **9.1 Asset `phase`** — `proposed` vs `delivered`, plus date.
-- [ ] **9.2 `compare_execution(campaign_id, delivered_assets[])`** — as briefed / never
+- [x] **9.1 Asset `phase`** — `proposed` vs `delivered`, plus date.
+      **The default is the load-bearing decision.** Every asset in a library today came out of
+      a deck, so an upgraded database has to read `proposed`; defaulting the other way would
+      have §9.2 compare a library of briefs against itself and report zero drift with total
+      confidence. `captured_on` belongs to `delivered` and is refused on briefed creative — a
+      capture date on a render says a photograph exists of something that has not happened —
+      and it is stored normalised, because `fromisoformat` also accepts `20260314` and a later
+      comparison against a campaign window is a string comparison.
+- [x] **9.2 `compare_execution(campaign_id, delivered_assets[])`** — as briefed / never
       appeared / new, plus a drift score from visual distance. Machinery already exists.
+      **Two instruments, two questions, kept apart.** A fingerprint is an identity claim — this
+      photograph is that render — and is exact enough to state. A visual distance is a claim
+      about resemblance, which is a number and not a verdict.
+      **It takes only the campaign**, not the plan's `delivered_assets[]`: §9.1 said everything
+      falls out of the phase field and it does, and a second inline upload path would be a
+      second way to attach an image with its own resolution rules. `upload_image_assets` is the
+      bulk path instead — fourteen photographs were fourteen uploads and fourteen tool calls,
+      and `ingest_campaign`'s own comment already recorded that a call per image "isn't a
+      workflow anyone would actually use".
+      *Found by review, all reproduced:*
+      **A fingerprint cannot do the job the item assigns it.** `images.py` scopes pHash to the
+      same FILE resized or recompressed, and that is what its regression baseline verified. A
+      photograph of a thing physically built will not land within Hamming 8 of the render of
+      it — so on the review's own motivating case, a perfectly executed campaign reported
+      "0 as briefed, 3 never appeared, 14 new" with `computed` stamped on it. A visual second
+      pass now offers `looks_like` on the unmatched, marked `heuristic` (§7.8's third basis,
+      which exists for exactly this), and it never moves an item between lists: a resemblance
+      is not an identity claim.
+      **One briefed image on two slides read as two briefed things.** The deck puts the hero on
+      the cover and again on a detail slide, and the extractor dedupes by sha256 — two files,
+      one image. A photograph of it satisfied one and the other reported NEVER APPEARED, on the
+      list whose entire claim is identity. Briefed images are clustered first.
+      **And the answer depended on upload order.** Taking each photograph's closest unclaimed
+      render in turn made the same four images produce opposite verdicts on the same briefed
+      element. Pairs are assigned globally from the closest, so the result is a property of the
+      images rather than of the sequence.
+      **A blank frame matched a colour swatch at distance 0.** A perceptual hash measures
+      structure and an image with none hashes identically to every other image with none — flat
+      red, flat blue and a blown-out frame are all `8000000000000000`. Decks routinely carry
+      solid-fill rectangles, so a blank wall in a delivered photograph reported a swatch as
+      having been built.
+      **The drift score fell when you supplied more evidence.** Measured: 0.84 to 0.47, purely
+      from uploading eight photographs of one shoot instead of one, because a centroid contracts
+      toward the mean as a set grows. It is the mean PAIRWISE distance now, which is also the
+      same kind of quantity as the yardstick it is divided by. The yardstick itself exploded to
+      442 on a brief of two near-identical renders, and said "there is only one briefed image"
+      about a brief with two.
+      **Two of the three lists carried no evidence at all**, against the item's own "matching
+      evidence attached per item", while the matcher had already computed every distance and
+      thrown the near-misses away. And a half-indexed set computed a score from whatever subset
+      had vectors and called it `measured`; a library that never embedded an image crashed with
+      `OperationalError` rather than degrading.
 - [ ] **9.3 Named commitment checking** — extract the commitment list at upload, check each
       against delivered photos.
 - [ ] **9.4 Classify drift** improvement / neutral / degradation, marked `judged`.

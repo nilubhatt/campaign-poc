@@ -275,6 +275,25 @@ def after_graduation(*, what: str, markets: list) -> list[dict]:
         consent="ask")])
 
 
+def after_delivered_asset(*, campaign_id: str, briefed: int) -> list[dict]:
+    """A photograph of what ran has just landed (§9.2).
+
+    The moment `compare_execution` stops being empty, and the moment nothing pointed at it —
+    the fourth time this project has shipped a tool the model would have to know existed and
+    spontaneously call (D116). Offered only when there IS a brief to compare against, because
+    photographs with nothing to measure them against are not a comparison.
+    """
+    if not briefed:
+        return []
+    return trim([action(
+        "See what actually ran against what was briefed",
+        "compare_execution",
+        why=f"This campaign has {briefed} briefed image{'s' * (briefed != 1)} and now has "
+            f"photographs of what happened. The comparison says which briefed elements "
+            f"appeared, which did not, and which arrived unbriefed.",
+        consent="ask", campaign_id=campaign_id)])
+
+
 def to_first_upload() -> list[dict]:
     """The one thing an empty library needs. In one place because `gaps()` and `coverage()`
     both offer it and had the sentence written out twice — two sources of truth for one

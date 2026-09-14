@@ -76,6 +76,21 @@ CREATE TABLE IF NOT EXISTS assets (
     modality      TEXT NOT NULL DEFAULT 'image',   -- image today; video/audio later (§6.7)
     file_path     TEXT NOT NULL,    -- relative to ASSET_DIR
     embedded      INTEGER NOT NULL DEFAULT 0,  -- 1 once its CLIP vector is in the vector store
+    -- §9.1: what this image IS. `proposed` is creative lifted from a brief — what somebody
+    -- intends to run; `delivered` is a photograph that came back after the event — evidence
+    -- of what ran. "A library that learns from briefs while measuring executions is learning
+    -- from the wrong document, and has no way to notice", and this is the field that lets it
+    -- notice. Everything in §9.2-9.5 falls out of it.
+    --
+    -- The DEFAULT is the load-bearing part: every asset on file today came out of a deck, so
+    -- an upgraded database has to read as `proposed`. Defaulting the other way would have
+    -- §9.2 compare a library of briefs against itself and report zero drift with total
+    -- confidence.
+    phase         TEXT NOT NULL DEFAULT 'proposed',   -- proposed | delivered
+    -- When the photograph was taken, which is the asset's own fact and not the row's: a deck
+    -- uploaded in March can carry photos shot in January, and `created_at` records when this
+    -- library was told.
+    captured_on   TEXT,
     created_at    REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS asset_fingerprints (
@@ -777,6 +792,12 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
     # campaign been measured" is what decides whether to go and ask for its numbers, and a
     # campaign carrying only the figure somebody was aiming at has not been measured at all.
     d["has_actual_metrics"] = any(m["metric_type"] == "actual" for m in d["metrics"])
+    # §9.1: whether anything has come back. A concluded campaign whose assets are all
+    # `proposed` has never been checked against what actually ran, which is the state the
+    # review says the library cannot currently notice.
+    d["has_delivered_assets"] = bool(conn.execute(
+        "SELECT 1 FROM assets WHERE campaign_id = ? AND phase = 'delivered' LIMIT 1",
+        (campaign_id,)).fetchone())
     d["has_evaluations"] = conn.execute(
         "SELECT 1 FROM evaluations WHERE campaign_id = ? LIMIT 1", (campaign_id,)
     ).fetchone() is not None
@@ -1256,11 +1277,16 @@ def map_chunks_to_campaigns(conn, chunk_ids: list[str]) -> dict[str, str]:
 
 # ── assets (§6.6/6.7: images today, other modalities keyed the same way later) ──
 
-def insert_asset(conn, campaign_id: str, *, file_path: str, modality: str = "image") -> str:
+VALID_ASSET_PHASES = ("proposed", "delivered")
+
+
+def insert_asset(conn, campaign_id: str, *, file_path: str, modality: str = "image",
+                 phase: str = "proposed", captured_on: Optional[str] = None) -> str:
     aid = _id("asset")
     conn.execute(
-        "INSERT INTO assets (id, campaign_id, modality, file_path, created_at) VALUES (?,?,?,?,?)",
-        (aid, campaign_id, modality, file_path, _now()),
+        "INSERT INTO assets (id, campaign_id, modality, file_path, phase, captured_on, "
+        "created_at) VALUES (?,?,?,?,?,?,?)",
+        (aid, campaign_id, modality, file_path, phase, captured_on, _now()),
     )
     conn.commit()
     return aid
@@ -1278,6 +1304,28 @@ def get_assets_for_campaign(conn, campaign_id: str) -> list[dict]:
     return [dict(r) for r in conn.execute(
         "SELECT * FROM assets WHERE campaign_id = ? ORDER BY created_at", (campaign_id,)
     ).fetchall()]
+
+
+def asset_fingerprints(conn, asset_ids: list) -> dict:
+    """`{asset_id: phash}` for those that have one (§9.2).
+
+    Missing rather than empty for an asset that was never hashed, so a caller can tell "could
+    not be compared" from "compared and matched nothing" — two answers a single empty string
+    would collapse into one.
+    """
+    if not asset_ids:
+        return {}
+    if not _columns(conn, "asset_fingerprints"):
+        return {}
+    marks = ",".join("?" * len(asset_ids))
+    return {r["asset_id"]: r["phash"] for r in conn.execute(
+        f"SELECT asset_id, phash FROM asset_fingerprints WHERE asset_id IN ({marks})",
+        list(asset_ids)).fetchall()}
+
+
+def assets_in_phase(conn, campaign_id: str, phase: str) -> list[dict]:
+    """The briefed creative, or the photographs that came back (§9.1)."""
+    return [a for a in get_assets_for_campaign(conn, campaign_id) if a["phase"] == phase]
 
 
 def get_unembedded_chunks(conn, campaign_id: Optional[str] = None) -> list[dict]:

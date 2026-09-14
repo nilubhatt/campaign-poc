@@ -130,6 +130,13 @@ Status = _enum("proposed", "in_flight", "concluded")
 in_flight — live, running, in market, in flight, activated.
 concluded — finished, wrapped, completed, ended, done, post-campaign."""
 
+# §9.1: what an image IS. The default is `proposed` because every asset already in a library
+# came out of a deck, and reading briefed creative as evidence of what ran is the confusion the
+# whole of Phase 9 exists to make visible.
+AssetPhase = _enum("proposed", "delivered")
+"""proposed — creative lifted from a brief; what somebody intends to run.
+delivered — a photograph that came back after the event; evidence of what ran."""
+
 MetricType = _enum("actual", "predicted", "target")
 """actual — measured, real, post-campaign, what happened.
 predicted — forecast, projected, estimated, what this library expected to happen.
@@ -446,16 +453,93 @@ def delete_campaign(campaign_id: str) -> dict:
 
 @mcp.tool()
 @_catch_value_errors
-def upload_image_asset(campaign_id: str, asset_ref: dict) -> dict:
+def upload_image_assets(campaign_id: str, asset_refs: list, phase: AssetPhase = "proposed",
+                        captured_on: Optional[str] = None) -> dict:
+    """Attach SEVERAL images to a campaign in one call — the usual shape for photographs that
+    come back from an event.
+
+    Same arguments as `upload_image_asset`, with a list. One image that cannot be read is
+    reported in `failed` and does not stop the others.
+
+    Use this rather than putting event photographs into a deck and uploading that: images
+    pulled out of a deck are filed as `proposed` creative, which would add the photographs to
+    the brief they are supposed to be compared against."""
+    conn = store.connect()
+    try:
+        return core.ingest_image_assets(conn, campaign_id=campaign_id, asset_refs=asset_refs,
+                                        phase=phase, captured_on=captured_on)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def upload_image_asset(campaign_id: str, asset_ref: dict, phase: AssetPhase = "proposed",
+                       captured_on: Optional[str] = None) -> dict:
     """Attach an image (hero shot, creative asset) to a campaign. Processed two ways: a
     perceptual hash (exact/near-duplicate reuse — check_image_provenance) and a CLIP visual
     embedding (aesthetic/regional similarity — find_similar_images). asset_ref is {asset_id}
     from POST /upload, {path} local, or {filename, base64} inline. Consider calling
     check_image_provenance and/or find_similar_images first if you want to flag reuse or
-    similarity before attaching it."""
+    similarity before attaching it.
+
+    `phase` says what the image IS, and it matters more than it looks:
+
+      • `proposed` (the default) — creative lifted from a brief. What somebody INTENDS to run.
+      • `delivered` — a photograph that came back after the event. Evidence of what RAN.
+
+    Pass `delivered` for anything shot on site or after the campaign, with `captured_on` as
+    YYYY-MM-DD. Reading briefed creative as evidence of what ran is the confusion this field
+    exists to prevent: a library that learns from briefs while measuring executions is
+    learning from the wrong document. When you do not know which it is, say so and ask —
+    do not guess `delivered`, because that is the reading that asserts something."""
     conn = store.connect()
     try:
-        return core.ingest_image_asset(conn, campaign_id=campaign_id, asset_ref=asset_ref)
+        return core.ingest_image_asset(conn, campaign_id=campaign_id, asset_ref=asset_ref,
+                                       phase=phase, captured_on=captured_on)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def compare_execution(campaign_id: str) -> dict:
+    """What actually ran, against what was briefed (§9.2).
+
+    Uses the images already attached to the campaign — `proposed` ones are the brief,
+    `delivered` ones are photographs that came back — so upload the returned photos with
+    `phase="delivered"` first.
+
+    Returns four lists and a score:
+
+      • `as_briefed`     — a delivered photo whose fingerprint matches a briefed image.
+      • `never_appeared` — briefed, and nothing that came back matches it.
+      • `new`            — came back, and matches nothing that was briefed.
+      • `another_view`   — a further photograph of something already counted.
+
+    A match is by FINGERPRINT, which answers "is this the same image file". A photograph of a
+    thing that was physically built will not fingerprint-match the render of it, so an item in
+    `never_appeared` or `new` may carry `looks_like` — a visual resemblance, marked
+    `heuristic`. That is a question for somebody who can recognise the thing, never an answer:
+    say what resembles what and ask.
+      • `drift.score`    — the mean distance between every briefed image and every delivered
+                           one. It is NOT a percentage: real photographs sit close together in
+                           visual space, so a raw figure near zero does not mean "no drift".
+                           Read `relative_to_brief_spread` instead — the drift in units of how
+                           far the brief's own images sit from each other, where around 1 means
+                           the delivered creative is within the brief's own range of looks.
+
+    Every item carries the evidence behind it: which image it matched and at what distance.
+
+    **The score says how far, never whether that was good.** A briefed element that did not
+    appear may have been dropped, or replaced by something better — the photographs cannot say
+    which and neither can this. If the user wants that read, say what the lists show and ask.
+
+    `status: nothing_to_check` means one half is missing — nothing has come back yet, or
+    nothing was briefed. That is not zero drift; it is no measurement."""
+    conn = store.connect()
+    try:
+        return core.compare_execution(conn, campaign_id=campaign_id)
     finally:
         conn.close()
 

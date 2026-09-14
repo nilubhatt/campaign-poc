@@ -94,6 +94,16 @@ _REGISTRY: dict[str, tuple] = {
         "Nothing — this finishes without you.",
         "Offer finish_indexing on the campaign; no re-upload needed.",
     ),
+    # §9.2: the comparison ran, and some images were not in it. Left silent, the three lists
+    # would add up to fewer images than the campaign has and nobody would know which were
+    # missing — the totals lying about what was examined.
+    "assets_not_fingerprinted": (
+        "degraded", "record",
+        "{count_phrase} not compared against the brief, because nothing was fingerprinted "
+        "for {them}. The comparison covers the rest.",
+        "Run finish_indexing — the files are stored, so nothing needs uploading again.",
+        "",
+    ),
     "image_not_fingerprinted": (
         "degraded", "record",
         # {count} is filled in when several folded together and dropped when it is one:

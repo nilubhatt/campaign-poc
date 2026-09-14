@@ -2903,6 +2903,7 @@ def wait_until_ready(timeout: float = 60.0, interval: float = 3.0) -> dict:
 #   3  a whole market has none, so judgments about that market rest on nothing local
 #   4  records are stored but not searchable, so the evidence exists and cannot be found
 #   5  decks whose commentary was never read — real content, never ingested
+#   6  campaigns judged on a brief with nothing showing what actually ran (§9.1)
 # How many names a gap may list before it is a paragraph rather than a sentence.
 _MAX_NAMED = 5
 
@@ -2911,6 +2912,12 @@ _GAP_RANK = {
     "few_verified_outcomes": 2,
     "market_without_outcomes": 3,
     "partly_indexed": 4,
+    # §9.1's state: "a library that learns from briefs while measuring executions is learning
+    # from the wrong document, and has no way to notice." Ranked below the others because a
+    # brief with no measured outcome is a bigger hole than a measured outcome nobody has
+    # checked against what ran — but above nothing, because it is the difference between
+    # "this campaign worked" and "something worked, and we do not know if it was this".
+    "execution_never_checked": 5,
     # "commentary_never_read" is recorded but not reported — see gaps() for why.
 }
 
@@ -3018,6 +3025,37 @@ def gaps(conn) -> dict:
                 why=f"{len(ran) - len(with_outcomes)} finished campaigns have no results.",
                 consent="ask", needs=["which campaign, and the numbers"],
                 campaign_id=next(c["id"] for c in ran if c["id"] not in measured_ids))]),
+        })
+
+    # §9.1/§9.2: a concluded campaign with measured results, briefed creative, and nothing
+    # showing what actually ran. The review's third possibility — "that what ran was not what
+    # was briefed" — which the library could not previously notice at all.
+    unchecked = [c for c in with_outcomes
+                 if store.assets_in_phase(conn, c["id"], "proposed")
+                 and not store.assets_in_phase(conn, c["id"], "delivered")]
+    if unchecked:
+        found.append({
+            "code": "execution_never_checked",
+            "what": f"{len(unchecked)} finished campaign"
+                    f"{'s' * (len(unchecked) != 1)} with results on file "
+                    f"{'have' if len(unchecked) != 1 else 'has'} briefed creative and no "
+                    f"photographs of what actually ran: "
+                    f"{', '.join(c['title'] for c in unchecked[:_MAX_NAMED])}"
+                    + (f" (and {len(unchecked) - _MAX_NAMED} more)"
+                       if len(unchecked) > _MAX_NAMED else "") + ".",
+            "why_it_matters": ("Every outcome on those campaigns is being read as though the "
+                               "brief caused it. If what ran was not what was briefed, the "
+                               "library is learning from the wrong document and has no way "
+                               "to notice."),
+            "counts": {"campaigns": len(unchecked)},
+            "next_actions": actions.trim([actions.action(
+                f"Add the photographs from \u201c{unchecked[0]['title']}\u201d",
+                "upload_image_asset",
+                why="With the delivered photographs on file, compare_execution says which "
+                    "briefed elements appeared, which did not, and which arrived unbriefed.",
+                consent="ask",
+                needs=["the photographs themselves"],
+                campaign_id=unchecked[0]["id"], phase="delivered")]),
         })
 
     # A gap located in a SLICE rather than in the total. A marketer asking about Colombia
@@ -5064,26 +5102,106 @@ def reconcile_evaluation(conn, *, evaluation_id: str, actual: Optional[str] = No
 
 # ── image assets / creative-reuse detection (§6.6) ───────────────────────────
 
-def ingest_image_asset(conn, *, campaign_id: str, asset_ref: dict) -> dict:
+def ingest_image_assets(conn, *, campaign_id: str, asset_refs: list,
+                        phase: str = "proposed",
+                        captured_on: Optional[str] = None) -> dict:
+    """Several images in one call (§9.2).
+
+    Fourteen photographs from an event were fourteen uploads and fourteen tool calls, each
+    needing its own `phase="delivered"` — and `ingest_campaign`'s own comment already records
+    that a manual call per image "isn't a workflow anyone would actually use". The obvious
+    workaround is worse: dropping the photos into a wrap deck files all fourteen as `proposed`,
+    which inflates the brief and drags the comparison toward zero drift by construction.
+
+    Each image is independent: one that cannot be resolved is reported and does not stop the
+    rest, which is `bulk_import_metrics`' rule for the same reason.
+    """
+    stored, failed = [], []
+    for ref in asset_refs or []:
+        result = ingest_image_asset(conn, campaign_id=campaign_id, asset_ref=ref,
+                                    phase=phase, captured_on=captured_on)
+        (failed if result.get("error") else stored).append(result)
+    offers = (actions.after_delivered_asset(
+        campaign_id=campaign_id,
+        briefed=len(store.assets_in_phase(conn, campaign_id, "proposed")))
+        if stored and phase == "delivered" else [])
+    return {"campaign_id": campaign_id, "phase": phase, "captured_on": captured_on,
+            "stored": len(stored), "assets": stored,
+            **({"failed": failed} if failed else {}),
+            "next_actions": offers,
+            "what_it_means": (
+                f"{len(stored)} image{'s' * (len(stored) != 1)} attached as {phase}"
+                + (f"; {len(failed)} could not be read" if failed else "") + ".")}
+
+
+def ingest_image_asset(conn, *, campaign_id: str, asset_ref: dict,
+                       phase: str = "proposed", captured_on: Optional[str] = None) -> dict:
     """Attach an image to a campaign and process it two ways: a perceptual hash (exact/
     near-duplicate reuse detection, §6.6) and a CLIP visual embedding (aesthetic/regional
     similarity, the heavier follow-on). Storage always succeeds even if one or both
     processing steps fail (e.g. a corrupt image, or CLIP unavailable) — failures are
-    reported per-step, not swallowed, and don't block each other."""
+    reported per-step, not swallowed, and don't block each other.
+
+    §9.1: `phase` says what this image IS — `proposed` creative lifted from a brief, or a
+    `delivered` photograph that came back after the event. `captured_on` is when the
+    photograph was taken, which belongs to `delivered` and nothing else.
+    """
     if store.get_campaign(conn, campaign_id) is None:
         return {"error": f"campaign {campaign_id} not found"}
+
+    phase = enums.normalise(phase, field="phase", valid=store.VALID_ASSET_PHASES,
+                            synonyms=enums.ASSET_PHASE_SYNONYMS, allow_none=False)
+    captured_on = _asset_date(captured_on, phase)
 
     path, warnings = _resolve_asset(asset_ref)
     if not path:
         return {"error": "; ".join(warnings) or "could not resolve asset_ref"}
 
     stored_name = _keep_asset(path)
-    result = _store_and_fingerprint_image(conn, campaign_id, stored_name)
+    result = _store_and_fingerprint_image(conn, campaign_id, stored_name, phase=phase,
+                                          captured_on=captured_on)
     result["warnings"] = warnings + result["warnings"]
     return result
 
 
-def _store_and_fingerprint_image(conn, campaign_id: str, stored_name: str) -> dict:
+def _asset_date(captured_on: Optional[str], phase: str) -> Optional[str]:
+    """When the photograph was taken (§9.1).
+
+    Refused on a `proposed` asset rather than ignored: a capture date on briefed creative says
+    a photograph exists of something that has not happened, and a stored date nothing reads is
+    a fact somebody will later believe.
+    """
+    if not (captured_on or "").strip():
+        return None
+    if phase != "delivered":
+        raise ValueError(
+            f"`captured_on` belongs to a delivered asset — it says when the photograph was "
+            f"taken, and this one is {phase!r}, which is creative from a brief. Either it "
+            f"came back after the event (pass phase='delivered') or it has no capture date.")
+    import datetime
+
+    text = captured_on.strip()
+    try:
+        parsed = datetime.date.fromisoformat(text)
+    except ValueError:
+        raise ValueError(
+            f"`captured_on` must be a date as YYYY-MM-DD; got {text!r}. A date this library "
+            f"cannot place on a calendar cannot be compared with a campaign's window, which "
+            f"is the only thing it is for.")
+    # A photograph cannot have been taken tomorrow, and a date in the future is a typo that
+    # would otherwise sit in the record looking like a fact.
+    if parsed > datetime.date.today():
+        raise ValueError(
+            f"`captured_on` is {text}, which is in the future — a photograph of what ran "
+            f"cannot have been taken yet. Check the year.")
+    # Stored normalised, because `fromisoformat` also accepts `20260314` and `2026-W11-5`, and
+    # a later comparison against a campaign window is a string comparison.
+    return parsed.isoformat()
+
+
+def _store_and_fingerprint_image(conn, campaign_id: str, stored_name: str, *,
+                                 phase: str = "proposed",
+                                 captured_on: Optional[str] = None) -> dict:
     """The part of ingest_image_asset that runs once the image file is already saved under
     ASSET_DIR. NOT used by the deck-embedded-image path in ingest_campaign — that path also
     computes reuse_flags inline (via the shared _phash_matches below) as part of the same
@@ -5091,7 +5209,8 @@ def _store_and_fingerprint_image(conn, campaign_id: str, stored_name: str) -> di
     rather than call this and bolt reuse-checking on after."""
     full_path = config.ASSET_DIR / stored_name
     warnings: list[dict] = []
-    aid = store.insert_asset(conn, campaign_id, file_path=stored_name)
+    aid = store.insert_asset(conn, campaign_id, file_path=stored_name, phase=phase,
+                             captured_on=captured_on)
 
     fingerprinted = False
     try:
@@ -5121,8 +5240,485 @@ def _store_and_fingerprint_image(conn, campaign_id: str, stored_name: str) -> di
             f"not need uploading again."))
 
     return {"asset_id": aid, "campaign_id": campaign_id, "fingerprinted": fingerprinted,
-            "visually_embedded": visually_embedded,
+            "visually_embedded": visually_embedded, "phase": phase,
+            "captured_on": captured_on,
+            # §9.2, offered where it becomes answerable rather than left to be discovered.
+            "next_actions": actions.after_delivered_asset(
+                campaign_id=campaign_id,
+                briefed=len(store.assets_in_phase(conn, campaign_id, "proposed")))
+            if phase == "delivered" else [],
             "warnings": notices.collapse(warnings)}
+
+
+
+# ── §9.2: what shipped, and how far it moved ────────────────────────────────
+
+def compare_execution(conn, *, campaign_id: str) -> dict:
+    """What actually ran against what was briefed (§9.2).
+
+    *"Fingerprints answer what shipped: delivered assets that match a proposed one are as
+    briefed; proposed assets with no match never appeared; delivered assets matching nothing
+    are new. Visual similarity answers how far it moved: the distance between the proposed and
+    delivered creative sets is a drift score, not a vibe."*
+
+    **Two instruments, two questions, kept apart.** A fingerprint is an IDENTITY claim — this
+    photograph is that render — and it is exact enough to state. A CLIP distance is a claim
+    about resemblance, which is a number and not a verdict. Reporting one as the other is how
+    "the creative changed" becomes an assertion nobody can check.
+
+    The plan's signature is `compare_execution(campaign_id, delivered_assets[])`, and this
+    takes only the campaign. §9.1 said everything falls out of the phase field, and it does:
+    once an asset carries its phase, which images are the brief and which came back is already
+    on file, and a second inline upload path would be a second way to attach an image with its
+    own resolution rules and its own bugs.
+
+    What it will not say is what the drift MEANS. Improvement, neutral or degradation is
+    §9.4's question and is marked `judged` for a reason — a cosine cannot know which, and a
+    server that guessed would be asserting a verdict from a distance.
+    """
+    record = store.get_campaign(conn, campaign_id)
+    if record is None:
+        raise ValueError(f"{campaign_id!r} is not a record in this library.")
+
+    briefed = store.assets_in_phase(conn, campaign_id, "proposed")
+    delivered = store.assets_in_phase(conn, campaign_id, "delivered")
+    warnings: list = []
+
+    if not delivered:
+        return _nothing_to_compare(
+            campaign_id, briefed, delivered,
+            f"{len(briefed)} briefed image{'s' * (len(briefed) != 1)} on file and nothing "
+            f"has come back, so what ran has never been checked against what was asked for.",
+            title=record["title"],
+            offers=actions.trim([actions.action(
+                f"Add the photographs from \u201c{record['title']}\u201d",
+                "upload_image_asset",
+                why="With them on file this comparison says which briefed elements appeared, "
+                    "which did not, and which arrived unbriefed.",
+                consent="ask", needs=["the photographs themselves"],
+                campaign_id=campaign_id, phase="delivered")]))
+    if not briefed:
+        return _nothing_to_compare(
+            campaign_id, briefed, delivered,
+            f"{len(delivered)} delivered image{'s' * (len(delivered) != 1)} on file and "
+            f"nothing briefed to compare them against — there was never a brief to drift "
+            f"from, so calling them all new would say more than is known.",
+            title=record["title"])
+
+    prints = store.asset_fingerprints(conn, [a["id"] for a in briefed + delivered])
+    # A hash with no structure in it matches every other image with no structure, at distance
+    # zero — so a solid-fill rectangle lifted out of a deck would be reported as built on the
+    # strength of a blank wall in a delivered photograph. Dropped from the comparison and SAID,
+    # rather than silently carried.
+    flat = {aid for aid, value in prints.items() if images.is_degenerate(value)}
+    prints = {aid: value for aid, value in prints.items() if aid not in flat}
+    missing = [a for a in briefed + delivered if a["id"] not in prints]
+    if missing:
+        # §2.1: an image that could not be hashed cannot be matched, and leaving it out of all
+        # three lists silently would make the totals lie about what was examined.
+        no_print = [a for a in missing if a["id"] not in flat]
+        reasons = []
+        if no_print:
+            reasons.append(f"{len(no_print)} {'have' if len(no_print) != 1 else 'has'} no "
+                           f"fingerprint (run finish_indexing)")
+        if flat:
+            reasons.append(f"{len(flat)} {'are' if len(flat) != 1 else 'is'} a flat fill or "
+                           f"blank frame, which carries no structure to match on")
+        warnings.append(notices.notice(
+            "assets_not_fingerprinted",
+            detail=f"{len(missing)} image{'s' * (len(missing) != 1)} could not be compared: "
+                   + "; ".join(reasons) + "."))
+
+    drift, drift_warnings = _drift_score(conn, briefed, delivered)
+    warnings += drift_warnings
+    as_briefed, never_appeared, new, another_view = _match_by_fingerprint(
+        [a for a in briefed if a["id"] in prints],
+        [a for a in delivered if a["id"] in prints], prints)
+    # A fingerprint answers "is this the same FILE, resized or recompressed" — that is what
+    # `images.py`'s own docstring scopes it to, and what its regression baseline verified. A
+    # photograph of a physical execution, shot on site at an angle under different light, will
+    # not land within Hamming 8 of the briefed render. So on the review's own motivating case —
+    # a claw machine that was actually built — pHash alone reports `0 as_briefed, 3 never
+    # appeared, 14 new` and stamps `computed` on it.
+    #
+    # The second pass says what resemblance can say and labels it as what it is: `heuristic`,
+    # §7.8's third basis, which exists for exactly this — a threshold somebody chose, neither
+    # a server fact nor a model's judgment.
+    _suggest_visual_matches(conn, never_appeared, new)
+
+    return {
+        "campaign_id": campaign_id,
+        "title": record["title"],
+        "status": "checked",
+        "basis": "computed",
+        "briefed_count": len(briefed),
+        "delivered_count": len(delivered),
+        # D60: the same words `diff_campaigns` uses, so "what changed" means one thing at both
+        # levels — a `counts` dict keyed by the bucket names, and a per-item `match` saying
+        # what the classification rests on.
+        "counts": {"as_briefed": len(as_briefed), "never_appeared": len(never_appeared),
+                   "new": len(new), "another_view": len(another_view),
+                   "not_compared": len(missing)},
+        "as_briefed": as_briefed,
+        "never_appeared": never_appeared,
+        "new": new,
+        "another_view": another_view,
+        "not_compared": [{"asset_id": a["id"], "file": a["file_path"], "phase": a["phase"]}
+                         for a in missing],
+        "drift": drift,
+        "what_it_means": _execution_sentence(as_briefed, never_appeared, new, another_view),
+        "warnings": notices.collapse(warnings),
+    }
+
+
+def _nothing_to_compare(campaign_id, briefed, delivered, said, *, title="",
+                        offers=None) -> dict:
+    """One half of the comparison is missing, so there is no comparison (§9.2).
+
+    `score: None` and `nothing_to_check`, never zero. A drift score computed over an empty set
+    reads as "the execution matched the brief perfectly" — the confident unfounded claim in its
+    purest form, arriving from an empty list rather than from a mistake.
+    """
+    return {
+        "campaign_id": campaign_id, "title": title,
+        "status": "nothing_to_check", "basis": "computed",
+        # The instruction as an OFFER, not as prose. C12 replaced exactly this shape once
+        # already, and this is the best place in the product to make it: the user is looking
+        # at the answer "nobody has checked what ran" at the moment they could fix it.
+        "next_actions": offers or [],
+        "briefed_count": len(briefed), "delivered_count": len(delivered),
+        "as_briefed": [], "never_appeared": [], "new": [], "another_view": [],
+        "not_compared": [],
+        "drift": {"score": None, "code": "nothing_to_compare", "basis": "computed",
+                  "what_it_means": "There is nothing to measure a distance between."},
+        "what_it_means": said, "warnings": [],
+    }
+
+
+def _match_by_fingerprint(briefed, delivered, prints) -> tuple:
+    """The three lists, by pHash. Each item carries the match it rests on.
+
+    **Briefed images are clustered first.** A deck puts the hero visual on the cover and again
+    on a detail slide, and `extract` dedupes by sha256 — two different files, one image. Treated
+    as two elements, a photograph of it matched one and the other was reported as NEVER
+    APPEARED: the list whose entire claim is identity, saying a briefed element was missing when
+    it demonstrably was not.
+
+    **And the assignment is global, not greedy in upload order.** Taking each photograph's
+    closest unclaimed render in turn made the answer depend on which photo was uploaded first —
+    the same four images produced opposite verdicts on the same briefed element. Pairs are
+    sorted by distance across the whole set and assigned from the closest, so the result is a
+    property of the images rather than of the upload sequence.
+    """
+    elements = _cluster_briefed(briefed, prints)
+    pairs = sorted(
+        (images.hamming_distance(prints[element[0]["id"]], prints[shot["id"]]), e, d)
+        for e, element in enumerate(elements) for d, shot in enumerate(delivered))
+
+    claimed_element, claimed_shot = {}, {}
+    for distance, e, d in pairs:
+        if distance > config.PHASH_MATCH_THRESHOLD:
+            break
+        if e in claimed_element or d in claimed_shot:
+            continue
+        claimed_element[e] = (d, distance)
+        claimed_shot[d] = (e, distance)
+
+    as_briefed, new, another_view = [], [], []
+    for d, shot in enumerate(delivered):
+        if d in claimed_shot:
+            e, distance = claimed_shot[d]
+            first = elements[e][0]
+            as_briefed.append({
+                "asset_id": shot["id"], "file": shot["file_path"],
+                "captured_on": shot["captured_on"],
+                "matched_asset_id": first["id"], "matched_file": first["file_path"],
+                "also_briefed_as": [a["file_path"] for a in elements[e][1:]],
+                "distance": distance, "threshold": config.PHASH_MATCH_THRESHOLD,
+                "match": "fingerprint",
+                "what_it_means": (
+                    f"Matches the briefed image {first['file_path']} at a perceptual distance "
+                    f"of {distance} (anything up to {config.PHASH_MATCH_THRESHOLD} is the "
+                    f"same image).")})
+            continue
+        echo = _already_matched(elements, claimed_element, prints, shot)
+        if echo:
+            # A second photograph of something already matched is not NEW — "matches nothing
+            # that was briefed" would be false of it. Without this, three photos of one claw
+            # machine against a brief promising three things read as "three briefed elements
+            # appeared", when one did.
+            another_view.append({
+                "asset_id": shot["id"], "file": shot["file_path"],
+                "captured_on": shot["captured_on"], "matched_asset_id": echo[0],
+                "distance": echo[1], "match": "fingerprint",
+                "what_it_means": (f"Another photograph of the briefed image {echo[2]}, which "
+                                  f"is already accounted for.")})
+            continue
+        new.append({"asset_id": shot["id"], "file": shot["file_path"],
+                    "captured_on": shot["captured_on"],
+                    "nearest": _nearest_miss(shot, briefed, prints),
+                    "threshold": config.PHASH_MATCH_THRESHOLD, "match": "none",
+                    "what_it_means": "Came back, and matches nothing that was briefed."})
+
+    # The nearest miss, on both lists. "§9.2: with the matching evidence attached per item" —
+    # `as_briefed` carried its match and these two carried a bare sentence, while the matcher
+    # had already computed every distance and thrown the near-misses away. A negative with no
+    # number behind it is the assertion this product refuses everywhere else.
+    never_appeared = [
+        {"asset_id": element[0]["id"], "file": element[0]["file_path"],
+         "also_briefed_as": [a["file_path"] for a in element[1:]],
+         "nearest": _nearest_miss(element[0], delivered, prints),
+         "threshold": config.PHASH_MATCH_THRESHOLD, "match": "none",
+         "what_it_means": "Was briefed and nothing that came back matches it."}
+        for e, element in enumerate(elements) if e not in claimed_element]
+    return as_briefed, never_appeared, new, another_view
+
+
+def _cluster_briefed(briefed, prints) -> list:
+    """Briefed images that are the SAME image, grouped into one element.
+
+    The hero on the cover slide and on a detail slide are one thing the brief promises, and
+    counting them twice makes a delivered photograph of it satisfy one and leave the other
+    reading as missing.
+    """
+    elements: list = []
+    for asset in briefed:
+        for element in elements:
+            if images.hamming_distance(prints[element[0]["id"]],
+                                       prints[asset["id"]]) <= config.PHASH_MATCH_THRESHOLD:
+                element.append(asset)
+                break
+        else:
+            elements.append([asset])
+    return elements
+
+
+def _already_matched(elements, claimed_element, prints, shot):
+    """The briefed element this photograph is another view of, if any — the CLOSEST one."""
+    scored = [(images.hamming_distance(prints[element[0]["id"]], prints[shot["id"]]), element)
+              for e, element in enumerate(elements) if e in claimed_element]
+    within = [(d, el) for d, el in scored if d <= config.PHASH_MATCH_THRESHOLD]
+    if not within:
+        return None
+    distance, element = min(within, key=lambda pair: pair[0])
+    return element[0]["id"], distance, element[0]["file_path"]
+
+
+# How close two images have to look before the server will say they MIGHT be the same thing.
+# Deliberately high: this is offered beside a `never appeared` verdict, and a wrong suggestion
+# there tells a marketer their claw machine turned up when it did not.
+_VISUAL_MATCH_CEILING = 0.12
+
+
+def _nearest_miss(asset, others, prints) -> Optional[dict]:
+    """The closest thing this did NOT match, and by how much."""
+    scored = [(images.hamming_distance(prints[asset["id"]], prints[o["id"]]), o)
+              for o in others if o["id"] in prints and o["id"] != asset["id"]]
+    if not scored:
+        return None
+    distance, closest = min(scored, key=lambda pair: pair[0])
+    return {"asset_id": closest["id"], "file": closest["file_path"], "distance": distance}
+
+
+def _suggest_visual_matches(conn, never_appeared, new) -> None:
+    """Pair up what the fingerprints could not, by resemblance, as a SUGGESTION (§9.2).
+
+    Mutates both lists in place, adding `looks_like` where something resembles something. It
+    never moves an item between lists: a resemblance is not an identity claim, and promoting
+    one to `as_briefed` would put the server's `computed` authority behind a guess about
+    whether a thing was built.
+    """
+    if not never_appeared or not new:
+        return
+    briefed_vecs, _ = _asset_vectors(conn, [{"id": item["asset_id"]}
+                                            for item in never_appeared])
+    shot_vecs, _ = _asset_vectors(conn, [{"id": item["asset_id"]} for item in new])
+    if not briefed_vecs or not shot_vecs:
+        return
+    pairs = []
+    for i, left in enumerate(briefed_vecs):
+        for j, right in enumerate(shot_vecs):
+            pairs.append(((1.0 - embedding.cosine(left, right)) / 2.0, i, j))
+    taken_left, taken_right = set(), set()
+    for distance, i, j in sorted(pairs):
+        if distance > _VISUAL_MATCH_CEILING or i in taken_left or j in taken_right:
+            continue
+        taken_left.add(i)
+        taken_right.add(j)
+        brief_item, shot_item = never_appeared[i], new[j]
+        brief_item["match"] = "visual"
+        shot_item["match"] = "visual"
+        brief_item["looks_like"] = {
+            "asset_id": shot_item["asset_id"], "file": shot_item["file"],
+            "distance": round(distance, 6), "basis": "heuristic",
+            "what_it_means": (f"No delivered photograph is the same FILE as this briefed "
+                              f"image, but {shot_item['file']} looks like it. A fingerprint "
+                              f"answers 'same image'; this only answers 'looks similar', so "
+                              f"it is a question for somebody who can recognise the thing.")}
+        shot_item["looks_like"] = {
+            "asset_id": brief_item["asset_id"], "file": brief_item["file"],
+            "distance": round(distance, 6), "basis": "heuristic",
+            "what_it_means": (f"Matches no briefed image by fingerprint, but resembles the "
+                              f"briefed {brief_item['file']}.")}
+
+
+def _drift_score(conn, briefed, delivered) -> tuple:
+    """How far the delivered creative sits from the briefed creative (§9.2).
+
+    The MEAN PAIRWISE distance between the two sets, not the distance between their centroids.
+    A centroid contracts toward the mean as a set grows, so the centroid version halved — 0.84
+    to 0.47, measured — purely because somebody uploaded eight photographs of one shoot instead
+    of one. A score that falls when you supply more evidence is not a measurement.
+
+    Pairwise also makes the numerator and the denominator the same kind of quantity: the
+    yardstick is the brief's own mean pairwise distance, so the ratio compares like with like.
+    Against the brief's internal spread because the raw number is unreadable alone — visual
+    embeddings of real photographs sit close together, and two unrelated images measured 0.0009
+    apart in a protocol run, which a marketer reads as "no drift" about creative sharing
+    nothing.
+
+    Returns `(drift, warnings)`. What it will not say is whether moving that far was good;
+    that is §9.4's question and is marked `judged` there for this reason.
+    """
+    briefed_vecs, briefed_missing = _asset_vectors(conn, briefed)
+    delivered_vecs, delivered_missing = _asset_vectors(conn, delivered)
+    missing = briefed_missing + delivered_missing
+    warnings: list = []
+
+    if not briefed_vecs or not delivered_vecs:
+        # §6.4's lesson: an outage that reads as a clean result is worse than one that says so.
+        # A missing score is not a zero score. D19: the shared notice, not a private code —
+        # otherwise it escapes `notices.collapse`, the remedy registry and the server-wide
+        # {code, severity, remedy} contract every other degradation goes through.
+        return ({"score": None, "code": "not_visually_indexed", "basis": "computed",
+                 "what_it_means": ("None of these images is visually indexed, so how far the "
+                                   "creative moved could not be measured. This is not a small "
+                                   "distance — it is no measurement.")},
+                [_vision_notice("how far the delivered creative moved from the brief could "
+                                "not be measured: the images are not visually indexed. Run "
+                                "finish_indexing — the files are stored.")])
+    if missing:
+        # PARTIAL is its own answer. Firing only when a side is entirely unindexed meant a
+        # half-indexed set computed a score from whatever subset had vectors and labelled it
+        # `measured`, with a count buried in `compared` as the only tell.
+        warnings.append(_vision_notice(
+            f"{len(missing)} of these images {'are' if len(missing) != 1 else 'is'} not "
+            f"visually indexed, so the drift figure is measured over the rest. Run "
+            f"finish_indexing — the files are stored."))
+
+    score = _mean_pairwise(briefed_vecs, delivered_vecs)
+    spread = _internal_spread(briefed_vecs)
+    relative = _relative_drift(score, spread)
+    furthest = _furthest_delivered(delivered, delivered_vecs, briefed_vecs)
+    return ({
+        "score": round(score, 6), "code": "measured" if not missing else "partly_measured",
+        "basis": "computed",
+        "relative_to_brief_spread": relative["value"],
+        "brief_spread": round(spread, 6) if spread is not None else None,
+        "compared": {"briefed": len(briefed_vecs), "delivered": len(delivered_vecs),
+                     "not_indexed": len(missing)},
+        "furthest_delivered": furthest,
+        "what_it_means": (
+            f"How far the delivered creative sits from the briefed creative, as the mean "
+            f"distance between every briefed image and every delivered one. The raw figure is "
+            f"not a percentage and is only readable against something: " + relative["said"]
+            + f" It is a distance and not a verdict — whether moving that far was an "
+              f"improvement, a neutral change or a degradation is a judgment about this "
+              f"campaign."),
+    }, warnings)
+
+
+def _asset_vectors(conn, assets) -> tuple:
+    """`(vectors, ids_without_one)`. Tolerates the vector table not existing at all.
+
+    A library where no image was ever embedded has no `asset_vectors` table, and reading it
+    raised `OperationalError` — not a `ValueError`, so it reached the model as "Error executing
+    tool" with the reason discarded, on exactly the install where CLIP never ran.
+    """
+    try:
+        found = vectorstore.get_many(conn, [a["id"] for a in assets], space="asset")
+    except Exception:
+        found = {}
+    return [found[a["id"]] for a in assets if a["id"] in found], \
+        [a["id"] for a in assets if a["id"] not in found]
+
+
+def _mean_pairwise(left: list, right: list) -> float:
+    pairs = [(1.0 - embedding.cosine(a, b)) / 2.0 for a in left for b in right]
+    return max(0.0, min(1.0, sum(pairs) / len(pairs)))
+
+
+def _relative_drift(score: float, spread) -> dict:
+    """The drift in units of the brief's own internal spread, where that means anything.
+
+    Three different answers, and collapsing them was wrong twice over. With no spread there is
+    one briefed image. With a spread of ZERO the briefed images are identical — a real
+    measurement, and the sentence said "there is only one briefed image", which was reproduced
+    with two. And where the spread is vanishingly small the ratio explodes: a brief with two
+    near-identical renders drove it to 442, a number that looks like precision and is noise.
+    """
+    if spread is None:
+        return {"value": None,
+                "said": ("there is only one briefed image, so there is no internal spread to "
+                         "compare it against and the raw figure stands alone.")}
+    if spread < _SPREAD_FLOOR:
+        return {"value": None,
+                "said": ("every briefed image looks essentially the same as the others, so "
+                         "the brief provides no range to measure against — any delivered "
+                         "image would look far away. The raw figure stands alone.")}
+    return {"value": round(score / spread, 2),
+            "said": (f"here it is {round(score / spread, 2)}\u00d7 the distance the briefed "
+                     f"images sit from EACH OTHER, so around 1 is within the brief's own "
+                     f"range of looks and well above it is creative that moved outside it.")}
+
+
+# Below this, the brief's images are the same image as far as the yardstick is concerned, and
+# dividing by it produces a number that looks like precision and is noise.
+_SPREAD_FLOOR = 0.001
+
+
+def _internal_spread(vectors: list) -> Optional[float]:
+    """Mean pairwise distance within one set — the yardstick the brief provides itself.
+
+    None when there is nothing to spread: one image has no internal distance, and returning
+    0.0 for it would say "every briefed image looks identical", which is a measurement about a
+    set that does not exist.
+    """
+    if len(vectors) < 2:
+        return None
+    pairs = [(1.0 - embedding.cosine(vectors[i], vectors[j])) / 2.0
+             for i in range(len(vectors)) for j in range(i + 1, len(vectors))]
+    return sum(pairs) / len(pairs)
+
+
+def _furthest_delivered(delivered, delivered_vecs, briefed_vecs) -> Optional[dict]:
+    """Which delivered image sits furthest from the brief — the actionable half of a mean."""
+    if not delivered_vecs:
+        return None
+    scored = [(_mean_pairwise([vec], briefed_vecs), asset)
+              for asset, vec in zip([a for a in delivered if a], delivered_vecs)]
+    distance, asset = max(scored, key=lambda pair: pair[0])
+    return {"asset_id": asset["id"], "file": asset["file_path"],
+            "distance": round(distance, 6),
+            "what_it_means": "The delivered image sitting furthest from the briefed set."}
+
+
+def _execution_sentence(as_briefed, never_appeared, new, another_view) -> str:
+    parts = [f"{len(as_briefed)} briefed image"
+             f"{'s' * (len(as_briefed) != 1)} came back as briefed"]
+    if never_appeared:
+        parts.append(f"{len(never_appeared)} was briefed and did not appear"
+                     if len(never_appeared) == 1 else
+                     f"{len(never_appeared)} were briefed and did not appear")
+    if new:
+        parts.append(f"{len(new)} came back that {'was' if len(new) == 1 else 'were'} never "
+                     f"briefed")
+    if another_view:
+        parts.append(f"{len(another_view)} {'is' if len(another_view) == 1 else 'are'} "
+                     f"further photographs of something already counted")
+    return ("; ".join(parts) + ". These are matches between images, not a judgment about the "
+            "campaign — a briefed image that did not appear may have been replaced by "
+            "something better.")
 
 
 def check_image_provenance(conn, *, asset_ref: dict, campaign_id: Optional[str] = None,
