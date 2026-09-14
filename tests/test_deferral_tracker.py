@@ -8,8 +8,11 @@ installer's `AppVersion` drifted from `version.py`, `TOOL_NAMES` drifted from th
 tools, and the plan's own text drifted from the code it described. Each time the copy was
 right on the day it was written.
 
-So these check the two things that can rot silently: a deferral pointing at an item that does
-not exist, and a deferral still listed as owed against an item already marked done.
+So these check the three things that can rot silently: a deferral pointing at an item that
+does not exist, a deferral still listed as owed against an item already marked done, and — the
+direction that was unguarded until a `store.py` comment was found explaining a design decision
+by pointing at a row nobody ever wrote — a deferral named in the CODE that the tracker does not
+have.
 """
 import re
 from pathlib import Path
@@ -120,3 +123,35 @@ def test_the_plan_and_the_tracker_agree_on_what_is_done():
     assert len(items) > 40, f"only parsed {len(items)} plan items — has the format changed?"
     assert any(items.values()), "no completed items parsed"
     assert not all(items.values()), "no outstanding items parsed"
+
+
+def test_every_deferral_named_in_the_code_is_in_the_tracker():
+    """The direction the other tests cannot see.
+
+    They check the tracker against the plan. Nothing checked the CODE against the tracker —
+    and a comment in `store.py` explained a design decision by pointing at `D128`, a row that
+    was never written. Read six months later that is worse than no reference: it says the
+    question was considered and tracked, and the reader goes looking for a row that does not
+    exist. Same failure shape as the four this file's docstring already lists, in the one
+    direction that was unguarded.
+    """
+    known = {row_id for section in ("Open — deferred", "Open — awaiting input",
+                                    "Open — decided against", "Accepted limits", "Closed")
+             for row_id, _ in _tracker_rows(section)}
+    # Closed rows carry their old id as "(was D60)", which is how a code comment written
+    # before the row closed still resolves.
+    known |= set(re.findall(r"\(was (D\d+)\)", TRACKER.read_text(encoding="utf-8")))
+
+    dangling = []
+    for path in sorted(ROOT.glob("*.py")) + sorted((ROOT / "tests").glob("*.py")):
+        if path.name == "test_deferral_tracker.py":
+            continue
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for ref in re.findall(r"\b(D\d{1,3})\b", line):
+                if ref not in known:
+                    dangling.append(f"{path.name}:{n} -> {ref}")
+
+    assert not dangling, (
+        f"these name a deferral the tracker does not have: {dangling}. Either the row was "
+        f"never written, or the work was done and the comment should say what was done."
+    )
