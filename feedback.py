@@ -37,6 +37,25 @@ from typing import Optional
 # campaign and 10 is deliberate — see the module docstring.
 FIRST_ROW, LAST_ROW = 1, 9
 CONCLUDED_ROW, MORE_ROW = 10, 11
+# §10.2/D110: a fixed row of its own, and NOT a row among the campaigns.
+#
+# The rule questions were merged into the campaign list first, and that was wrong on four
+# counts review put in writing. The menu's header is "which CAMPAIGN do you want to give
+# feedback on" and this row has no campaign. `_row`'s contract is "name, then reason" and the
+# rule row inverted the columns, so in a numbered list column one was a campaign name for
+# every row but that one. It outranked `no_outcome`, so a marketer's session opened with a
+# question about correction wording rather than about any of their work. And it consumed one
+# of the nine slots §10.2 fixes for campaigns.
+#
+# Fixed numbering is what makes the menu a habit, so the answer is another fixed position
+# rather than a floating row: 12 is always the rulebook questions, present or absent — and a
+# row saying "0 pairs to rule on" is still the answer to "is there anything".
+RULES_ROW = 12
+# Every scope a menu token can name. `_address` validated against a hard-coded pair, so
+# adding `rules` without adding it here would have made every rules token unparseable — and
+# an unparseable token refreshes rather than erroring, so row 12 would have bounced silently
+# back to the campaign menu with nothing to say why.
+SCOPES = ("open", "concluded", "rules")
 PER_PAGE = LAST_ROW - FIRST_ROW + 1
 
 # Below this the library has barely started, and "this market rests on one campaign" is true
@@ -69,22 +88,31 @@ _REASONS = (
      "a new version arrived and nobody has said whether it fixed anything"),
     ("judgment_never_reconciled", 2, "judgment never checked",
      "the library judged this and has never been checked against what happened"),
-    ("no_outcome", 3, "no outcome recorded",
+    # D110: two wordings that may be one rule. Not about a campaign at all — the only row here
+    # that is not — and it sits with the two above it because all three are questions the
+    # library asked and nobody answered. Its cost is the highest of the three and the least
+    # visible: a rule stated three ways in three markets counts as three rules, so each stays
+    # at one market and NONE of them ever recurs. The library quietly cannot learn the thing
+    # the client has said three times.
+    ("rules_may_be_the_same", 3, "two rules may be the same",
+     "two corrections are worded alike, and until somebody says whether they are one rule "
+     "each counts separately and neither ever recurs across markets"),
+    ("no_outcome", 4, "no outcome recorded",
      "nobody has said what they made of the work or how it performed"),
-    ("no_performance_tag", 4, "no performance recorded", "nobody has said how it performed"),
-    ("targets_only", 5, "targets only, no actuals",
+    ("no_performance_tag", 5, "no performance recorded", "nobody has said how it performed"),
+    ("targets_only", 6, "targets only, no actuals",
      "targets are on file and the actuals never arrived"),
-    ("no_reaction_tag", 6, "no reaction recorded",
+    ("no_reaction_tag", 7, "no reaction recorded",
      "nobody has said what they made of the work"),
-    ("never_briefed", 7, "stub, never briefed", "a stub nobody has briefed"),
+    ("never_briefed", 8, "stub, never briefed", "a stub nobody has briefed"),
     # D87: the numbers are on file and the claim beside them is still somebody's impression,
     # so §6.4 reports "could not be checked" on a library that holds the evidence. Only a
     # person can say the claim rests on those numbers.
-    ("unverified_claim", 8, "results on file, claim not verified",
+    ("unverified_claim", 9, "results on file, claim not verified",
      "measurements are on file and the performance claim is still an impression"),
     # D70: one campaign carrying every judgment about a market. The similarity score looks the
     # same whether it came from one example or ten, and only a person can supply the second.
-    ("single_example", 9, "this market rests on it alone",
+    ("single_example", 10, "this market rests on it alone",
      "this market has one campaign in it, so every judgment about the market rests on it"),
 )
 _RANK = {code: rank for code, rank, _short, _why in _REASONS}
@@ -100,12 +128,16 @@ def queue(conn, *, scope: str = "open", page: int = 1) -> dict:
     """
     import store
 
+    if scope == "rules":
+        return _rules_menu(conn)
     rows = _open_rows(conn) if scope == "open" else _concluded_rows(conn)
+    # §10.2/D110: counted, not mixed in. They belong to row 12.
+    pairs = len(_rule_questions(conn)) if scope == "open" else 0
     pages = max(1, -(-len(rows) // PER_PAGE))
     page = max(1, min(page, pages))
     shown = rows[(page - 1) * PER_PAGE:page * PER_PAGE]
     numbered = [{"number": FIRST_ROW + n, **row} for n, row in enumerate(shown)]
-    if not numbered:
+    if not numbered and not pairs:
         return {
             "status": "nothing_to_check", "basis": "computed", "scope": scope,
             "rows": [], "waiting": 0, "page": page, "pages": pages,
@@ -122,6 +154,10 @@ def queue(conn, *, scope: str = "open", page: int = 1) -> dict:
         {"number": MORE_ROW, "action": "more",
          "title": ("Not here — show more" if pages > page else "Not here — start again")},
     ]
+    if pairs:
+        numbered.append({
+            "number": RULES_ROW, "action": "rules",
+            "title": f"Two rules may be the same — {pairs} pair(s) to rule on"})
     return {
         "status": "checked", "basis": "computed", "scope": scope,
         "rows": numbered, "waiting": len(rows), "page": page, "pages": pages,
@@ -129,16 +165,27 @@ def queue(conn, *, scope: str = "open", page: int = 1) -> dict:
         # number means changes the token — a new campaign, a tag recorded elsewhere, a verdict
         # saved in another window.
         "menu_token": _token(conn, scope, page, numbered),
-        "what_it_means": _sentence(rows, numbered, scope, page, pages),
+        "what_it_means": _sentence(rows, numbered, scope, page, pages, rules=pairs),
     }
 
 
-def _sentence(rows: list, numbered: list, scope: str, page: int, pages: int) -> str:
+def _sentence(rows: list, numbered: list, scope: str, page: int, pages: int,
+              rules: int = 0) -> str:
+    # `rows` is campaigns, all of it — see `_open_rows`. The first version of §10.2/D110 mixed
+    # rule questions in here and this sentence then announced "4 campaign(s) are waiting" for
+    # three campaigns and one rule pair. Splitting the count fixed the symptom; moving the
+    # rows to their own scope fixed the cause, and a split kept afterwards would be a filter
+    # guarding a case that can no longer arise — which reads as a live guard and is not one.
     said = (f"{len(rows)} campaign(s) are waiting on something only a person can supply. "
             f"Read each row's `why` aloud with it — that is the question the user actually "
             f"has. Offer the numbers and nothing else: answering should never need typing."
             if scope == "open" else
-            f"{len(rows)} concluded campaign(s) are missing something a person has to supply.")
+            f"{len(rows)} concluded campaign(s) are missing something a person has to "
+            f"supply.")
+    if rules:
+        said += (f" Row {RULES_ROW} is separate: {rules} pair(s) of corrections are worded "
+                 f"alike, and whether each pair is one rule is a question only somebody who "
+                 f"knows this client's vocabulary can answer.")
     if pages > 1:
         said += f" Showing {page} of {pages} pages; {MORE_ROW} pages on."
     return said
@@ -158,10 +205,135 @@ def _open_rows(conn) -> list:
         if not reasons:
             continue
         rows.append(_row(full, reasons))
+    # §10.2/D110's rows are NOT merged here — they are row 12's, and `queue` builds that.
+    # Merging them put a row with no campaign into a list whose header asks which campaign,
+    # inverted the column order for that one row, and let it outrank every real campaign.
     # Rank first, then title — a stable second key, so two rows of equal worth do not swap
     # places between two renderings of the same library (§10.4).
     rows.sort(key=lambda r: (r["_rank"], r["title"].casefold(), r["campaign_id"]))
     return [{k: v for k, v in row.items() if k != "_rank"} for row in rows]
+
+
+def _rules_menu(conn) -> dict:
+    """Row 12: the rulebook questions, numbered the same way (§10.2/D110).
+
+    A second SCOPE, not a second list beside the first — reached by a number from the menu
+    everyone already has, the way row 10 reaches the concluded records. That keeps "what is
+    waiting on me" one entry point while keeping the campaign menu about campaigns.
+
+    The full wordings, not the 40-character prefixes the merged version showed. Both texts
+    matched BECAUSE their first forty characters are near-identical, so a truncated pair
+    showed the user two visually identical strings and asked whether they were the same.
+    """
+    rows = _rule_questions(conn)
+    numbered = [{"number": FIRST_ROW + n, **row} for n, row in enumerate(rows[:PER_PAGE])]
+    if not numbered:
+        return {
+            "status": "nothing_to_check", "basis": "computed", "scope": "rules",
+            "rows": [], "waiting": 0, "page": 1, "pages": 1,
+            "what_it_means": (
+                "No two corrections on file are worded alike enough to be worth asking "
+                "about. That is a real answer: it does not mean the rulebook is tidy, only "
+                "that nothing currently looks like a duplicate."),
+        }
+    numbered.append({"number": MORE_ROW, "action": "more",
+                     "title": "Back to the campaigns waiting on you"})
+    return {
+        "status": "checked", "basis": "computed", "scope": "rules",
+        "rows": numbered, "waiting": len(rows), "page": 1, "pages": 1,
+        "menu_token": _token(conn, "rules", 1, numbered),
+        "what_it_means": (
+            f"{len(rows)} pair(s) of corrections are worded alike. Only somebody who knows "
+            f"this client's vocabulary can say whether each pair is one rule — and until "
+            f"they do, each wording counts separately, so a rule the client has stated "
+            f"twice never recurs across markets and never becomes standing. Read both "
+            f"wordings out in full: they matched because their openings are near-identical, "
+            f"so a summary of either is a summary of both."),
+    }
+
+
+def _rule_questions(conn) -> list:
+    """Near-duplicate corrections nobody has ruled on (§10.2/D110).
+
+    The question is asked today by `note_correction`, on the write that raised it, and
+    NOWHERE else — so it is put once, to whoever happened to be uploading a deck, and a
+    silence is indistinguishable from a "no". A library where nobody was looking at that
+    moment accumulates near-duplicates that each stay at one market and never graduate, and
+    nothing ever says so.
+
+    `asked` is the flag `resolve_correction` sets, so a pair somebody has ruled on drops out
+    — a queue that keeps asking a settled question teaches people to stop reading it, and the
+    unsettled question then goes unread with it.
+    """
+    import corrections as corrections_module
+    import store
+
+    # ONE pass over the corrections, pairing in memory. `_looks_like` re-reads and re-tokenises
+    # every correction on file, so calling it once per correction was O(n²) over the WHOLE
+    # table — and `ingest_campaign` calls `waiting()` on every upload, which calls this.
+    # Measured: 100 corrections 0.37s, 200 corrections 1.74s, 400 corrections 8.39s, for a
+    # single upload. At 400 the offer alone spent a third of `TOOL_TIME_BUDGET_SECONDS`, on a
+    # library that is not large — an agency accumulates corrections faster than campaigns.
+    live = [row for row in store.corrections(conn)
+            if not row.get("asked")
+            and row["status"] not in ("merged", "ignored", "expected")]
+    # Read once per correction rather than once per comparison — that is the whole of the
+    # speed fix. WHAT a reading is, and what makes two of them close, stays in `corrections`:
+    # the first version of this re-derived the "a prohibition and its permission are not the
+    # same rule" check here, which is two implementations of one rule, and mutation showed
+    # nothing would have noticed if this copy had been deleted.
+    readings = {row["id"]: corrections_module._reading(row["text"]) for row in live}
+
+    def resembling(entry):
+        best, score = None, 0.0
+        for other in live:
+            if other["id"] == entry["id"]:
+                continue
+            overlap = corrections_module.resembles(readings[entry["id"]],
+                                                   readings[other["id"]])
+            if overlap > score:
+                best, score = other, overlap
+        return best if corrections_module.is_close(score) else None
+
+    rows = []
+    seen: set = set()
+    answered = {row["id"] for row in store.corrections(conn) if row.get("asked")}
+    for entry in live:
+        similar = resembling(entry)
+        if not similar:
+            continue
+        # EITHER side having been asked settles the pair, because the question is symmetric.
+        # `different_rule` — the one answer of §8.2's three that leaves both corrections live
+        # and provisional — marks only the correction it was called on, so checking just this
+        # side asked the same question straight back from the other wording. Answering it did
+        # not make it go away, which is D110's own complaint reproduced inside its fix.
+        if similar["id"] in answered:
+            continue
+        # One row per PAIR. Both wordings resemble each other, so an unguarded loop asks the
+        # same question twice with the two texts swapped — which reads as two problems.
+        pair = tuple(sorted((entry["id"], similar["id"])))
+        if pair in seen:
+            continue
+        seen.add(pair)
+        rows.append({
+            "action": "resolve_correction",
+            "correction_id": entry["id"],
+            "same_as": similar["id"],
+            # Both wordings, because a row saying "two rules may be the same" without saying
+            # WHICH two is a question nobody can answer from the menu — the state it is being
+            # lifted out of.
+            "title": f"“{entry['text']}” / “{similar['text']}”",
+            "needs": ["rules_may_be_the_same"],
+            "reason": _SHORT["rules_may_be_the_same"],
+            "why": _WHY["rules_may_be_the_same"],
+            # FULL wordings, not 40-character prefixes. They matched BECAUSE their openings
+            # are near-identical, so truncating showed the user two visually identical
+            # strings and asked whether they were the same thing. This row is on its own
+            # menu now, so it has the width.
+            "line": f"“{entry['text']}”  /  “{similar['text']}”",
+            "_rank": _RANK["rules_may_be_the_same"],
+        })
+    return rows
 
 
 def _what_would_close_it(record: dict, row: dict) -> list:
@@ -363,8 +535,15 @@ def _token(conn, scope: str, page: int, numbered: list) -> str:
     Pages past the fiftieth were unreachable and a valid token there was reported as "the
     library has changed", which is a false statement of fact.
     """
+    # `correction_id`/`same_as` too, for §10.2/D110's rows. Those carry no `campaign_id`, so
+    # two DIFFERENT pairs landing on the same number produced the same token — one settled, the
+    # next arriving in its place, and "3" silently meaning a different question with the key
+    # that is supposed to make that impossible. The row shape changed and the fingerprint did
+    # not; a token that identifies rows by a field one row shape does not have identifies
+    # nothing about that row.
     payload = json.dumps(
         [scope, page, [[r["number"], r.get("campaign_id"), r.get("action"),
+                        r.get("correction_id"), r.get("same_as"),
                         sorted(r.get("needs") or [])] for r in numbered]],
         sort_keys=True)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
@@ -375,7 +554,7 @@ def _address(menu_token: str) -> Optional[tuple]:
     """The scope and page a token names, so checking it is one derivation rather than a
     search over every page of every scope."""
     parts = str(menu_token or "").split("_")
-    if len(parts) != 4 or parts[0] != "menu" or parts[1] not in ("open", "concluded"):
+    if len(parts) != 4 or parts[0] != "menu" or parts[1] not in SCOPES:
         return None
     try:
         return parts[1], int(parts[2])
@@ -412,12 +591,46 @@ def _ask_about(conn, menu: dict, choice: int) -> dict:
         # overwriting the status put an empty menu behind a word that means "we looked and
         # here it is".
         return queue(conn, scope="concluded")
+    if row.get("action") == "rules":
+        # §10.2/D110: row 12, a scope of its own rather than a row among the campaigns.
+        return queue(conn, scope="rules")
     if row.get("action") == "more":
+        if menu["scope"] == "rules":
+            # The rules menu has one page and its last row is the way back, not "show more".
+            return queue(conn, scope="open")
         # Wraps. On the last page the row already reads "start again" and did not: `page + 1`
         # clamped back to the same page, so somebody at the end of a long list had no way home
         # from inside the menu.
         following = menu["page"] + 1 if menu["page"] < menu["pages"] else 1
         return queue(conn, scope=menu["scope"], page=following)
+    if row.get("action") == "resolve_correction":
+        # §10.2/D110. Not a reaction question — the closed set here is §8.2's three answers,
+        # and `corrections` already builds them. Rebuilding them beside it is how one surface
+        # comes to offer two answers and the other three, which is the drift this file has
+        # been bitten by four times.
+        import corrections as corrections_module
+
+        entry = corrections_module.describe(conn, row["correction_id"])
+        similar = corrections_module.describe(conn, row["same_as"])
+        # The token already catches somebody answering this pair in another window — it is
+        # computed over the rows, and an answered pair is not a row any more. This catches
+        # what the token cannot: a correction that is GONE, which `delete_campaign`'s cascade
+        # can do without changing anybody else's row. Narrow on purpose, and second.
+        if not entry or not similar:
+            return _refreshed(conn, "one of those rules is no longer on file")
+        return {
+            "status": "asking", "scope": menu["scope"], "menu_token": menu["menu_token"],
+            "correction_id": entry["id"], "same_as": similar["id"],
+            "texts": [entry["text"], similar["text"]],
+            "ask": "Are these the same rule?",
+            "next_actions": corrections_module._offers(entry["id"], entry["text"], similar),
+            "what_it_means": (
+                "Only somebody who knows the client's vocabulary can answer this, which is "
+                "why it is asked rather than decided. Folded together, both markets count "
+                "towards one rule; left apart, each wording is its own rule and neither ever "
+                "recurs across markets, so a rule the client has stated twice never becomes "
+                "standing."),
+        }
 
     record = store.get_campaign(conn, row["campaign_id"])
     # From the ROW's own reasons, not recomputed from tags. Recomputing asked a stub how it
@@ -660,8 +873,32 @@ def waiting(conn, *, apart_from: Optional[str] = None) -> int:
     `apart_from` is the record the caller has just written. Counting it made every first
     upload answer itself — "1 campaign is waiting on feedback" about the campaign still on
     screen — which is the always-present offer that teaches a reader to skip the list.
+
+    CAMPAIGNS, which is what every sentence built from this number says. §10.2/D110 added a
+    row that is not about a campaign, and this filtered on `r["campaign_id"]` — a key that
+    row does not have. The KeyError went into a bare `except` and came back as 0, so one pair
+    of similarly-worded client corrections — the ordinary state of an agency library, and the
+    precondition D110 was written about — silently turned off every proactive queue offer in
+    the product. Permanently, and with nothing to see: 10.6's entire headline switched off by
+    10.2's own new row.
+
+    The `except` is gone with it. An exception handler that turns a crash into "there is
+    nothing waiting" is the same defect class as the silent partial re-index D98 just fixed:
+    a failure the product cannot have, reported as a clean result. `_open_rows` reads what
+    every other surface reads; if it throws, that is not a fact about the feedback queue.
     """
-    try:
-        return len([r for r in _open_rows(conn) if r["campaign_id"] != apart_from])
-    except Exception:                        # noqa: BLE001 — an offer must never break a write
+    import store
+
+    # A database that has not been upgraded yet has nothing waiting on feedback, and that is
+    # a true statement rather than a swallowed error — `store.init_db` creates these on the
+    # next start. NAMED, because the blanket `except Exception: return 0` this replaces made
+    # every failure indistinguishable from an empty queue, which is how one pair of similar
+    # corrections switched off every proactive offer in the product with nothing to see.
+    if not all(store._columns(conn, table)
+               for table in ("campaigns", "metrics", "evaluations")):
         return 0
+    # Every row here is a campaign — §10.2/D110's questions live in their own scope, and
+    # `test_the_open_rows_are_all_campaigns` is what keeps that true. A `r.get("campaign_id")`
+    # guard was here while they were mixed in; keeping it now would read as a live check on a
+    # case that cannot arise, which is how a dead guard outlives the bug it was written for.
+    return len([r for r in _open_rows(conn) if r["campaign_id"] != apart_from])

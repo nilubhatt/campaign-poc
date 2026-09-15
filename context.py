@@ -1063,13 +1063,21 @@ CONFOUNDING_KINDS = ("conflict", "natural_disaster", "regulatory_change", "suppl
                      "platform_outage", "macro_shock")
 
 
-def attribute(conn, *, campaign_id: str, event_id: str, note: str, stated_by: str) -> dict:
+def attribute(conn, *, campaign_id: str, event_id: str, note: str, stated_by: str,
+              bears_on: bool = True) -> dict:
     """Somebody's account of what an event did to a campaign's numbers (§9.8).
 
     `stated`, always. "Sell-through was down and there was an earthquake" is not evidence the
     earthquake caused it, and a model asked to explain a disappointing number will reach for
     whatever is nearby — so the server records that the two overlapped and a PERSON records
     what they made of it, with their name on it.
+
+    `bears_on=False` is "we looked at this and it is not why", which the first version could
+    not express at all. The offer built on this asks "is X why these numbers came out as they
+    did" — a question with a `no`, and the `no` had nowhere to go, which is the D84 failure
+    this phase exists to fix arriving in new code. A ruled-out event is still reported as
+    having run through the window, with the words that ruled it out beside it: the overlap is
+    a computed fact and the ruling-out is somebody's claim, and a reader is owed both.
     """
     import store
 
@@ -1129,16 +1137,22 @@ def attribute(conn, *, campaign_id: str, event_id: str, note: str, stated_by: st
     outcome_known = bool(record.get("has_actual_metrics"))
     store.insert_attribution(conn, campaign_id=campaign_id, event_id=event_id,
                              note=note.strip(), stated_by=stated_by.strip(),
-                             outcome_known=outcome_known)
+                             outcome_known=outcome_known, bears_on=bears_on)
     return {"campaign_id": campaign_id, "event_id": event_id, "basis": "stated",
             "note": note.strip(), "stated_by": stated_by.strip(),
-            "outcome_known": outcome_known,
+            "outcome_known": outcome_known, "bears_on": bears_on,
             "what_it_means": (
                 f"{stated_by.strip()} states that this event bears on the campaign's results: "
                 f"\u201c{note.strip()}\u201d. That is their account, not a measurement — the "
                 f"library records that the two overlapped and does not work out what caused "
-                f"what. Its outcomes now read as confounded, which means they are still "
-                f"evidence and are no longer clean evidence.")}
+                f"what. Its outcomes read as confounded, which means they are still evidence "
+                f"and are not clean evidence."
+                if bears_on else
+                f"{stated_by.strip()} states that this event is NOT why the numbers came out "
+                f"as they did: \u201c{note.strip()}\u201d. The overlap is still reported — it "
+                f"is a fact the library computed, and their reading of it is a claim — so "
+                f"anyone citing these results still sees that the two coincided, with this "
+                f"beside it. What it stops is the question being asked again.")}
 
 
 def attribution_history(conn, *, campaign_id: str, event_id: str) -> list:
@@ -1225,16 +1239,32 @@ def confounders_for(conn, record: dict, *, metric: Optional[dict] = None,
     confounding, alongside = [], []
     for event in events:
         attribution = stated.get(event["id"])
-        if attribution or _confounds_by_itself(event):
+        # Somebody who looked at this overlap and said it is not why. Their `no` is a claim,
+        # not a measurement, so it cannot make a confounded outcome clean — but it is the
+        # most informed claim anyone has, so it is carried on the row and it stops the
+        # question being asked again. An event that confounds BY ITSELF (an earthquake is not
+        # part of a normal year) stays in the confounding list with the words that ruled it
+        # out beside it; one that was only confounding BECAUSE somebody attributed it moves
+        # back alongside, since the reason it was there has been withdrawn.
+        ruled_out = attribution is not None and not attribution["bears_on"]
+        if (attribution and not ruled_out) or _confounds_by_itself(event):
             confounding.append({**_slim(event), "attribution": attribution,
-                                "why": ("somebody stated that it bears on these results"
-                                        if attribution else
-                                        "a stated impact was recorded against it"
-                                        if _has_stated_impact(event)
-                                        else f"a {event['kind'].replace('_', ' ')} is not "
-                                             f"part of a normal year")})
+                                **({"ruled_out": True} if ruled_out else {}),
+                                "why": (
+                                    f"it overlapped, and {attribution['stated_by']} states it "
+                                    f"is NOT why: “{attribution['note']}”. The overlap is "
+                                    f"computed; that reading is theirs."
+                                    if ruled_out else
+                                    "somebody stated that it bears on these results"
+                                    if attribution else
+                                    "a stated impact was recorded against it"
+                                    if _has_stated_impact(event)
+                                    else f"a {event['kind'].replace('_', ' ')} is not "
+                                         f"part of a normal year")})
         else:
-            alongside.append(_slim(event))
+            alongside.append({**_slim(event),
+                              **({"ruled_out": True, "attribution": attribution}
+                                 if ruled_out else {})})
     # Ordered before it is cut, so which five survive is not an accident of insertion: what
     # somebody attributed first, then what a person recorded, then by date.
     confounding.sort(key=lambda e: (e["attribution"] is None, e.get("seeded", False),

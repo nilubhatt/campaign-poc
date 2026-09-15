@@ -443,16 +443,47 @@ def test_the_preview_reports_rows_that_would_not_import(conn):
     assert "would not import" in preview["what_it_means"]
 
 
-def test_the_preview_finds_them_without_writing_anything(conn):
-    import hashlib
+def _dump_without_staging(conn) -> str:
+    """The database as the user's library, ignoring the preview's own bookkeeping.
 
+    §10.5/D117 made the preview stage its rows, so a byte-for-byte dump is no longer constant
+    across a preview — and the invariant this checks was never about bytes. It is that a
+    preview writes nothing the library can SEE: no metric, no measure, no campaign, no
+    correction. A staged workbook is the preview's receipt for itself; it is unreachable from
+    every read path, and `test_the_preview_writes_nowhere_else` below is what keeps that
+    exemption from widening into "the preview may write wherever it likes".
+    """
+    import hashlib
+    kept = [line for line in conn.iterdump() if "import_batches" not in line]
+    return hashlib.sha256("\n".join(kept).encode()).hexdigest()
+
+
+def test_the_preview_finds_them_without_writing_anything(conn):
     good = _campaign(conn, "Peru launch")
-    before = hashlib.sha256("\n".join(conn.iterdump()).encode()).hexdigest()
+    before = _dump_without_staging(conn)
 
     store.bulk_import_metrics(conn, [{"campaign_id": good, "structured": {"zz_new": 1}},
                                      {"title": "Nope", "structured": {"roas": 2.0}}])
 
-    assert hashlib.sha256("\n".join(conn.iterdump()).encode()).hexdigest() == before
+    assert _dump_without_staging(conn) == before
+
+
+def test_the_preview_writes_nowhere_else(conn):
+    """The exemption above, bounded. `import_batches` is excluded from the dump because a
+    staged workbook is not library content — which is only true while staging is the ONLY
+    thing a preview writes. Without this, "ignore one table" is a hole anything could grow
+    into, and the strongest invariant in this file would have been quietly halved."""
+    good = _campaign(conn, "Peru launch")
+    before = {line for line in conn.iterdump()}
+
+    store.bulk_import_metrics(conn, [{"campaign_id": good, "structured": {"zz_new": 1}}])
+
+    changed = {line.split("(")[0].strip()
+               for line in set(conn.iterdump()) - before if line.startswith("INSERT")}
+
+    assert changed == {'INSERT INTO "import_batches" VALUES'}, (
+        f"a preview wrote to {changed} — it is the consent step and must write nothing else"
+    )
 
 
 def test_a_malformed_row_does_not_kill_the_whole_batch(conn):

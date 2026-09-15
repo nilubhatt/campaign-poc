@@ -397,6 +397,31 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         promised = commitments.summary_for(conn, cid)
     current = store.get_campaign(conn, cid)
     earlier_judgment = _judgment_to_check(conn, supersedes)
+    # §10.6/D54: computed before the offers so the result can be consulted after them.
+    gap_moved = _gap_moved(conn)
+    offers = actions.after_upload(
+        campaign_id=cid, status=current["status"],
+        # A record being ingested has no metrics yet, so this is always False here — it
+        # reads `has_actual_metrics` anyway so the two call sites cannot answer the same
+        # question two ways, which is how they drift.
+        has_metrics=current["has_actual_metrics"],
+        earlier_judgment=earlier_judgment,
+        # §8.6: a tracked client comment IS client feedback, and it arrives with its
+        # provenance already assembled. Without this the correction loop had no input at
+        # all — `note_correction` was a tool nothing in the product ever mentioned.
+        commentary=commentary, title=title,
+        # §9.9/D40: a judgment about this very title that is attached to nothing. This is
+        # §5.2's moment — the judgment is on screen because they just asked for it.
+        unlinked_judgment=store.unlinked_judgment_for(conn, title),
+        # §10.6: said where it is cheap, rather than waited for.
+        waiting=feedback.waiting(conn, apart_from=cid),
+        # §9.6: the window is what makes this record checkable against a calendar at all,
+        # and this is the moment somebody is present and thinking about the campaign.
+        has_window=bool(current.get("starts_on")),
+        gap_moved=bool(gap_moved))
+    # Only once the offer has survived `trim`. Marking it shown before that dropped the
+    # offer and recorded the change as announced, so it was never made at all.
+    _the_gap_was_announced(conn, offers, gap_moved)
     return {
         "campaign_id": cid, "title": title, "record_type": record_type,
         "embedded": embedded_count == len(chunk_texts),
@@ -410,25 +435,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         "commentary_found": len(commentary),
         "commentary_checked": commentary_checked,
         "normalised": changed,
-        "next_actions": actions.after_upload(
-            campaign_id=cid, status=current["status"],
-            # A record being ingested has no metrics yet, so this is always False here — it
-            # reads `has_actual_metrics` anyway so the two call sites cannot answer the same
-            # question two ways, which is how they drift.
-            has_metrics=current["has_actual_metrics"],
-            earlier_judgment=earlier_judgment,
-            # §8.6: a tracked client comment IS client feedback, and it arrives with its
-            # provenance already assembled. Without this the correction loop had no input at
-            # all — `note_correction` was a tool nothing in the product ever mentioned.
-            commentary=commentary, title=title,
-            # §9.9/D40: a judgment about this very title that is attached to nothing. This is
-            # §5.2's moment — the judgment is on screen because they just asked for it.
-            unlinked_judgment=store.unlinked_judgment_for(conn, title),
-            # §10.6: said where it is cheap, rather than waited for.
-            waiting=feedback.waiting(conn, apart_from=cid),
-            # §9.6: the window is what makes this record checkable against a calendar at all,
-            # and this is the moment somebody is present and thinking about the campaign.
-            has_window=bool(current.get("starts_on"))),
+        "next_actions": offers,
         "warnings": _persisted(conn, cid, notices.collapse(warnings)),
         # §6.3: the one moment where "was our judgment any good?" is both answerable and
         # free. Attached only when there IS an unreconciled judgment on the record this one
@@ -552,7 +559,120 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
                     campaign_id=campaign_id,
                     open_evaluation_id=store.unreconciled_evaluation_id(conn, campaign_id)
                     if metric_type == "actual" else None)
-                + (context_offer.get("next_actions") or []))}
+                + (context_offer.get("next_actions") or [])
+                + (_attribution_offer(conn, campaign_id)
+                   if metric_type == "actual" else []))}
+
+
+def _say_the_settled(earlier: Optional[dict]) -> str:
+    """Tell the model which of the earlier findings a PERSON has already answered (§10.2/D84).
+
+    This is the predicate that moved when the `departure` rewrite came out. `unexplained`
+    means "the brief does not say whether this is deliberate" — an open question — and once
+    somebody has said, it is no longer open. Rewriting the stored value said that by
+    destroying it; saying it here says the same thing to the reader who acts on it, and
+    leaves the model's own word on the record where an audit can still find it.
+
+    Works for all three answers, which the rewrite did not: `fixed` and `not_applicable` are
+    equally settled and equally worth not re-raising.
+    """
+    answered = [f for f in (earlier or {}).get("findings") or [] if f.get("settled")]
+    if not answered:
+        return ""
+    said = "; ".join(
+        f"“{f['finding'][:60]}” — {f['settled']['said_by']}: "
+        f"“{f['settled']['note'][:90]}”" for f in answered[:3])
+    return (f"{len(answered)} of those findings has already been answered by somebody: "
+            f"{said}. Do not raise those again as though nobody had said anything. If the "
+            f"answer settles it, leave it alone; if you think the answer is wrong, say so "
+            f"explicitly and quote what they said — disagreeing with a person on the record "
+            f"is legitimate, and silently re-asking is what this was built to stop. ")
+
+
+def _offer_to_settle(evaluation_id: str, findings: list) -> list[dict]:
+    """Where the answer to "is this deliberate?" goes (§10.2/D84).
+
+    Offered only for an `unexplained` departure, which is the one finding kind that is
+    literally a question — its own validation says so: "a departure you cannot yet say is
+    worse cannot be blocking; 'the brief does not say whether this is deliberate' IS a
+    question". Every other finding is a statement, and offering to settle one invites
+    somebody to wave away a guardrail breach with a sentence.
+    """
+    asking = [f for f in findings if f.get("departure") == "unexplained"]
+    if not asking:
+        return []
+    first = asking[0]
+    # `answer` is NOT prefilled, and that was the first version's mistake. `actions.action`
+    # says it in writing: prefilled arguments are "arguments this library already holds.
+    # Never a guess and never a placeholder: the user says yes to the label, so anything
+    # filled in here is something they agreed to without being shown it." The answer is the
+    # ONE field only a person can supply — the entire premise of the feature — and prefilling
+    # `deliberate` meant a user saying "we fixed that in v2" could have "we kept it on
+    # purpose" recorded under their own name, destroying the distinction `FINDING_ANSWERS`
+    # exists to preserve. Accepting this is not one step, and saying otherwise was the lie.
+    return [actions.action(
+        "Record the user's answer if they say why that difference was there",
+        "answer_finding",
+        why=f"{len(asking)} finding(s) here ask whether a difference was on purpose. Without "
+            f"an answer on file the next judgment of this brief is asked the same question "
+            f"again, and the user has already answered it.",
+        consent="ask",
+        needs=["answer — `fixed` (we changed it), `deliberate` (we kept it, and here is "
+               "why), `not_applicable` (it does not apply here) or `open` (never mind)",
+               "note — why, in the user's own words",
+               "said_by — whose answer it is"],
+        evaluation_id=evaluation_id, finding_id=first["id"])]
+
+
+def _attribution_offer(conn, campaign_id: str) -> list[dict]:
+    """Ask the person the one thing the server cannot work out (§10.6/D116, §9.8).
+
+    The server can say "the port was shut for nine of the thirty days this ran". Only a person
+    can say whether that is WHY the number is what it is — §9.8 is explicit that the machine
+    lines the two up and never decides between them. `attribute_outcome` is the sentence where
+    that answer goes, and nothing in the product had ever pointed at it, so the item's entire
+    human half was reachable only by somebody who had read the tool list.
+
+    Offered at the moment the outcome lands, which is the only moment both halves are on
+    screen — and only for an event nobody has answered about yet, because re-asking a settled
+    question is how an offer list stops being read.
+
+    NOT offered when nothing overlapped. An invitation to attribute an outcome to an event
+    that did not run through it is an invitation to invent a cause, which is worse than
+    silence: it would be this product manufacturing exactly the confident unfounded claim it
+    exists to refuse.
+    """
+    record = store.get_campaign(conn, campaign_id) or {}
+    unanswered = [event
+                  for metric in record.get("metrics") or []
+                  if metric.get("metric_type") == "actual"
+                  for event in metric.get("confounded_by") or []
+                  if not event.get("attribution")]
+    if not unanswered:
+        return []
+    first = unanswered[0]
+    # The label no longer frames this as a yes/no, and the `why` no longer promises something
+    # this call cannot do. Both were wrong in the first version, and wrong in ways the tool
+    # itself contradicted four lines into its own docstring: it said "without an answer the
+    # outcome stays flagged as confounded, which weakens every judgment that cites it", while
+    # `attribute_outcome` says in bold that a confounded outcome STILL COUNTS and nothing
+    # down-weights it. Attributing does not clear the flag either — it can only confirm or
+    # add one. Two user-facing strings in one product, one asserting what the other denies.
+    return [actions.action(
+        f"Record what somebody thinks “"
+        f"{(first.get('description') or first.get('subject') or '')[:44]}” did to these "
+        f"numbers",
+        "attribute_outcome",
+        why="The library can see it ran through this campaign's window; whether it bears on "
+            "the result is a judgment only somebody who was there can make, and nothing is "
+            "recorded until they say so. “It is not why” is an answer too — pass "
+            "bears_on=false. A confounded outcome still counts; it stops being quotable as "
+            "clean evidence.",
+        consent="ask",
+        needs=["stated_by — whose reading of it this is",
+               "note — what they think it did, or why it is not why, in their words",
+               "bears_on — false if they say this is not what moved the numbers"],
+        campaign_id=campaign_id, event_id=first["id"])]
 
 
 # ── retrieval / evidence for Claude ──────────────────────────────────────────
@@ -1144,8 +1264,9 @@ def _how_to_say_it(by_class: dict, findings: list) -> str:
             parts.append(
                 "The ones marked `unexplained` ARE a question: ask whether the difference is "
                 "deliberate, and do not tell them to change it back until they have "
-                "answered. Say plainly that their answer cannot yet be recorded against this "
-                "judgment, so the same question will come back next time.")
+                "answered. When they answer, RECORD IT with answer_finding — it used to be "
+                "true that their answer had nowhere to go and the same question came back "
+                "next time, and that is what answer_finding exists to stop.")
         if found["possible_improvement"]:
             parts.append(
                 f"{len(found['possible_improvement'])} departure(s) may be an IMPROVEMENT on "
@@ -3028,6 +3149,16 @@ def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
             actions.after_evaluation(
                 subject_title=subject_title, evaluation_id=eid, verdict=verdict,
                 campaign_id=campaign_id)
+            # §10.2/D84. An `unexplained` departure says in writing "the brief does not say
+            # whether this is deliberate" — and the marketer very often answers on the spot,
+            # in passing. Until now there was nowhere for that to go, so the answer was lost
+            # and the same question came back on the next version.
+            #
+            # Second, not first: `after_evaluation` offers to store a judged brief that is
+            # not yet a record, which is the commonest case and is about whether the judgment
+            # can ever be checked at all. The comment here used to claim FIRST and the code
+            # never gave it that, which is the doc-code drift this project guards against.
+            + _offer_to_settle(eid, cleaned)
             # §10.6: a judgment is one of the two moments the review names.
             # `apart_from`: a write announcing itself is the always-present offer that
             # teaches a reader to skip the list.
@@ -3393,7 +3524,454 @@ def gaps(conn) -> dict:
     The counterpart to `most_valuable_missing_input` on a judgment: this is about the
     LIBRARY, that is about one verdict, and they routinely disagree — a library that is 90%
     measured can still produce a judgment resting entirely on the unmeasured tenth.
+
+    §10.6/D76 folded in the first-steps path, which `readiness` also shows. It is the same
+    ordered list from the same function, not a second copy — and it is empty once the path
+    is walked, because guidance that never stops appearing is guidance nobody reads.
     """
+    ranked = _ranked_gaps(conn)
+    # Appended after ranking, not among the ranked gaps: these are patterns across a market
+    # rather than one missing thing, and they carry no offer, because closing one means
+    # editing several records. Ranking an unofferable gap above an offerable one would put
+    # the thing nobody can act on first.
+    superseded = store.get_superseded_campaign_ids(conn)
+    field_gaps = _fields_never_recorded(conn, [
+        c for c in store.list_campaigns(conn)
+        if c.get("record_type") != "reference" and c["id"] not in superseded])
+    # Carrying `order` too, past every ranked gap. They are appended rather than sorted in,
+    # but a list where some rows have the key the list is ordered on and some do not is one
+    # nobody can check the order of — and "appended last" is a position, so it should say so
+    # in the same field as every other position rather than only by where it sits.
+    last = max((g["order"] for g in ranked["gaps"]), default=0) + 1
+    for gap in field_gaps:
+        gap.update({"order": last, "rank": last, "affects": gap["campaigns"],
+                    "share": 0.0, "outweighs_its_kind": False, "rank_basis": "computed"})
+    ranked["gaps"] += field_gaps
+    ranked["shortest_path"] = first_steps(conn)
+    return ranked
+
+
+def top_gap(conn) -> Optional[str]:
+    """The code of the gap worth fixing first, or None (§10.6/D54).
+
+    Separate from `gaps()` because it has to be cheap enough to call on every upload:
+    `_fields_never_recorded` walks `facts.for_campaign` per record and cannot change
+    `most_valuable` — it is appended after the ranking — so the expensive half is skipped.
+    """
+    return _ranked_gaps(conn)["most_valuable"]
+
+
+_TOP_GAP_KEY = "top_gap"
+
+
+def _gap_moved(conn) -> Optional[str]:
+    """Has the library's worst problem changed since anybody was told? (§10.6/D54.)
+
+    The second half of D54, and the harder half. "Offer the ranking at session start" is a
+    condition a stateless call can evaluate; "offer it when an upload changes the top gap" is
+    not — `changed` needs the previous answer, so one is remembered.
+
+    Reads only. The first version also WROTE the new value here, before the offer it enables
+    had reached `trim` — and the offer is appended last, so on any upload with three other
+    things to say it was dropped AND the change was recorded as already announced. It
+    therefore fired ZERO times per change on exactly the uploads that matter most: a v2
+    replacing a judged record, or a concluded campaign with no results and no dates. The
+    docstring claimed "once per change"; it was none. `_the_gap_was_announced` is now called
+    by the caller, after the offer survives.
+
+    A library with nothing remembered — a fresh install, or a database from before this
+    existed — reads as moved, and it has: the ranking went from meaning nothing to meaning
+    something. Losing the row costs one redundant offer, never a wrong answer.
+    """
+    now = top_gap(conn)
+    # `library_is_empty` cannot be the NEW top gap after an upload, but it can be the
+    # remembered one, and moving off it is the most meaningful move there is.
+    return now if now and now != store.get_state(conn, _TOP_GAP_KEY) else None
+
+
+def _the_gap_was_announced(conn, offers: list, moved: Optional[str]) -> None:
+    """Remember the top gap only once somebody has actually been shown it (§10.6/D54).
+
+    The whole of the fix for the burned offer: `trim` is the last word on what a user sees,
+    so it is the only place that can say whether the announcement happened.
+    """
+    if moved and any(offer["tool"] == "gaps" for offer in offers):
+        store.set_state(conn, _TOP_GAP_KEY, moved)
+
+
+# ── answering back (§10.2, D84 / D59 / D53) ────────────────────────────────
+#
+# The four rows the tracker points at 10.2 are one thing: a place for a person's answer to
+# go. This product asks several questions on surfaces with no return path — "is this
+# departure deliberate?", "did you fix that?", "is this gap ever going to close?" — and the
+# reply goes into a chat window and dies.
+#
+# That is worse than not asking, twice over. The question comes back, so the product looks
+# like it is not listening, because it is not. And the UN-answer is stored: `departure:
+# unexplained` is a fact every later judgment reads, and it is false the moment somebody
+# explains it. A question nobody can answer decays into a wrong answer.
+
+# What a person can say about a stored finding. Three, and the distinction between the first
+# two is the one D84 insists on in writing: `resolved` "records 'we changed it', not 'we kept
+# it, and here is why'". A library that cannot tell a brief that was corrected from one that
+# was defended has lost what the whole correction loop reasons from.
+FINDING_ANSWERS = {
+    "fixed": "The problem was real and we addressed it.",
+    "deliberate": "We kept it on purpose, and here is why.",
+    # `not_applicable` used to carry both of these, and they are not the same answer. "That
+    # rule does not apply to this brief" accepts the finding and disputes its scope; "you
+    # have misread the brief" disputes the finding itself. Collapsing them loses the
+    # disagreement — and a disagreement with a judgment is the single most valuable thing
+    # this library can be told, because it is the only signal that the product got something
+    # wrong. The whole review that started this began with "impossible to argue with".
+    "does_not_apply": "The point is right in general and does not apply to this brief.",
+    "misread": "The finding is wrong about what the brief says.",
+    # The way back, which `GAP_ANSWERS` had from the start and this did not. A finding
+    # answered wrongly could be re-answered but never returned to unanswered, so the first
+    # mis-click was permanent — and `_offer_to_settle` was prefilling `deliberate`, which
+    # made a wrong first answer likely rather than hypothetical. The whole point of a
+    # person's answer is that a person can change it.
+    "open": "Never mind — treat it as unanswered again.",
+}
+
+# How each answer reads when `diff_campaigns` renders it. `misread` is deliberately blunt:
+# a person saying the judgment was wrong is the most valuable thing this library gets told,
+# and softening it into "not applicable" is how a product stops hearing that it is wrong.
+_SETTLED_AS = {
+    "fixed": "addressed",
+    "does_not_apply": "right in general but not applicable to this brief",
+    "misread": "wrong about what the brief says",
+}
+
+# What a person can say about a gap they cannot close. `known_not_yet` stays ranked, because
+# it is still the thing to fix; `not_applicable` leaves the ranking, because a market whose
+# agency no longer exists will never have its results and reporting it forever is the
+# permanent complaint this surface is written against. One state for both would either nag
+# somebody who has answered or silence a gap that is real.
+GAP_ANSWERS = {
+    "known_not_yet": "Known, and not being done yet.",
+    "not_applicable": "This will never be true here.",
+    "open": "Never mind — treat it as outstanding again.",
+}
+
+
+# Past this, an answer is old enough that nobody can reasonably say it still reflects what
+# they think. Not a deadline and not a scheduler — this product has no scheduler and says so
+# in `after_evaluation` — just the point at which the log stops letting the age go unsaid.
+_STALE_ANSWER_DAYS = 180
+
+
+def answers(conn, *, said_by: Optional[str] = None) -> dict:
+    """Every answer a person has given this library, newest first (§10.2).
+
+    The read path the write paths needed. §10.2 gave this product somewhere for a person's
+    answer to go and nothing to read them back with — and for a product whose whole pitch is
+    that its judgments can be ARGUED WITH, the record of where somebody argued and won is the
+    most valuable thing it holds. It was write-only, which is D116's shape one level down: a
+    team lead could not ask "what have we marked deliberate", "who set aside which gaps" or
+    "show me everything Ana answered", so nobody reviewed the overrides, so a wrong one was
+    permanent in practice even though `open` makes it reversible in principle.
+
+    Every row, not the standing one per subject. The table is append-only so that "this
+    looked deliberate in March and turned out to be a mistake in June" survives, and a log
+    showing only June has discarded the half that made keeping both worth doing. `stands`
+    marks which one is current.
+    """
+    rows = store.every_answer(conn, said_by=said_by)
+    if not rows:
+        return {
+            "status": "nothing_to_check", "basis": "computed", "answers": [],
+            "what_it_means": (
+                f"Nobody has answered anything{f' — nothing from {said_by}' if said_by else ''}"
+                f". That is not the same as nothing having been asked: a judgment that raised "
+                f"an unexplained departure asked one, and a gap somebody could not close "
+                f"asked another. It means no answer is on file, so every such question is "
+                f"still open and will be put again."),
+        }
+    seen: set = set()
+    now = time.time()
+    out = []
+    for row in rows:
+        subject = (row["subject_kind"], row["subject_key"])
+        days = int((now - row["created_at"]) / 86400)
+        entry = {
+            "answer": row["answer"], "note": row["note"], "said_by": row["said_by"],
+            "said_at": row["said_at"], "basis": "stated",
+            "subject_kind": row["subject_kind"],
+            "about": _what_the_answer_was_about(conn, row),
+            # Newest first, so the first time a subject is seen is the answer that stands.
+            "stands": subject not in seen,
+            "days_ago": days,
+            "stale": days >= _STALE_ANSWER_DAYS,
+            # The overrides that matter most are the ones that made the product say LESS.
+            "silences": row["answer"] in ("not_applicable", "deliberate", "misread"),
+        }
+        if row["subject_kind"] == "finding":
+            entry["evaluation_id"] = row["evaluation_id"]
+            entry["finding_id"] = row["subject_key"]
+            judgment = store.get_evaluation(conn, row["evaluation_id"] or "")
+            entry["subject_title"] = (judgment or {}).get("subject_title")
+        seen.add(subject)
+        out.append(entry)
+    stale = [e for e in out if e["stands"] and e["stale"]]
+    silencing = [e for e in out if e["stands"] and e["silences"]]
+    return {
+        "status": "checked", "basis": "computed", "answers": out,
+        "counts": {"answers": len(out), "standing": len(seen), "silencing": len(silencing)},
+        "what_it_means": (
+            f"{len(seen)} question(s) this library asked have an answer on file, from "
+            f"{len(out)} statement(s) — the older ones are kept, because what somebody said "
+            f"before the numbers came in and what they said after are two judgments. "
+            f"`stands` marks the one in force. {len(silencing)} of them make this product "
+            f"say LESS than it otherwise would, which is the half worth reading first."
+            + (f" {len(stale)} were given over {_STALE_ANSWER_DAYS} days ago and nobody has "
+               f"revisited them; a market written off in March may have been revived since, "
+               f"and nothing here re-asks."
+               if stale else "")),
+    }
+
+
+def _what_the_answer_was_about(conn, row: dict) -> str:
+    """The question in its own words. A log of `finding_id` values is a log nobody can read,
+    and the person reviewing overrides is not the person who made them."""
+    if row["subject_kind"] != "finding":
+        return row["subject_key"]
+    judgment = store.get_evaluation(conn, row["evaluation_id"] or "")
+    for finding in (judgment or {}).get("findings") or []:
+        if finding.get("id") == row["subject_key"]:
+            return finding.get("finding") or row["subject_key"]
+    return row["subject_key"]
+
+
+def answer_finding(conn, *, evaluation_id: str, finding_id: str, answer: str, note: str,
+                   said_by: str) -> dict:
+    """Record what a person says about one finding on a saved judgment (§10.2/D84+D59).
+
+    The write path both rows needed. Every check here exists because the alternative is an
+    answer that is worse than the silence it replaced:
+
+    `note` is required, because "deliberate" with no reason is the same non-answer as
+    `unexplained` — recorded as though it were an answer, and therefore stopping the question
+    being asked. That is strictly worse than the state it replaces.
+
+    `said_by` is required, because this overrides a stored finding, and every `stated` claim
+    in this product carries who made it. An anonymous override of a computed finding is the
+    one thing this library refuses everywhere.
+
+    The finding has to be ON the judgment, because a settled finding nobody can find is an
+    answer filed against nothing — and it would return `status: settled` while settling
+    nothing, which is the shape of every defect this review found.
+    """
+    if answer not in FINDING_ANSWERS:
+        raise ValueError(
+            f"answer must be one of {list(FINDING_ANSWERS)}, got {answer!r}. "
+            + " ".join(f"`{k}`: {v}" for k, v in FINDING_ANSWERS.items()))
+    if not (note or "").strip():
+        raise ValueError(
+            "`note` is required — say why, in the words somebody used. An answer with no "
+            "reason is the same non-answer as `unexplained`, except that it stops the "
+            "question being asked, which makes it worse than saying nothing.")
+    if not (said_by or "").strip():
+        raise ValueError(
+            "`said_by` is required — whose answer this is. It overrides a stored finding, "
+            "and an unattributed override is a claim nobody can weigh or go back to.")
+    judgment = store.get_evaluation(conn, evaluation_id)
+    if not judgment:
+        raise ValueError(f"{evaluation_id!r} is not a judgment on file")
+    finding = next((f for f in judgment.get("findings") or []
+                    if f.get("id") == finding_id), None)
+    if not finding:
+        raise ValueError(
+            f"{finding_id!r} is not a finding on {evaluation_id}. Its findings are: "
+            f"{[f.get('id') for f in judgment.get('findings') or []]}")
+
+    store.record_answer(conn, subject_kind="finding", subject_key=finding_id,
+                        evaluation_id=evaluation_id, answer=answer, note=note.strip(),
+                        said_by=said_by.strip())
+    return {
+        "status": "settled",
+        "evaluation_id": evaluation_id,
+        "finding_id": finding_id,
+        "answer": answer,
+        "note": note.strip(),
+        "said_by": said_by.strip(),
+        "basis": "stated",
+        "what_it_means": (
+            f"Recorded against this finding, and it travels with it: every later judgment "
+            f"that retrieves this record reads the answer rather than the question. "
+            + "The next judgment of this brief is shown your answer alongside the finding, "
+              "and told not to raise it again as though nobody had said anything. That is "
+              "the strongest claim this can make: the model still writes the findings, so "
+              "it is being informed rather than constrained."),
+    }
+
+
+def answer_gap(conn, *, code: str, answer: str, note: str, said_by: str) -> dict:
+    """Record what a person says about a gap they cannot close (§10.2/D53).
+
+    Silenced in the RANKING, never deleted from the record. A gap somebody set aside is still
+    a fact about the library's evidence, and a judgment resting on that evidence is still
+    weaker for it — hiding it entirely would make the product overstate its own coverage,
+    which is what this whole review is about.
+    """
+    if answer not in GAP_ANSWERS:
+        raise ValueError(
+            f"answer must be one of {list(GAP_ANSWERS)}, got {answer!r}. "
+            + " ".join(f"`{k}`: {v}" for k, v in GAP_ANSWERS.items()))
+    if not (note or "").strip():
+        raise ValueError(
+            "`note` is required — say why this gap is not going to close, or when it will. "
+            "A gap set aside with no reason is one nobody can reopen intelligently.")
+    if not (said_by or "").strip():
+        raise ValueError("`said_by` is required — whose call this is.")
+    # Against the gaps this library ACTUALLY has, not against the registry of codes. A
+    # silent no-op for a gap nobody is reporting reads as done and is not — and `_GAP_RANK`
+    # would happily accept `no_window` for a library where every record has dates.
+    ranked = [g["code"] for g in _ranked_gaps(conn)["gaps"]]
+    aside = store.answers_for(conn, "gap")
+    if code not in ranked and code not in aside:
+        raise ValueError(
+            f"{code!r} is not a gap this library is reporting. Call gaps() to see what it "
+            f"has: {ranked}")
+    # ONE rule, not two. The offer was gated on `_CAN_BE_SET_ASIDE` and the write was not, so
+    # the whitelist that keeps somebody from silencing "finished campaigns have no results on
+    # file" guarded only the suggestion — `answer_gap(code="library_is_empty",
+    # answer="not_applicable")` was accepted on an empty library and `gaps()` then returned
+    # `[]`, which is the product saying nothing is missing about a library holding nothing.
+    # Two implementations of one rule is the shape this file has now hit five times, and this
+    # is the version where the two disagree about something that matters.
+    if answer != "open" and code not in _CAN_BE_SET_ASIDE:
+        raise ValueError(
+            f"{code!r} cannot be set aside. “This will never be true here” is honest about a "
+            f"market whose agency no longer exists — {list(_CAN_BE_SET_ASIDE)} — and not "
+            f"about a gap that describes work nobody has done yet. Silencing "
+            f"`few_verified_outcomes` hides the gap this product was built around, and "
+            f"silencing `judgments_never_reconciled` makes its own calibration figure "
+            f"unfalsifiable. Close it, or leave it reported.")
+
+    store.record_answer(conn, subject_kind="gap", subject_key=code, answer=answer,
+                        note=note.strip(), said_by=said_by.strip())
+    return {
+        "status": "recorded", "code": code, "answer": answer, "note": note.strip(),
+        "said_by": said_by.strip(), "basis": "stated",
+        "what_it_means": {
+            "known_not_yet": "It stays in the ranking, because it is still the thing to fix — "
+                            "but the note travels with it, so nobody has to work out whether "
+                            "anyone has looked at it.",
+            "not_applicable": "It leaves the ranking and stays on the record under "
+                              "`set_aside`. Judgments resting on this evidence are still "
+                              "weaker for it, and still say so.",
+            "open": "Back in the ranking, as though nothing had been said.",
+        }[answer],
+    }
+
+
+def stale_answers_offer(conn) -> list[dict]:
+    """Offer the override log when something that SILENCES this product has gone unreviewed.
+
+    The honest moment for it, and the only one. Offering "read the log" right after somebody
+    writes to it is noise — they have just been told what they said. What nobody is ever told
+    is that a gap written off months ago is still written off: the queue's founding insight is
+    that a question asked once and never again is a question nobody answered, and until now
+    that insight was not applied to the ANSWERS. A market written off in March may have been
+    revived since, and nothing here re-asks.
+
+    Gated on `stale` AND `silences`, so it fires on the answers that made the library say
+    less — never on a tidy log of things somebody explained.
+    """
+    silenced = [a for a in answers(conn).get("answers") or []
+                if a["stands"] and a["stale"] and a["silences"]]
+    if not silenced:
+        return []
+    return [actions.action(
+        f"Review the {len(silenced)} answer(s) nobody has revisited",
+        "answers",
+        why=f"{len(silenced)} standing answer(s) make this library report less than it "
+            f"otherwise would, and the most recent is {min(a['days_ago'] for a in silenced)} "
+            f"days old. Nothing re-asks; a market written off last year may have come back.",
+        consent="do")]
+
+
+def gaps_offer(conn) -> list[dict]:
+    """Offer the ranked gaps, when there is a ranking worth reading (§10.6/D54).
+
+    `gaps`'s own docstring says "call it when the user asks how good their library is" — an
+    instruction inside a tool result, which is the form this project's stated principle says
+    models drop. The library knows it holds one measured campaign and has never said so.
+
+    Not on an empty library: `library_is_empty` is the only gap there, `shortest_path` is
+    already the answer to it on the same response, and an offer to enumerate the gaps of an
+    empty library is the permanent complaint this surface is written against.
+    """
+    top = top_gap(conn)
+    if not top or top == "library_is_empty":
+        return []
+    return [actions.action(
+        "Show what this library is missing, worst first",
+        "gaps",
+        why=_GAP_HEADLINE.get(top, "Something in the library is holding its judgments back."),
+        consent="do")]
+
+
+# The one-line reason for offering the ranking, per top gap. Written here rather than read
+# off the gap's own `what`, because that sentence carries counts and names and this one has
+# to fit on a line beside two other offers — and because an offer whose `why` is the answer
+# it is offering to fetch is an offer nobody needs to accept.
+_GAP_HEADLINE = {
+    "few_verified_outcomes": "Finished campaigns here have no results on file, so judgments "
+                             "citing them rest on somebody's impression.",
+    "market_without_outcomes": "A whole market has nothing measured, so judgments about it "
+                               "compare against campaigns somewhere else.",
+    "partly_indexed": "Records are stored and not searchable, so their content is absent "
+                      "from evidence without being absent from the library.",
+    "execution_never_checked": "Outcomes are being read as though the brief caused them, "
+                               "with nothing on file showing what actually ran.",
+    "no_window": "Finished campaigns have no dates, so nothing can be checked against what "
+                 "else was going on at the time.",
+    "judgments_never_reconciled": "Judgments with results on file have never been checked "
+                                  "against what happened, so the calibration figure is "
+                                  "about whoever bothered.",
+}
+
+
+def coverage_offer(conn) -> list[dict]:
+    """Offer the coverage matrix, when the library has a shape to show (§10.6/D67).
+
+    `coverage`'s own docstring says `list_campaigns` "answers 'what have I got' one record at
+    a time. This answers the question a marketer actually has" — which is the tool admitting
+    the listing is the moment for it, in a sentence the listing never carried.
+
+    Gated on `thin` being non-empty, which is narrower than "there are cells". A wholly
+    unmeasured library reports `thin: []` with a `thin_summary` saying the place to start is
+    not a particular market — and `gaps` says that better, with an offer that closes it. So
+    the matrix is offered when there IS a contrast to see: some cells measured, some not.
+    """
+    shape = coverage(conn)
+    thin = shape.get("thin") or []
+    if not thin or shape.get("cells_total", 0) < 2:
+        return []
+    # `thin[0]`, not a second grouping computed here — D67's own words. The first version of
+    # `gaps` grew its own market-or-region grouping beside §5.5's and the two then described
+    # the same library differently (D55); an offer POINTING at coverage that counted the
+    # library itself would be that failure inside the fix for it.
+    worst = thin[0]
+    where = worst.get("market") or worst.get("collection") or worst.get("stage") or "one cell"
+    return [actions.action(
+        "Show where this library is thick and where it is thin",
+        "coverage",
+        # "the largest gap", NOT "the thinnest". `thin` is ranked by `(_EVIDENCE_ORDER,
+        # -campaigns)`, so `thin[0]` is the worst-evidence cell with the MOST campaigns in
+        # it — the biggest hole, not the smallest cell. Calling it the thinnest reported a
+        # cell holding nine unmeasured campaigns as thinner than one holding a single
+        # unmeasured campaign, which is backwards in the field that decides where to look.
+        why=f"{shape['thin_total']} of {shape['cells_total']} cells are weak — "
+            f"{where} is the largest of them, and the similarity score looks the same "
+            f"whether a judgment came from one precedent there or nine.",
+        consent="do")]
+
+
+def _ranked_gaps(conn) -> dict:
+    """The ranked gaps alone: everything that can decide `most_valuable`."""
     # Superseded records are excluded from every search, so counting one as the library's
     # measured evidence describes something no judgment can reach.
     superseded = store.get_superseded_campaign_ids(conn)
@@ -3404,21 +3982,25 @@ def gaps(conn) -> dict:
     # gap. `after_upload` already drew this line; this did not.
     ran = [c for c in campaigns if c.get("status") == "concluded"]
     found: list[dict] = []
-    field_gaps = _fields_never_recorded(conn, campaigns)
 
     if not campaigns:
         # Every gap is present in an empty library, which makes the list useless. A new
         # install has exactly one thing to do, and it is not "fix your LATAM coverage".
+        #
+        # §10.6/D76: the FIRST step of the ordered path, not a separate list of two of its
+        # three. `to_first_upload()` said "add a campaign" where the path says "add one you
+        # were happy with", and the difference is the whole point of the path — a library of
+        # things somebody liked cannot judge on the axis it is being asked about.
         found.append({
             "code": "library_is_empty",
             "what": "There are no campaigns in the library yet.",
             "why_it_matters": "Every judgment this product makes is a comparison against "
                               "what you have already run, so with nothing stored there is "
                               "nothing to compare against.",
-            "counts": {"campaigns": 0},
-            "next_actions": actions.to_first_upload(),
+            "counts": {"campaigns": 0}, "affects": 0,
+            "next_actions": first_steps(conn)[:1],
         })
-        return _ranked(found)
+        return _what_people_said_about_the_gaps(conn, _ranked(found, library_size=0))
 
     # `has_metrics` counts any metric row, so a PREDICTED figure silenced this gap — and a
     # forecast is the opposite of a measured outcome; it is the thing reconciliation later
@@ -3434,6 +4016,7 @@ def gaps(conn) -> dict:
                               "but cannot show whether it worked, so a judgment resting on "
                               "it rests on somebody's impression.",
             "counts": {"campaigns": len(ran), "with_outcomes": len(with_outcomes)},
+            "affects": len(ran) - len(with_outcomes),
             "next_actions": actions.trim([actions.action(
                 "Record what one of these campaigns actually achieved",
                 "add_metrics",
@@ -3462,7 +4045,7 @@ def gaps(conn) -> dict:
                                "brief caused it. If what ran was not what was briefed, the "
                                "library is learning from the wrong document and has no way "
                                "to notice."),
-            "counts": {"campaigns": len(unchecked)},
+            "counts": {"campaigns": len(unchecked)}, "affects": len(unchecked),
             "next_actions": actions.trim([actions.action(
                 f"Add the photographs from \u201c{unchecked[0]['title']}\u201d",
                 "upload_image_asset",
@@ -3491,7 +4074,16 @@ def gaps(conn) -> dict:
                                "whether its own judgments are any good, and it needs somebody "
                                "to go back. Until these are checked, the calibration figure "
                                "is about whoever bothered."),
-            "counts": {"judgments": len(waiting)},
+            "counts": {"judgments": len(waiting),
+                       "campaigns": len({j["campaign_id"] for j in waiting})},
+            # RECORDS, like every other gap's `affects`. It counted JUDGMENTS, and `share`
+            # then divided judgments by campaigns: one campaign carrying three unreconciled
+            # judgments reported `share: 3.0` — not a share of anything — and, being above
+            # the threshold, claimed that single record "outweighs its kind" and moved up a
+            # rank. A ratio of two different units is a number that cannot be wrong, because
+            # it does not mean anything. The judgment count is still reported, in `counts`,
+            # where it is labelled.
+            "affects": len({j["campaign_id"] for j in waiting}),
             "next_actions": actions.trim([actions.action(
                 f"Check what the library said about \u201c{waiting[0]['subject_title'][:36]}\u201d "
                 f"against what happened",
@@ -3521,7 +4113,7 @@ def gaps(conn) -> dict:
                                "be clever to produce — but only for a campaign that says when "
                                "it ran. Without a window every outcome is read as though "
                                "nothing else was going on."),
-            "counts": {"campaigns": len(windowless)},
+            "counts": {"campaigns": len(windowless)}, "affects": len(windowless),
             "next_actions": actions.trim([actions.action(
                 f"Say when “{windowless[0]['title'][:36]}” ran",
                 "update_campaign",
@@ -3576,6 +4168,7 @@ def gaps(conn) -> dict:
                               "campaigns elsewhere, which is a weaker comparison than it "
                               "looks.",
             "counts": {"markets": shown, "markets_total": len(barren)},
+            "affects": len({c["id"] for m in barren for c in by_market[m]}),
             "next_actions": actions.trim([actions.action(
                 f"Record results for a campaign in {display[barren[0]]}",
                 "add_metrics",
@@ -3592,6 +4185,7 @@ def gaps(conn) -> dict:
             "what": f"{len(by_campaign)} record(s) are stored but not fully searchable.",
             "why_it_matters": "The content is here and searches cannot find it, so it is "
                               "absent from evidence without being absent from the library.",
+            "affects": len(by_campaign),
             "counts": {"records": len(by_campaign),
                        "items": outstanding["chunks"] + outstanding["assets"]},
             "next_actions": actions.to_finish_indexing(
@@ -3605,19 +4199,155 @@ def gaps(conn) -> dict:
     # worse is a complaint, which this item's own rule forbids; `commentary_checked` is kept
     # so it can be reported the moment there is something that closes it (D51).
 
-    # Appended after ranking, not among the ranked gaps: these are patterns across a market
-    # rather than one missing thing, and they carry no offer, because closing one means
-    # editing several records and that write path is D84's. Ranking an unofferable gap above
-    # an offerable one would put the thing nobody can act on first.
-    ranked = _ranked(found)
-    ranked["gaps"] += field_gaps
-    return ranked
+    return _what_people_said_about_the_gaps(
+        conn, _ranked(found, library_size=len(campaigns)))
 
 
-def _ranked(found: list[dict]) -> dict:
+# The only gaps where "this will never be true here" is an honest thing for somebody to say.
+#
+# A whitelist, after review found the blacklist let through the two that matter most. The
+# honest case for D53 is a market whose agency no longer exists and whose numbers are gone —
+# a fact that CANNOT become true. It is not `few_verified_outcomes` ("finished campaigns have
+# no results on file"), which is the gap behind the original customer complaint, and it is
+# not `judgments_never_reconciled`, where silencing it makes the product's own self-
+# assessment unfalsifiable — the calibration figure would then be about whoever bothered,
+# with nothing left to say so. Those are about work nobody has DONE, not facts that cannot
+# exist, and a blacklist cannot tell the difference because the difference is not syntactic.
+#
+# `execution_never_checked` is out for the same reason: photographs of what ran are work.
+_CAN_BE_SET_ASIDE = ("market_without_outcomes", "no_window")
+
+# One per response, ever. Measured at 3 of 7 offers in a single `gaps()` reply — one per gap,
+# because `trim` caps each gap's own list and nothing capped the response — which made "shall
+# we stop mentioning this?" the most repeated sentence in the product's report on its own
+# evidence. "Last in the gap's own list" controlled position and did nothing about frequency.
+_MAX_SET_ASIDE_OFFERS = 1
+
+
+def _what_people_said_about_the_gaps(conn, ranked: dict) -> dict:
+    """Apply D53's answers to the ranking (§10.2).
+
+    Inside `_ranked_gaps` rather than inside `gaps()`, so `top_gap` sees the same list. With
+    it one level up, the session-start offer fired on a gap somebody had set aside while
+    `gaps()` did not show it — two surfaces describing the same library differently, which is
+    D55's shape and the one this file has now hit four times.
+    """
+    said = store.answers_for(conn, "gap")
+    kept = []
+    offered_to_set_aside = 0
+    for gap in ranked["gaps"]:
+        answer = said.get(gap["code"])
+        if answer and answer["answer"] == "not_applicable":
+            continue
+        if answer and answer["answer"] == "known_not_yet":
+            gap["answered"] = answer
+        elif (not answer and gap["code"] in _CAN_BE_SET_ASIDE
+                and offered_to_set_aside < _MAX_SET_ASIDE_OFFERS
+                and not gap.get("closed_by") and gap.get("next_actions")):
+            offered_to_set_aside += 1
+            # NOT on a gap whose own offer was de-duplicated away. `_ranked` drops an offer
+            # another gap already makes and leaves `closed_by` pointing at it — so appending
+            # the silencing offer afterwards made it the ONLY thing on that gap, and the
+            # product's single suggestion about a real hole in the evidence was "shall we
+            # stop mentioning this?". Reproduced on an ordinary five-record library: the
+            # `market_without_outcomes` row offered nothing else at all.
+            #
+            # §10.2/D53, LAST in the gap's own list and never first: the offer that closes a
+            # gap is worth more than the offer that silences it, and a product whose opening
+            # suggestion is "shall we stop mentioning this?" is one that teaches people to
+            # dismiss its findings. Offered at all because some gaps genuinely never close,
+            # and reporting one of those forever is the permanent complaint this surface is
+            # written against.
+            gap["next_actions"] = actions.trim((gap.get("next_actions") or []) + [
+                actions.action(
+                    "Set this aside if it is never going to close",
+                    "answer_gap",
+                    why="Some gaps are true and permanent — a market whose agency no longer "
+                        "exists will never have its results. It stays on the record either "
+                        "way; it stops being ranked.",
+                    consent="ask",
+                    needs=["answer — `known_not_yet` (known, not yet) or `not_applicable` "
+                           "(never going to be true here)",
+                           "note — why", "said_by — whose call it is"],
+                    code=gap["code"])])
+        kept.append(gap)
+    return {
+        **ranked,
+        "gaps": kept,
+        # Recomputed, because the head of the list may have just left it. `most_valuable`
+        # naming a gap that is not in `gaps` is the inconsistent pair `coverage` was fixed for.
+        "most_valuable": kept[0]["code"] if kept else None,
+        # Visible, not deleted. A gap somebody set aside is still a fact about this library's
+        # evidence, and a judgment resting on it is still weaker for it — dropping it
+        # entirely would make the product overstate its own coverage, which is the failure
+        # this whole review is about.
+        # Only gaps this library STILL has. A gap set aside in March and then genuinely
+        # closed in June is not "set aside" any more, it is closed — and listing it says the
+        # library is choosing not to look at something it no longer has, which is a worse
+        # misreading than not mentioning it. `ranked["gaps"]` is the list before the answers
+        # were applied, so it is the honest test of "is this still true".
+        "set_aside": [{"code": code, **answer} for code, answer in sorted(said.items())
+                      if answer["answer"] == "not_applicable"
+                      and code in {g["code"] for g in ranked["gaps"]}],
+    }
+
+
+# D52: how much of the library a gap has to be about before its SIZE moves it up a step past
+# a gap of a worse kind. A share, not a count, because a threshold of "ten records" is the
+# wrong threshold for a library of eight and for a library of two thousand, and the ranking
+# matters most on the first day, when neither the traffic nor the record count exists yet.
+#
+# Half. A gap about most of the library is the library's problem; a gap about a quarter of it
+# is a problem in the library, and the kind ordering — which says what each gap COSTS — is
+# still the better guide to which of those to fix first.
+_MAGNITUDE_SHARE = 0.5
+
+
+def _ranked(found: list[dict], *, library_size: int = 0) -> dict:
+    """Order the gaps (§5.3), by kind and then by how much of the library each is about.
+
+    D52: *"Gap ranking by judgments affected rather than a fixed rank per kind — one
+    unindexed record currently outranks forty."* The fixed table cannot see magnitude at all,
+    so the order of two gaps was decided entirely by which KIND they were — and `gaps()`'s own
+    docstring says the ranking IS the design: "an unordered list of everything absent is the
+    thing nobody reads". A ranking blind to size is an unordered list wearing numbers.
+
+    Not "by judgments affected", which is what the row asks for and is not available: a
+    library needs a great many saved judgments before that number means anything, so a
+    ranking resting on it is wrong for every new customer — which is every customer, on the
+    day the ranking matters most. RECORDS affected is what the review's own example counts,
+    and it is a number this library always has.
+
+    Kind stays the primary key and size is allowed to override exactly one step of it. Both
+    extremes are wrong: kind-only is the defect, and size-only would say a market with nothing
+    measured matters less than a half-indexed deck the moment one more record was affected.
+    """
     for gap in found:
         gap["rank"] = _GAP_RANK[gap["code"]]
-    found.sort(key=lambda g: g["rank"])
+        gap["affects"] = gap.get("affects", 0)
+        # Records over records. Every `affects` counts RECORDS for exactly this reason: the
+        # moment one gap counts something else, `share` stops being a share and the magnitude
+        # rule starts acting on a number with no meaning.
+        # Deliberately NOT clamped to 1.0. A clamp would have hidden the defect this comment
+        # is about — `judgments_never_reconciled` reporting `share: 3.0` — by turning a
+        # meaningless number into a plausible one, which is the failure mode this whole
+        # product is written against. If a share ever exceeds 1 again, something is counting
+        # the wrong unit and the tests should say so rather than the code smoothing it over.
+        gap["share"] = (round(gap["affects"] / library_size, 3) if library_size else 0.0)
+        # One step, and it is named in the output rather than folded silently into `rank`: a
+        # number that decides the order and does not appear is one nobody can argue with,
+        # which is the review's complaint about this product in one sentence.
+        gap["outweighs_its_kind"] = gap["share"] >= _MAGNITUDE_SHARE and gap["affects"] > 1
+        # The number this list is actually SORTED by, beside the kind's own rank rather than
+        # folded into it. A reader who checks that the output is ordered has to have the key
+        # it is ordered on: with only `rank` published, a correctly-ordered list looked
+        # unsorted, which is how a sort key nobody can see becomes a sort nobody can audit.
+        gap["order"] = gap["rank"] - int(gap["outweighs_its_kind"])
+        gap["rank_basis"] = "computed"
+    # `-affects` second, so two gaps of the same `order` are ordered by size rather than by
+    # insertion — `partly_indexed` and `no_window` have tied at 4 since they were written,
+    # and the tie was broken by which line came first in this function.
+    found.sort(key=lambda g: (g["order"], -g["affects"], g["code"]))
 
     # Two gaps can be closed by one act — a library whose single unmeasured campaign is also
     # its only LATAM campaign has two true facts and one thing to do. Offering the same call
@@ -3627,7 +4357,7 @@ def _ranked(found: list[dict]) -> dict:
     for gap in found:
         kept = []
         for offer in gap["next_actions"]:
-            key = (offer["tool"], tuple(sorted(offer["prefilled_args"].items())))
+            key = actions.identity(offer)
             if key in seen:
                 gap["closed_by"] = seen[key]
                 continue
@@ -3999,6 +4729,41 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
             })
             continue
 
+        # §10.2/D59: somebody ANSWERED this one. `no_longer_raised` is the "we cannot tell"
+        # bucket and all three of its caveats below end in "though nobody recorded it" —
+        # which is D59's complaint exactly, and the row asks for a way to record it. So an
+        # answered finding must leave the bucket, or `answer_finding` writes a field nothing
+        # reads: a tool whose output nobody consumes cannot fail, which is D116's shape one
+        # level down.
+        #
+        # `stated`, never `computed`. Every other entry in `adopted` is the SERVER matching a
+        # `resolved` row by id; this is somebody's word, and a reader who cannot tell those
+        # apart will eventually cite one as the other.
+        settled_answer = (finding.get("settled") or {}).get("answer")
+        if settled_answer == "deliberate":
+            # Not `adopted` — nothing was adopted; they kept it and said why. And not the
+            # "we cannot tell" bucket either, whose three caveats below all end "though
+            # nobody recorded it", which this answer disproves in the user's own words.
+            result["no_longer_raised"].append({
+                **entry, "basis": "stated", "settled": finding["settled"],
+                "caveat": (
+                    f"Not raised again, and it would not be: {finding['settled']['said_by']} "
+                    f"recorded that this was deliberate — “{finding['settled']['note']}”. "
+                    f"That is their word, not a comparison of the two versions."),
+            })
+            continue
+        if settled_answer in ("fixed", "does_not_apply", "misread"):
+            result["adopted"].append({
+                **entry, "basis": "stated", "settled": finding["settled"],
+                "now": finding["settled"]["note"],
+                "caveat": (
+                    f"{finding['settled']['said_by']} recorded this as "
+                    f"{_SETTLED_AS[settled_answer]} "
+                    f"directly, rather than it being matched to anything in the later "
+                    f"judgment. It is their word, not a comparison of the two versions."),
+            })
+            continue
+
         entry["basis"] = "computed"
         # The caveat is split by what the later review actually covered, because "we cannot
         # tell" is not equally true in both cases.
@@ -4068,7 +4833,13 @@ def _offer_to_link_versions(first: dict, second: dict, diff: dict) -> list[dict]
         return []
     # A statement, not a resemblance: an id-matched repeat, or a recorded resolution.
     linked = any(entry.get("match") == "id" for entry in diff["raised_again"])
-    linked = linked or bool(diff["adopted"])
+    # `computed` only. §10.2/D59 put a second kind of entry in `adopted` — a finding somebody
+    # settled DIRECTLY with `answer_finding` — and that is a statement about one record's
+    # finding, not about the two records being versions of each other. Counting it here would
+    # make this offer's own `why` false ("a judgment of one names a finding from the judgment
+    # of the other by id") and would hide a record from every future search on evidence that
+    # never mentioned the other record.
+    linked = linked or any(entry.get("basis") == "computed" for entry in diff["adopted"])
     if not linked:
         return []
     return actions.trim([actions.action(
@@ -4415,7 +5186,11 @@ def _offer_to_measure(conn, unmeasured: dict) -> list[dict]:
     """
     candidates = sorted(unmeasured.values(), key=lambda c: (-len(c["markets"]), c["title"]))
     if not candidates:
-        return readiness(conn)["shortest_path"]
+        # `first_steps`, not `readiness(conn)["shortest_path"]`. Same list, and readiness now
+        # offers coverage (D67), so going back through it would be coverage → readiness →
+        # coverage without end. Reading the shared path directly is both the D76 rule and
+        # what keeps this a tree.
+        return first_steps(conn)
     first = candidates[0]
     return actions.trim([actions.action(
         f"Record what \u201c{first['title']}\u201d actually achieved",
@@ -4460,32 +5235,16 @@ def readiness(conn) -> dict:
     two briefs somebody liked teach nothing about the axis they are asking the product to
     judge on.
     """
-    superseded = store.get_superseded_campaign_ids(conn)
-    records = [c for c in store.list_campaigns(conn) if c["id"] not in superseded]
-    campaigns = [c for c in records if c.get("record_type") not in ("reference", "stub")]
+    facts_about_the_axis = _axis_facts(conn)
+    records = facts_about_the_axis["records"]
+    campaigns = facts_about_the_axis["campaigns"]
     measured = store.campaigns_with_actual_metrics(conn)
 
-    has_rulebook = any(c.get("record_type") == "reference" for c in records)
-    # Case-folded, because tags are freeform and stored as typed while the store folds them
-    # when filtering. "Liked" left a marketer who had done exactly what the path asked being
-    # told forever to add a campaign they liked.
-    # Per RECORD, not pooled: a single campaign tagged both `liked` and `not_liked` used to
-    # satisfy the axis on its own, and "the library holds both" was then technically true and
-    # substantively false. The contrast this product reasons from is between records, and one
-    # record cannot be the counter-example to itself.
-    def reactions_of(campaign):
-        return {str(t.get("value") or "").strip().lower()
-                for t in (campaign.get("tags") or [])}
-
-    liked_records = [c for c in campaigns if "liked" in reactions_of(c)]
-    disliked_records = [c for c in campaigns
-                        if reactions_of(c) & {"not_liked", "not liked"}]
-    reactions = {r for c in campaigns for r in reactions_of(c)}
-    liked = "liked" in reactions
-    # `mixed_reaction` is deliberately NOT a dislike. The item's own rationale asks for "one
-    # you did not like", and a mixed reaction is not that contrast — counting it would tell
-    # the user the axis works when it does not.
-    disliked = "not_liked" in reactions or "not liked" in reactions
+    has_rulebook = facts_about_the_axis["has_rulebook"]
+    liked_records = facts_about_the_axis["liked_records"]
+    disliked_records = facts_about_the_axis["disliked_records"]
+    liked = facts_about_the_axis["liked"]
+    disliked = facts_about_the_axis["disliked"]
     with_outcomes = [c for c in campaigns if c["id"] in measured]
     concluded = [c for c in campaigns if c.get("status") == "concluded"]
 
@@ -4581,8 +5340,21 @@ def readiness(conn) -> dict:
         stage = "working"
 
     # §10.6: "the first interaction of a session" is the review's own second moment for the
-    # queue, and this is that surface.
+    # queue, and this is that surface. D54 adds the other thing worth saying here — what is
+    # missing — for the same reason: it was documented as "call it when the user asks",
+    # which is a tool nobody calls.
+    #
+    # `coverage` is NOT offered here, though D67 asked for it at session start too. Review
+    # measured what a mature library's session start then looked like: three offers, two of
+    # them read-only reports, with the one act that would actually improve the library two
+    # steps away inside `gaps()`. Coverage is the picture BEHIND the gaps — the less
+    # actionable of two views of the same fact — so spending a scarce slot on it at the
+    # moment somebody opens a session is spending it on the wrong one. It stays offered from
+    # `list_campaigns`, which is where D67's own sentence put it.
     waiting = feedback.waiting(conn)
+    set_aside = _ranked_gaps(conn).get("set_aside") or []
+    offers = actions.trim(actions.offer_the_queue(waiting) + gaps_offer(conn)
+                          + stale_answers_offer(conn))
     return {
         "stage": stage,
         "campaigns": len(campaigns),
@@ -4592,8 +5364,13 @@ def readiness(conn) -> dict:
         "cannot": cannot,
         "shortest_path": path,
         "waiting_on_feedback": waiting,
-        **({"next_actions": actions.trim(actions.offer_the_queue(waiting))}
-           if waiting else {}),
+        # §10.2/D53: what somebody has told this library to stop ranking. HERE as well as on
+        # `gaps()`, because this is the surface whose whole job is to say what the library
+        # cannot do — reporting a rosier top gap with no hint that a worse one was silenced
+        # is the product overstating its own coverage, which is the failure the review that
+        # started all of this was written about, arriving through the door D53 opened.
+        "set_aside": set_aside,
+        **({"next_actions": offers} if offers else {}),
         "note": ("Say the stage and what it cannot do yet before giving any judgment from a "
                  "library this size — a confident, evidence-free verdict is the thing a new "
                  "user will believe. `shortest_path` is ordered: it is a path, not a menu."
@@ -4601,6 +5378,53 @@ def readiness(conn) -> dict:
                     f"queue rather than waiting to be asked for it."
                     if waiting else "")),
     }
+
+
+def _axis_facts(conn) -> dict:
+    """What the library holds on the axis the first-steps path is about (§10.6/D76).
+
+    One definition, read by both surfaces that answer "what do I add first". They each had
+    their own before: `readiness` computed this and ordered the answer, `gaps` carried
+    `to_first_upload()` — an unordered copy of the first two steps — on `library_is_empty`.
+    Two implementations of one question is how D55 and D88 both begin, and here the two
+    could disagree about the SAME library while both were internally consistent, which is
+    the version of that failure nobody notices.
+    """
+    superseded = store.get_superseded_campaign_ids(conn)
+    records = [c for c in store.list_campaigns(conn) if c["id"] not in superseded]
+    campaigns = [c for c in records if c.get("record_type") not in ("reference", "stub")]
+
+    # Case-folded, because tags are freeform and stored as typed while the store folds them
+    # when filtering. "Liked" left a marketer who had done exactly what the path asked being
+    # told forever to add a campaign they liked.
+    def reactions_of(campaign):
+        return {str(t.get("value") or "").strip().lower()
+                for t in (campaign.get("tags") or [])}
+
+    reactions = {r for c in campaigns for r in reactions_of(c)}
+    return {
+        "records": records,
+        "campaigns": campaigns,
+        "has_rulebook": any(c.get("record_type") == "reference" for c in records),
+        # Per RECORD, not pooled: a single campaign tagged both `liked` and `not_liked` used
+        # to satisfy the axis on its own, and "the library holds both" was then technically
+        # true and substantively false. The contrast this product reasons from is between
+        # records, and one record cannot be the counter-example to itself.
+        "liked_records": [c for c in campaigns if "liked" in reactions_of(c)],
+        "disliked_records": [c for c in campaigns
+                             if reactions_of(c) & {"not_liked", "not liked"}],
+        "liked": "liked" in reactions,
+        # `mixed_reaction` is deliberately NOT a dislike. The item's own rationale asks for
+        # "one you did not like", and a mixed reaction is not that contrast — counting it
+        # would tell the user the axis works when it does not.
+        "disliked": "not_liked" in reactions or "not liked" in reactions,
+    }
+
+
+def first_steps(conn) -> list[dict]:
+    """The ordered path, computed once and read by everything that shows it (§10.6/D76)."""
+    axis = _axis_facts(conn)
+    return _shortest_path(axis["liked"], axis["disliked"], axis["has_rulebook"])
 
 
 def _shortest_path(liked: bool, disliked: bool, has_rulebook: bool) -> list[dict]:
@@ -4819,6 +5643,7 @@ def finish_indexing(conn, *, campaign_id: Optional[str] = None) -> dict:
         counts = store.chunk_counts(conn, cid)
         if counts["total"]:
             store.mark_embedded(conn, cid, counts["embedded"] == counts["total"])
+        _settle_indexing_notice(conn, cid)
 
     left = store.count_unembedded(conn, campaign_id)
     # Items that fail identically every run are NOT "remaining": counting them there means
@@ -5401,17 +6226,32 @@ def update_campaign(conn, campaign_id: str, **fields) -> dict:
     reindexed = _reindex_if_content_changed(conn, campaign_id, fields)
     record = store.get_campaign(conn, campaign_id)
     earlier_judgment = _judgment_to_check(conn, fields.get("supersedes") or None)
-    record = {**record, **reindexed}
+    # §10.6/D98: the re-index's warnings, persisted and carried onto the response. `_persisted`
+    # is what makes one survive past this reply — a `degraded` notice that lives for exactly
+    # one response is the thing the library most wanted somebody to act on and forgot fastest.
+    warnings = _persisted(conn, campaign_id,
+                          notices.collapse(reindexed.pop("warnings", [])))
+    # And retract it when this edit re-indexed cleanly. Without this, a partial edit followed
+    # by a successful one left the record wholly searchable with the notice still open — so
+    # the queue kept it under `needs_attention` forever.
+    if not warnings:
+        _settle_indexing_notice(conn, campaign_id)
+    reindex_offers = [a for w in warnings for a in (w.get("next_actions") or [])]
+    record = {**record, **reindexed, **({"warnings": warnings} if warnings else {})}
     # §9.6/D116: giving a campaign a window is the write that makes `campaign_context`
     # answerable at all — before it, every call returns `nothing_to_check`. Offered only when
     # something actually overlaps, because "here is a tool that will tell you nothing" is the
     # offer that teaches a reader to skip the list.
     window_offer = _context_offer(conn, campaign_id, fields)
     if not earlier_judgment:
-        return {**record, **window_offer} if window_offer else record
+        # The re-index offer FIRST: an index that is behind makes this record unfindable, and
+        # the window offer is about a check it cannot yet be part of.
+        merged = actions.trim(reindex_offers + (window_offer.get("next_actions") or []))
+        rest = {k: v for k, v in window_offer.items() if k != "next_actions"}
+        return {**record, **rest, **({"next_actions": merged} if merged else {})}
     return {**record, "earlier_judgment": earlier_judgment,
             **{k: v for k, v in window_offer.items() if k != "next_actions"},
-            "next_actions": actions.after_upload(
+            "next_actions": actions.trim(reindex_offers + actions.after_upload(
                 campaign_id=campaign_id, status=record["status"],
                 # ACTUAL metrics. A campaign holding only a target has not been measured, and
                 # the offer this gates is "record what this campaign actually achieved" — §8.8
@@ -5419,7 +6259,29 @@ def update_campaign(conn, campaign_id: str, **fields) -> dict:
                 # questions on the one path that can see both.
                 has_metrics=record["has_actual_metrics"],
                 has_window=bool(record.get("starts_on")),
-                earlier_judgment=earlier_judgment)}
+                earlier_judgment=earlier_judgment))}
+
+
+def _settle_indexing_notice(conn, campaign_id: str) -> None:
+    """Retract `chunk_not_embedded` once the record really is wholly searchable (§10.6/D98).
+
+    Called from EVERY path that can change how much of a record is indexed, not only from
+    `finish_indexing`. It lived there alone at first, so a second edit that re-indexed
+    cleanly left the notice standing — the record was wholly searchable and the queue still
+    listed it under `needs_attention`, which is the top-ranked reason a campaign waits on a
+    person. A notice nothing retracts accumulates until the queue is made of them, and then
+    the most urgent row in the product is permanently a job that finished last week.
+
+    Only when the record is WHOLLY indexed. A run that closed four of nine sections has not
+    made it findable by its new wording, and saying so would be the partial-state-reported-as-
+    success failure this notice exists to fix.
+    """
+    outstanding = store.count_unembedded(conn, campaign_id)
+    if outstanding["chunks"] + outstanding["assets"]:
+        return
+    for notice_row in store.open_notices(conn, campaign_id):
+        if notice_row["code"] == "chunk_not_embedded":
+            store.clear_notice(conn, notice_row["id"])
 
 
 def _reindex_if_content_changed(conn, campaign_id: str, fields: dict) -> dict:
@@ -5478,7 +6340,25 @@ def _reindex_if_content_changed(conn, campaign_id: str, fields: dict) -> dict:
             # correct, the index is behind, and `finish_indexing` closes it.
             break
     store.mark_embedded(conn, campaign_id, embedded == len(texts))
-    return {"reindexed": {"fields": changed, "chunks": len(texts), "embedded": embedded}}
+    out = {"reindexed": {"fields": changed, "chunks": len(texts), "embedded": embedded}}
+    if embedded == len(texts):
+        return out
+    # §10.6/D98: every other partial-state path in this codebase raises a notice naming the
+    # fix (§2.1's obligation). This one reported `embedded: 2` of `chunks: 9` into a field
+    # nothing told the model to read, so the observable result of an edit that half-failed
+    # was a successful edit — and the record was then unfindable by its NEW wording while
+    # `update_campaign` returned the new wording. That is the §6.1 defect from the other end,
+    # and silent: search does not report what it failed to consider.
+    behind = len(texts) - embedded
+    out["warnings"] = [notices.notice(
+        "chunk_not_embedded",
+        detail=f"The edit rewrote {' and '.join(changed)} and {behind} of {len(texts)} "
+               f"section(s) could not be re-indexed, so searches will still match the OLD "
+               f"wording of those sections and not the new.",
+        affects="This record will not come back in searches for its new wording.",
+        count=behind,
+        next_actions=actions.to_finish_indexing(campaign_id))]
+    return out
 
 
 def _judgment_to_check(conn, superseded: Optional[str]) -> Optional[dict]:
@@ -5573,9 +6453,14 @@ def _earlier_version_findings(conn, campaign_id: Optional[str]) -> Optional[dict
         "title": earlier["title"] if earlier else None,
         "evaluation_id": judgment["id"],
         "verdict": judgment.get("verdict"),
-        "findings": [{k: f.get(k) for k in ("id", "severity", "kind", "departure",
-                                            "category",
-                                            "finding", "fix")}
+        # §10.2/D84: `settled` travels. This is the exact surface the row is about — "the
+        # same question returns next time" — and a hand-written key list is how the answer
+        # would have been dropped one function after being attached at the chokepoint that
+        # exists so it reaches every reader. Carried only when there IS one, so an unanswered
+        # finding does not gain an empty field that reads as an answer.
+        "findings": [{**{k: f.get(k) for k in ("id", "severity", "kind", "departure",
+                                               "category", "finding", "fix")},
+                      **({"settled": f["settled"]} if f.get("settled") else {})}
                      for f in judgment["findings"]],
     }
 
@@ -5725,6 +6610,7 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
              "carrying `repeats` set to that id. That is what lets diff_campaigns state "
              "which corrections were taken instead of guessing from how alike two sentences "
              "read. "
+             + _say_the_settled(_earlier_version_findings(conn, campaign_id))
              if _earlier_version_findings(conn, campaign_id) else "") +
             "`computed` holds the facts the SERVER established about this brief by reading "
             "it — dates, budget, creator engagement rates, which channels are NAMED, and "
@@ -5824,6 +6710,28 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
         # saved against this evidence — did not. "How many precedents did this rest on" is
         # the wrong number when records are missing from the search entirely (§6.6).
         "warnings": warnings_now,
+        # §10.6/D116. The `note` above ends "then call save_evaluation with a verdict" — an
+        # instruction inside prose, which is the form this project's own principle says gets
+        # dropped, and it is the one instruction the whole second half of the product rests
+        # on: nothing can be reconciled, calibrated, superseded or linked to a later version
+        # unless the judgment was SAVED. An unsaved verdict is a sentence in a chat window.
+        #
+        # `needs` carries the whole judgment, because accepting this is not one step and
+        # saying otherwise would be the prefilled-blank failure `action` refuses. Only what
+        # this call already holds is filled in: the title, and the record when there is one.
+        "next_actions": [actions.action(
+            f"Save the judgment about “{subject_title[:40]}” once you have made it",
+            "save_evaluation",
+            why="A verdict that is not saved cannot be reconciled against results, cited by "
+                "a later brief, or checked when the next version lands — the whole "
+                "second half of this product starts at the saved judgment.",
+            consent="ask",
+            needs=["verdict — approve, revise or reject",
+                   "summary — one line",
+                   "findings — one per problem, each with severity, kind and a quote",
+                   "predictions — any CTR/ROI ranges, so they can be scored later"],
+            subject_title=subject_title,
+            campaign_id=campaign_id if subject else None)],
     }
 
 

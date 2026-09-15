@@ -130,6 +130,34 @@ def _resembles(a: set, b: set) -> float:
     return len(a & b) / min(len(a), len(b)) if a and b else 0.0
 
 
+def _reading(text: str) -> Optional[tuple]:
+    """What comparing two rules needs from one of them, or None when it is too short to say.
+
+    One place, because two things compare corrections now — `_looks_like` for the single
+    write, and `feedback._rule_questions` for the whole table — and the rule that a
+    prohibition and its permission are NOT the same rule lived only in the first. The second
+    copied it, which is the shape this codebase has been bitten by five times: two
+    implementations that agree until one of them is edited.
+    """
+    content = _content(text)
+    return (content, negated(text)) if len(content) >= _MIN_CONTENT else None
+
+
+def resembles(a: Optional[tuple], b: Optional[tuple]) -> float:
+    """How alike two readings are, 0.0 when they cannot be compared at all."""
+    if a is None or b is None:
+        return 0.0
+    # A prohibition and its permission are not the same rule, however alike they read —
+    # "never seed a single colourway" and "always seed a single colourway" share every word.
+    if a[1] != b[1]:
+        return 0.0
+    return _resembles(a[0], b[0])
+
+
+def is_close(score: float) -> bool:
+    return score >= _LOOKS_LIKE_CUTOFF
+
+
 def _looks_like(conn, text: str, *, exclude: Optional[str] = None) -> Optional[dict]:
     """The correction on file this one most resembles, or None (§8.6, mirroring §8.2).
 
@@ -139,22 +167,15 @@ def _looks_like(conn, text: str, *, exclude: Optional[str] = None) -> Optional[d
     """
     import store
 
-    mine = _content(text)
-    if len(mine) < _MIN_CONTENT:
-        return None
+    mine = _reading(text)
     best, score = None, 0.0
     for row in store.corrections(conn):
         if row["id"] == exclude or row["status"] in ("merged", "ignored"):
             continue
-        theirs = _content(row["text"])
-        if len(theirs) < _MIN_CONTENT:
-            continue
-        if negated(text) != negated(row["text"]):
-            continue               # a prohibition and its permission are not the same rule
-        overlap = _resembles(mine, theirs)
+        overlap = resembles(mine, _reading(row["text"]))
         if overlap > score:
             best, score = row, overlap
-    return best if score >= _LOOKS_LIKE_CUTOFF else None
+    return best if is_close(score) else None
 
 
 # Every other model-authored field in this codebase is measured. A 400 KB rule and a 200 KB
@@ -331,6 +352,19 @@ def note(conn, *, text: str, campaign_id: Optional[str], provenance: str) -> dic
             "Recorded, but not attached to a campaign — so it counts towards nothing. The "
             "gate is about which campaigns and markets raised a rule, and a mention with no "
             "campaign has neither. Pass `campaign_id` to have it count.")
+    else:
+        # §10.6/D116. `correction_status` answers the question this write creates — how far
+        # off standing is it, and what is missing — and it was named nowhere but its own
+        # definition. That is §8.6's own defect one stage on: `note_correction` was made
+        # reachable and what it writes stayed unreadable, so the gate a rule has to pass was
+        # a number nobody could see. `do`, not `ask`: it reads and writes nothing.
+        import actions
+        result["next_actions"] = [actions.action(
+            "Show how far this rule is from standing",
+            "correction_status",
+            why=f"It has been raised in {gate['campaigns']} campaign(s). Whether that is "
+                f"enough, and what is missing if it is not, is a count nothing else reports.",
+            consent="do", correction_id=correction_id)]
     if fresh:
         # Never rejected — the client said it, whether or not the library was ready. Never
         # silently accepted either: a rule that arrives on one deck and is never questioned is
@@ -563,13 +597,28 @@ def set_aside(conn, correction_id: str, *, why: Optional[str] = None) -> dict:
     entry = describe(conn, correction_id)
     if not entry:
         raise ValueError(f"{correction_id!r} is not a correction on file")
+    import actions
+
     store.set_aside_correction(conn, correction_id)
     return {"correction_id": correction_id, "text": entry["text"], "status": "ignored",
             "why": why,
             "what_it_means": (
                 "No brief is judged against this any more, and it will not be asked about "
                 "again. What was said and where it was said are still on file, so judgments "
-                "that already cited it stay explicable.")}
+                "that already cited it stay explicable."),
+            # §10.6/D116: the way back, named at the one moment it becomes worth knowing.
+            # `reopen_correction` exists precisely because a rule can be set aside in error,
+            # and it was reachable only by somebody who already knew it existed — so the
+            # escape hatch for a mistake was itself behind a thing you had to not make a
+            # mistake about. It is `ask`, not `do`: putting a rule back changes every future
+            # judgment in its markets, which is what this call just decided not to do.
+            "next_actions": [actions.action(
+                "Put this rule back if that was not what you meant",
+                "reopen_correction",
+                why="Setting a rule aside is the only way it leaves the checklist, and "
+                    "nothing puts it back on its own — silence is read as compliance here, "
+                    "not as disuse.",
+                consent="ask", correction_id=correction_id)]}
 
 
 def gone_quiet(conn) -> list:

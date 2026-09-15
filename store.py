@@ -241,6 +241,69 @@ CREATE TABLE IF NOT EXISTS campaign_notices (
     UNIQUE (campaign_id, code)     -- one open notice per kind per record; re-raising the same
                                    -- condition is the same outstanding job, not a second one
 );
+
+CREATE TABLE IF NOT EXISTS library_state (
+    -- §10.6/D54: one fact about the library as a whole, remembered between calls.
+    --
+    -- Exactly one row is written here today: the code of the top-ranked gap as of the last
+    -- upload. An upload that CHANGES what matters most is the moment the ranking is worth
+    -- reading and the only moment somebody is looking, and "changed" is not a question a
+    -- stateless call can answer — the comparison needs the previous answer.
+    --
+    -- Deliberately not a settings table. Nothing here is configuration and nothing here is
+    -- authoritative: every value is a cache of something recomputable, so losing the table
+    -- costs one redundant offer and never a wrong answer. That is what makes it safe to be
+    -- the only mutable global state in a store that is otherwise append-only.
+    key         TEXT PRIMARY KEY,
+    value       TEXT,
+    updated_at  REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS answers (
+    -- §10.2/D84+D59+D53: where a person's answer to the product's own question goes.
+    --
+    -- The product asks several questions it could not hear the answer to. "Is this departure
+    -- deliberate?" was asked on every judgment and the reply died in a chat window, so the
+    -- stored finding kept reading `departure: unexplained` — a FACT about the finding, read
+    -- by every later judgment, and false the moment somebody explained it. A question nobody
+    -- can answer decays into a wrong answer, which is worse than not asking.
+    --
+    -- Append-only, like every other `stated` claim here. Changing an answer writes a new row
+    -- and the latest wins, so what somebody said in March survives being contradicted in
+    -- June and a judgment made between the two stays explicable.
+    id            TEXT PRIMARY KEY,
+    subject_kind  TEXT NOT NULL,   -- 'finding' | 'gap'
+    subject_key   TEXT NOT NULL,   -- finding id, or gap code
+    evaluation_id TEXT,            -- for a finding: which judgment it is on
+    answer        TEXT NOT NULL,   -- the closed set for that kind; never free text
+    note          TEXT NOT NULL,   -- the reason, in their words. "Deliberate" with no reason
+                                   -- is the same non-answer as `unexplained`, recorded as
+                                   -- though it were one — and it stops the question being
+                                   -- asked, which makes it strictly worse.
+    said_by       TEXT NOT NULL,   -- every `stated` claim here carries who said it
+    said_at       TEXT NOT NULL,
+    created_at    REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS import_batches (
+    -- §10.5/D117+D118: a workbook, staged at preview and quoted by key thereafter.
+    --
+    -- Two problems, one shape. D117: a 500-row workbook crossed the wire twice, because the
+    -- preview held the rows and then threw them away. D118: an import stopped by the time
+    -- budget had no resume key, so "send them again to continue" meant resending the file —
+    -- which re-imports the prefix, because `add_metrics` appends and nothing deduplicates.
+    -- The result reported how many rows were left and not from WHERE.
+    --
+    -- `imported_through` is the whole of the fix: the count of rows this batch has already
+    -- written, which is also the index to resume at. It is updated in the same transaction
+    -- as the rows it counts, so a crash between the two is not a state that exists.
+    id                TEXT PRIMARY KEY,
+    rows              TEXT NOT NULL,   -- the workbook as given, JSON
+    row_count         INTEGER NOT NULL,
+    imported_through  INTEGER NOT NULL DEFAULT 0,
+    created_at        REAL NOT NULL,
+    finished_at       REAL             -- set when every row has been attempted
+);
 CREATE TABLE IF NOT EXISTS feedback_notes (
     -- §10.3: "the free-text box is where 'slide 23 should be the standard' gets captured —
     -- the highest-value sentence in the whole system".
@@ -280,6 +343,16 @@ CREATE TABLE IF NOT EXISTS context_attributions (
     note          TEXT NOT NULL,
     stated_by     TEXT NOT NULL,
     outcome_known INTEGER NOT NULL DEFAULT 0,
+    -- Whether the person says it DID bear on the result. The first version could only record
+    -- yes, so the offer built on it — "say whether X is why these numbers came out as they
+    -- did" — asked a question whose "no" had nowhere to go. That is the D84 failure this
+    -- phase exists to fix, reintroduced in a new offer in the same diff.
+    --
+    -- A `no` does NOT make the outcome clean. The overlap is a fact the server computed and
+    -- somebody being sure it did not matter is a person's claim; both belong in the reading,
+    -- which is why a ruled-out event stays visible with the words that ruled it out. What it
+    -- does stop is the question being asked again.
+    bears_on      INTEGER NOT NULL DEFAULT 1,
     -- §8.5's shape again: an account can be taken back, and is kept when it is. Without this
     -- a wrong attribution could only be replaced by writing another claim — there was no way
     -- to say "I was wrong to say that".
@@ -812,6 +885,13 @@ def init_db() -> None:
 
 def _now() -> float:
     return time.time()
+
+
+def _now_iso() -> str:
+    """The same stamp `feedback` writes for a `said_at`, so a date a person is shown reads the
+    same wherever it came from."""
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
 def _id(prefix: str) -> str:
@@ -1535,6 +1615,91 @@ def open_notices(conn, campaign_id: str) -> list[dict]:
         (campaign_id,)).fetchall()]
 
 
+def record_answer(conn, *, subject_kind: str, subject_key: str, answer: str, note: str,
+                  said_by: str, said_at: Optional[str] = None,
+                  evaluation_id: Optional[str] = None) -> str:
+    """One answer to one question the product asked (§10.2)."""
+    aid = _id("answer")
+    conn.execute("INSERT INTO answers (id, subject_kind, subject_key, evaluation_id, answer, "
+                 "note, said_by, said_at, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                 (aid, subject_kind, subject_key, evaluation_id, answer, note, said_by,
+                  said_at or _now_iso(), _now()))
+    conn.commit()
+    return aid
+
+
+def answers_for(conn, subject_kind: str, keys: Optional[list] = None) -> dict:
+    """The LATEST answer per subject, keyed by subject (§10.2).
+
+    Append-only underneath, so "the latest" is a read-time decision rather than a destroyed
+    history — what somebody said in March survives being contradicted in June, and a judgment
+    made between the two stays explicable.
+    """
+    if not _columns(conn, "answers"):
+        return {}
+    sql = "SELECT * FROM answers WHERE subject_kind = ?"
+    args: list = [subject_kind]
+    if keys is not None:
+        if not keys:
+            return {}
+        sql += f" AND subject_key IN ({','.join('?' * len(keys))})"
+        args += list(keys)
+    latest: dict = {}
+    for row in conn.execute(sql + " ORDER BY created_at, id", args).fetchall():
+        latest[row["subject_key"]] = {
+            "answer": row["answer"], "note": row["note"], "said_by": row["said_by"],
+            "said_at": row["said_at"], "evaluation_id": row["evaluation_id"],
+            # Always. A reader who cannot tell a person's answer from a computed fact will
+            # eventually cite one as the other, which is the whole of §2.4.
+            "basis": "stated",
+        }
+    return latest
+
+
+def every_answer(conn, *, said_by: Optional[str] = None) -> list[dict]:
+    """The whole override log, newest first (§10.2).
+
+    Everything, not the latest per subject — `answers_for` gives that, and it is the wrong
+    shape here. The table is append-only precisely so "this looked deliberate in March and
+    turned out to be a mistake in June" survives, and a log that shows only the June row has
+    thrown away the half that made keeping both worthwhile.
+    """
+    if not _columns(conn, "answers"):
+        return []
+    sql = "SELECT * FROM answers"
+    args: list = []
+    if said_by:
+        # Case-folded. A name is not an identifier, and "show me everything Ana answered" is
+        # typed by a person who does not know how she typed it last time.
+        sql += " WHERE LOWER(said_by) = LOWER(?)"
+        args.append(said_by.strip())
+    return [{**dict(r), "basis": "stated"}
+            for r in conn.execute(sql + " ORDER BY created_at DESC, id DESC",
+                                  args).fetchall()]
+
+
+def get_state(conn, key: str) -> Optional[str]:
+    """One remembered fact about the library, or None (§10.6/D54).
+
+    None is returned for a missing TABLE as well as a missing row, so a database written
+    before this existed reads as "nothing remembered" rather than raising — the same shape
+    every other additive migration here takes.
+    """
+    if not _columns(conn, "library_state"):
+        return None
+    row = conn.execute("SELECT value FROM library_state WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_state(conn, key: str, value: Optional[str]) -> None:
+    if not _columns(conn, "library_state"):
+        return
+    conn.execute("INSERT INTO library_state (key, value, updated_at) VALUES (?,?,?) "
+                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+                 "updated_at = excluded.updated_at", (key, value, _now()))
+    conn.commit()
+
+
 def campaigns_with_open_notices(conn) -> set:
     if not _columns(conn, "campaign_notices"):
         return set()
@@ -2088,11 +2253,99 @@ def _import_preview_sentence(rows: list, columns: dict, problems: list) -> str:
                      f"recorded provisionally, then asked about one at a time.")
     if columns["known"]:
         parts.append(f"{len(columns['known'])} already match measures on file.")
-    parts.append("Send the same rows with confirm=True to import them.")
+    # NOT "send the same rows". D117 staged them precisely so they do not cross the wire
+    # twice, and the tool docstring now says in bold not to resend — while this sentence,
+    # which is the one the model reads aloud, still told them to. The defect survived in
+    # the only place the user actually sees.
+    parts.append("Confirm with the `preview_id` this preview returned — the rows are held "
+                 "here, so there is nothing to resend.")
     return " ".join(parts)
 
 
-def bulk_import_metrics(conn, rows: list[dict], *, confirm: bool = False) -> dict:
+# How many staged workbooks to keep. A staged batch is a copy of the customer's file, and
+# the feature exists to stop a 500-row workbook crossing the wire twice — paying for that
+# with an unbounded copy of every workbook ever previewed would be the fix costing more than
+# the defect. Finished batches go first and unfinished ones are never dropped for a newer
+# one: an interrupted import is the case the resume key exists for.
+MAX_STAGED_IMPORTS = 20
+
+# How long an UNFINISHED staged workbook is kept. Unfinished batches are never pruned by the
+# count rule, and they are subtracted from the cap — so twenty abandoned previews drove the
+# limit to zero, deleted every finished batch, and then grew without bound themselves. Each
+# is a full copy of a customer KPI workbook sitting in the database with no expiry and no
+# route out through `delete_campaign`'s cascade, which is a retention position nobody wrote
+# down. A week is long enough for any real resume and short enough not to be an archive.
+STAGED_IMPORT_TTL_SECONDS = 7 * 24 * 60 * 60
+
+
+def stage_import(conn, rows: list) -> str:
+    """Keep a previewed workbook so confirming it does not resend it (§10.5/D117)."""
+    batch_id = _id("preview")
+    conn.execute("INSERT INTO import_batches (id, rows, row_count, created_at) "
+                 "VALUES (?,?,?,?)",
+                 (batch_id, json.dumps(rows, default=str), len(rows), _now()))
+    # Abandoned first: an unfinished batch older than the TTL is not a resume anybody is
+    # coming back for, and it is a copy of a customer's workbook. Done before the count rule,
+    # because the count rule SUBTRACTS unfinished batches from the cap — so without this,
+    # twenty abandoned previews drove the limit to zero, deleted every finished batch, and
+    # then grew without bound themselves.
+    conn.execute("DELETE FROM import_batches WHERE finished_at IS NULL AND created_at < ?",
+                 (_now() - STAGED_IMPORT_TTL_SECONDS,))
+    # Then oldest FINISHED, and only finished ones. A recent batch with rows still to write
+    # is one somebody holds a resume key for; dropping it loses the half-written import
+    # silently, because the offer naming the key lives in a transcript and the key simply
+    # stops existing.
+    conn.execute(
+        "DELETE FROM import_batches WHERE finished_at IS NOT NULL AND id NOT IN ("
+        "  SELECT id FROM import_batches WHERE finished_at IS NOT NULL "
+        "  ORDER BY created_at DESC, id DESC LIMIT ?)",
+        (max(0, MAX_STAGED_IMPORTS - _unfinished_imports(conn)),))
+    conn.commit()
+    return batch_id
+
+
+def _unfinished_imports(conn) -> int:
+    return conn.execute("SELECT COUNT(*) AS n FROM import_batches "
+                        "WHERE finished_at IS NULL").fetchone()["n"]
+
+
+def staged_import(conn, preview_id: str) -> dict:
+    """The staged workbook, or a ValueError naming what went wrong (§10.5/D117).
+
+    Never an empty batch and never a guess. "imported 0 rows" for a key the server does not
+    hold reads as a successful import of nothing, which is the `nothing_to_check`-as-a-pass
+    failure this project rules out everywhere else.
+    """
+    if not _columns(conn, "import_batches"):
+        raise ValueError(
+            f"{preview_id!r} is not a staged workbook — this library predates staged "
+            f"imports. Send `rows` with confirm=True instead.")
+    row = conn.execute("SELECT * FROM import_batches WHERE id = ?", (preview_id,)).fetchone()
+    if not row:
+        raise ValueError(
+            f"{preview_id!r} is not a staged workbook. Preview the rows again "
+            f"(confirm=False) to stage them and get a key.")
+    return {**dict(row), "rows": json.loads(row["rows"])}
+
+
+def _advance_import(conn, preview_id: str, through: int, done: bool, *, was: int) -> bool:
+    """Compare-and-set. Returns whether this writer still owned the batch (§10.5/D118).
+
+    `was` is the value the caller STARTED from, and the update only lands if the row still
+    holds it. Without that the resume was a TOCTOU: two sessions reading `imported_through=0`
+    both imported rows 0..n, and the library ended with two of every figure — the exact
+    corruption D118 removed, arriving through the key that removed it. Checking at entry and
+    writing at exit is not a check; it is a gap with a write on either side of it.
+    """
+    changed = conn.execute(
+        "UPDATE import_batches SET imported_through = ?, finished_at = ? "
+        "WHERE id = ? AND imported_through = ?",
+        (through, _now() if done else None, preview_id, was)).rowcount
+    return bool(changed)
+
+
+def bulk_import_metrics(conn, rows: Optional[list] = None, *, confirm: bool = False,
+                        preview_id: Optional[str] = None) -> dict:
     """
     Load a KPI workbook in one call (§6.5) instead of one add_metrics per row. Each row
     identifies its campaign by `campaign_id` (preferred) or `title` (exact, case-insensitive,
@@ -2115,8 +2368,48 @@ def bulk_import_metrics(conn, rows: list[dict], *, confirm: bool = False) -> dic
     the review names as where the registry gets seeded seeded nothing, and forty columns went
     into a JSON blob exactly as the review says they should not.
     """
+    import actions
     import core
     import metrics as metrics_module
+
+    # §10.5/D117+D118. The key is resolved FIRST, so everything below — the column diff
+    # included — sees the workbook that was actually previewed rather than one sent again.
+    # Both, and they disagree: the staged rows win silently, so a caller who edited a row and
+    # resent it with the old key had their edit discarded with nothing in the result saying
+    # so. Two sources for one input is the shape this file keeps hitting; here the quiet one
+    # wins, which is the worst arrangement of it.
+    if preview_id and rows is not None:
+        raise ValueError(
+            "send `rows` OR `preview_id`, not both. The key names a workbook this server is "
+            "already holding, so the rows you sent would be silently discarded — preview "
+            "again (confirm=False) to stage the ones you mean.")
+    batch = staged_import(conn, preview_id) if preview_id else None
+    start = 0
+    if batch:
+        if not batch["row_count"]:
+            raise ValueError(
+                f"{preview_id!r} is an empty workbook — nothing was staged, so there is "
+                f"nothing to import. An import of no rows is not a successful import.")
+        rows = batch["rows"]
+        start = batch["imported_through"]
+        if batch["finished_at"] or start >= batch["row_count"]:
+            # Accepting an offer twice has to be safe: an offer survives in a transcript and a
+            # model re-reading one cannot tell whether the call was already made. Same reason
+            # `menu_token` refreshes rather than writing — the difference being that here the
+            # safe answer is "that is done", not a fresh menu.
+            return {"preview": False, "status": "already_imported", "imported": 0,
+                    "errors": [], "not_processed": 0, "preview_id": preview_id,
+                    "row_count": batch["row_count"],
+                    "what_it_means": (
+                        f"This workbook has already been worked through — all "
+                        f"{batch['row_count']} row(s) attempted. Nothing was written again. "
+                        f"`imported` counts what was WRITTEN on the earlier pass and is not "
+                        f"reported here; rows that failed then (an unmatched title, say) "
+                        f"failed then and are not retried, because they would fail again.")}
+    if rows is None:
+        raise ValueError(
+            "send either `rows` (the workbook) or `preview_id` (the key a preview handed "
+            "back). Neither was given, and an import with no rows is not an empty import.")
 
     columns = metrics_module.diff_columns(conn, rows)
     if not confirm:
@@ -2127,10 +2420,26 @@ def bulk_import_metrics(conn, rows: list[dict], *, confirm: bool = False) -> dic
         # writing anything, which is the same check the write does.
         problems = [{"row": i, **p} for i, p in enumerate(_row_problem(conn, r) for r in rows)
                     if p]
+        # Staged, so confirming quotes the key rather than the workbook (§10.5/D117). Done
+        # AFTER the problems are computed, so a preview that raises stages nothing.
+        staged = preview_id or stage_import(conn, rows)
         return {"preview": True, "imported": 0, "errors": problems, "rows": len(rows),
                 "would_import": len(rows) - len(problems),
                 "columns": columns,
-                "what_it_means": _import_preview_sentence(rows, columns, problems)}
+                "preview_id": staged,
+                "what_it_means": _import_preview_sentence(rows, columns, problems),
+                # §10.6/D116: "send it again with confirm=True" was an instruction in prose,
+                # which is the form that gets dropped — and following it meant resending the
+                # whole workbook. With the rows staged, accepting really is one step, so
+                # there is no `needs` and nothing for the caller to supply.
+                "next_actions": [actions.action(
+                    f"Import these {len(rows) - len(problems)} row(s)",
+                    "bulk_import_metrics",
+                    why="Nothing has been written yet — this preview is the consent step. "
+                        "The rows are held here, so saying yes does not resend the workbook."
+                        + (f" {len(problems)} row(s) would be skipped and reported."
+                           if problems else ""),
+                    consent="ask", preview_id=staged, confirm=True)]}
     imported, errors = 0, []
     offers: dict = {}
     # Which campaigns need §9.5's drift figure refreshed once the loop is done.
@@ -2153,10 +2462,14 @@ def bulk_import_metrics(conn, rows: list[dict], *, confirm: bool = False) -> dic
     # One transaction for the batch, and stop at the same budget everything else respects.
     deadline = time.monotonic() + config.TOOL_TIME_BUDGET_SECONDS
     not_processed = 0
-    for i, row in enumerate(rows):
+    # §10.5/D118: from where this batch stopped, not from the top. `start` is 0 for an
+    # unstaged workbook, so the resend path behaves exactly as it always did.
+    reached = start
+    for i, row in enumerate(rows[start:], start=start):
         if time.monotonic() >= deadline:
             not_processed = len(rows) - i
             break
+        reached = i + 1
         try:
             if not isinstance(row, dict):
                 errors.append({"row": i, "reason": f"row must be an object, got {type(row).__name__}"})
@@ -2250,23 +2563,75 @@ def bulk_import_metrics(conn, rows: list[dict], *, confirm: bool = False) -> dic
         except Exception as exc:
             errors.append({"row": i, "reason": str(exc), **_retry_of(exc)})
 
+    # Claimed BEFORE anything that commits. `_snapshot_execution_drift` below writes through
+    # a raw connection, which ends the transaction — so a rollback after it had nothing left
+    # to undo, and the losing session's duplicate rows survived the check that caught it.
+    if batch and not _advance_import(conn, preview_id, reached,
+                                     done=not not_processed, was=start):
+        # Somebody else resumed this batch while we were working, and their rows are already
+        # committed — so ours are the second copy. Roll the whole thing back rather than
+        # commit it: `add_metrics` appends and nothing deduplicates, so the alternative is a
+        # library holding two of every figure with nothing to say which pass wrote them.
+        conn.rollback()
+        raise ValueError(
+            f"{preview_id!r} was resumed somewhere else while this import was running, so "
+            f"nothing here was written — the rows would have been a second copy of ones "
+            f"already imported. Call bulk_import_metrics again with the same preview_id to "
+            f"continue from wherever that pass reached.")
+
     # Once per campaign, with every row on file — the figure a later citation carries has to
     # rest on the whole import, not on whichever row happened to be last.
     for cid in touched:
         core._snapshot_execution_drift(conn, cid)
+    # §10.5/D118: in the SAME transaction as the rows it counts. A resume key committed
+    # separately from the writes it describes is a key that can be wrong in both directions,
+    # and the direction nobody audits is the one that re-imports.
+    #
+    # `reached` counts rows ATTEMPTED, not rows written: a row that failed on an unmatched
+    # title is reported in `errors` and will fail identically next time, so retrying it on
+    # resume would report the same error twice and never make progress.
     conn.commit()
     result = {"preview": False, "imported": imported, "errors": errors,
               "not_processed": not_processed, "columns": columns,
+              **({"preview_id": preview_id} if preview_id else {}),
               **({"new_measures": list(asked.values())} if asked else {}),
               **({"newly_eligible": list(eligible.values())} if eligible else {}),
               **({"retired_measures": list(retired.values())} if retired else {}),
               **({"skipped": skipped} if skipped else {}),
               **({"next_actions": _trimmed(list(offers.values()))} if offers else {})}
-    if not_processed:
+    if not_processed and preview_id:
+        # §10.5/D118. What this used to say was "send them again to continue — nothing
+        # already imported is duplicated by doing so", and nothing enforced it: `add_metrics`
+        # appends, there was no key and no dedup, so a caller who resent the workbook — the
+        # obvious reading, and the only easy thing to do with a file — imported the prefix
+        # twice. A sentence promising idempotency on a path that has none is worse than no
+        # sentence, because it names the corrupting move as the safe one.
         result["note"] = (
-            f"imported {imported} rows before the {config.TOOL_TIME_BUDGET_SECONDS:g}s time "
-            f"budget ran out; {not_processed} rows were not processed. Send them again to "
-            f"continue — nothing already imported is duplicated by doing so."
+            f"imported {imported} row(s) before the {config.TOOL_TIME_BUDGET_SECONDS:g}s "
+            f"time budget ran out; {not_processed} of {len(rows)} were not reached. Call "
+            f"bulk_import_metrics again with preview_id={preview_id!r} and confirm=True to "
+            f"continue from row {reached} — it resumes rather than restarting, so do not "
+            f"resend the workbook. Keep going until `not_processed` is 0; report once at "
+            f"the end."
+        )
+        result["next_actions"] = _trimmed(
+            [actions.action(f"Import the remaining {not_processed} row(s)",
+                            "bulk_import_metrics",
+                            why=f"The workbook is still staged here and {reached} row(s) are "
+                                f"done. Resuming writes only what is left.",
+                            consent="do", preview_id=preview_id, confirm=True)]
+            + list(offers.values()))
+    elif not_processed:
+        # The unstaged path, where the honest advice is different: there IS no key, so the
+        # caller has to slice the workbook themselves, and resending it whole would duplicate.
+        result["note"] = (
+            f"imported {imported} row(s) before the {config.TOOL_TIME_BUDGET_SECONDS:g}s "
+            f"time budget ran out; the last {not_processed} of {len(rows)} were not reached. "
+            f"Send ONLY those rows — the ones from index {reached} on."
+            + (f" Resending the whole workbook imports the first {reached} a second time; "
+               f"nothing deduplicates them." if reached else "") + " "
+            f"Preview with confirm=False first to get a preview_id and this becomes a "
+            f"resume rather than a slice."
         )
     return result
 
@@ -2318,6 +2683,44 @@ def get_evaluation(conn, evaluation_id: str) -> Optional[dict]:
     d["reconciliations"] = [dict(r) for r in conn.execute(
         "SELECT * FROM reconciliations WHERE evaluation_id = ? ORDER BY created_at", (evaluation_id,)
     ).fetchall()]
+    # §10.2/D84+D59: the answers, attached HERE — the one place a judgment's full findings
+    # load, and therefore the only place an answer can be attached once and reach every
+    # reader. The same reasoning §9.8 reached about `get_campaign`: a list of call sites is a
+    # copy of the codebase, and this project has been bitten by that shape four times.
+    #
+    # Attached BESIDE `departure`, never over it. The first version rewrote `unexplained` to
+    # `explained` on the argument that the stored value becomes false once somebody explains
+    # it — which is true, and rewriting it was still wrong, for four reasons review found:
+    #
+    #   * `explained` is outside the declared vocabulary and readers ENUMERATE it. `_reread`
+    #     indexes `_DEPARTURES` positionally, so `diff_campaigns` — the thing a marketer asks
+    #     the instant v2 lands — crashed with `tuple.index(x): x not in tuple` BECAUSE the
+    #     user had answered the question the product asked them.
+    #   * `Departure` is a Literal of the three, so a model could not pass `explained` to
+    #     `get_evaluation(departure=...)` at all, and asking for `unexplained` no longer
+    #     returned the finding. Somebody auditing unexplained departures was shown none of
+    #     the ones that had been explained. The product ate the finding.
+    #   * It only worked for one of the three answers: `fixed` and `not_applicable` left the
+    #     stored value alone, so the module's own argument was applied to a third of its own
+    #     vocabulary.
+    #   * `answers` is append-only precisely so that what somebody said in March survives
+    #     being contradicted in June — and the derived field was then destructively
+    #     overwritten at read time with no record of its prior value. Two opposite
+    #     commitments about the same fact.
+    #
+    # `departure` describes THE DIFFERENCE; `settled` describes the conversation about it.
+    # Readers that cared about `unexplained` meaning "still an open question" consult
+    # `settled` instead — one predicate, in the few places that decide it.
+    settled = answers_for(conn, "finding", [f.get("id") for f in d["findings"] if f.get("id")])
+    for finding in d["findings"]:
+        answer = settled.get(finding.get("id"))
+        # `open` is somebody taking their answer back, so the finding reads as unanswered
+        # again — the row stays in `answers` (it is append-only; the history is the point)
+        # and simply stops being the current answer. Attaching it would leave every reader
+        # with a `settled` block whose presence means "answered" and whose content says the
+        # opposite, which is the two-fields-to-check failure this attachment exists to avoid.
+        if answer and answer["answer"] != "open":
+            finding["settled"] = answer
     return d
 
 
@@ -2680,12 +3083,14 @@ def context_events(conn, *, scopes=None, starts_on=None, ends_on=None,
 
 
 def insert_attribution(conn, *, campaign_id: str, event_id: str, note: str,
-                       stated_by: str, outcome_known: bool = False) -> str:
+                       stated_by: str, outcome_known: bool = False,
+                       bears_on: bool = True) -> str:
     aid = _id("attr")
     conn.execute(
         "INSERT INTO context_attributions (id, campaign_id, event_id, note, stated_by, "
-        "outcome_known, created_at) VALUES (?,?,?,?,?,?,?)",
-        (aid, campaign_id, event_id, note, stated_by, int(outcome_known), _now()))
+        "outcome_known, bears_on, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        (aid, campaign_id, event_id, note, stated_by, int(outcome_known),
+         int(bears_on), _now()))
     conn.commit()
     return aid
 
@@ -2703,7 +3108,11 @@ def attributions(conn, campaign_id: str, *, event_id=None) -> list[dict]:
     if event_id is not None:
         sql += " AND event_id = ?"
         params.append(event_id)
-    return [{**dict(r), "outcome_known": bool(r["outcome_known"]), "basis": "stated"}
+    # `bears_on` defaulted rather than indexed, so a row written before the column existed
+    # reads as "yes, it bore on the result" — which is what every attribution meant when the
+    # only thing this table could record was a yes.
+    return [{**dict(r), "outcome_known": bool(r["outcome_known"]),
+             "bears_on": bool(dict(r).get("bears_on", 1)), "basis": "stated"}
             for r in conn.execute(sql + " ORDER BY created_at, id", params).fetchall()]
 
 

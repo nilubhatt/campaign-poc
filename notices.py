@@ -31,6 +31,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+import actions
+
 # How much it costs. Ordered worst-first, and `collapse` sorts by it, so a surface reading
 # the list in order leads with the right one — ordering as a property of the response rather
 # than an instruction in a docstring that only one tool carried.
@@ -318,7 +320,10 @@ def collapse(entries: list[dict]) -> list[dict]:
         # action and a count of two, so one campaign silently lost its offer.
         key = (entry["code"], entry.get("affects"), entry.get("remedy"),
                entry.get("next_step"),
-               tuple(sorted((a["tool"], tuple(sorted(a["prefilled_args"].items())))
+               # `actions.identity`, not a fourth hand-written copy of the same rule: the
+               # tupled version here was unhashable for any offer carrying a list argument,
+               # which is the crash `trim` had already been fixed for and this had not.
+               tuple(sorted(actions.identity(a)
                             for a in entry.get("next_actions", []))))
         if key not in folded:
             kept = dict(entry)

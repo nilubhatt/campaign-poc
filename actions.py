@@ -72,6 +72,23 @@ def action(label: str, tool: str, *, why: str = "", consent: str = "ask",
     return offer
 
 
+def identity(offer: dict) -> str:
+    """What makes two offers the same offer: the tool AND its arguments.
+
+    Serialised, not tupled. A prefilled argument can be a LIST — `tags=[{...}]` is one this
+    module builds itself, two functions down — and a tuple containing a list is unhashable,
+    so an offer carrying one CRASHED the de-duplication rather than being de-duplicated.
+
+    Three places needed this key and each wrote its own: `trim` here, `_ranked` in core, and
+    `collapse` in notices. Fixing the crash in one of them left the other two, and the one
+    that then crashed was the ranked-gaps path reached by `gaps()` on an empty library — the
+    very first call a new install makes. So it is one function now, which is the only way the
+    next fix reaches all three.
+    """
+    return json.dumps([offer["tool"], offer.get("prefilled_args") or {}],
+                      sort_keys=True, default=str)
+
+
 def trim(offers: list[dict]) -> list[dict]:
     """Drop the empties, drop exact repeats, and keep the list short enough to read.
 
@@ -84,12 +101,7 @@ def trim(offers: list[dict]) -> list[dict]:
     for offer in offers:
         if not offer:
             continue
-        # Serialised, not tupled. A prefilled argument can be a LIST — `tags=[{...}]` is one
-        # this module builds itself, two functions down — and a tuple containing a list is
-        # unhashable, so an offer carrying one crashed the deduplication rather than being
-        # deduplicated. It survived because nothing had yet produced two offers alongside one.
-        key = json.dumps([offer["tool"], offer.get("prefilled_args") or {}],
-                         sort_keys=True, default=str)
+        key = identity(offer)
         if key in seen:
             continue
         seen.add(key)
@@ -177,7 +189,8 @@ def after_upload(*, campaign_id: str, status: Optional[str],
                  commentary: Optional[list] = None, title: str = "",
                  has_window: bool = True,
                  unlinked_judgment: Optional[dict] = None,
-                 waiting: int = 0) -> list[dict]:
+                 waiting: int = 0,
+                 gap_moved: bool = False) -> list[dict]:
     """After a record lands.
 
     One thing is worth offering, and only sometimes: a concluded campaign with no outcome
@@ -266,9 +279,25 @@ def after_upload(*, campaign_id: str, status: Optional[str],
             needs=["linked_by — whose call it is that these are the same thing"],
             evaluation_id=unlinked_judgment["id"], campaign_id=campaign_id))
     offers += _note_what_the_client_said(campaign_id, commentary, title)
-    # §10.6: last, because it is about the LIBRARY rather than about this record — the things
-    # above are what this upload specifically needs.
+    # §10.6: last, because these are about the LIBRARY rather than about this record — the
+    # things above are what this upload specifically needs.
     offers += offer_the_queue(waiting)
+    # §10.6/D54. Gated on the ranking having MOVED, not on a gap existing: a library always
+    # has a worst problem, so an ungated version is a footer on every upload forever, and a
+    # footer is the thing `MAX_ACTIONS` exists to keep out of the three slots.
+    if gap_moved:
+        # "since anybody was told", NOT "this upload changed it". The memo is only written
+        # when the offer is actually SHOWN, and only `ingest_campaign` consults it — so a top
+        # gap moved by `add_metrics` is still outstanding on the next upload, and claiming
+        # that upload caused it is a small false statement about the user's own action. It is
+        # also deferred rather than lost when `trim` drops it, which is the same reason the
+        # sentence has to be about the standing difference rather than about this write.
+        offers.append(action(
+            "Show what this library now needs most",
+            "gaps",
+            why="What this library is missing most has changed since anything last said so — "
+                "the ranking reads differently than the last time it was offered.",
+            consent="do"))
     return trim(offers)
 
 
@@ -281,7 +310,14 @@ _CLIENT_KINDS = ("comment", "annotation")
 # At most this many, however annotated the deck. `trim` caps the whole list anyway, and a
 # returned deck can carry forty comments — offering forty is a menu nobody reads, and it would
 # crowd out the metrics offer above, which is the larger gap.
-_MAX_CORRECTION_OFFERS = 2
+#
+# ONE, not two. At two, a single annotated deck filled the third slot with a SECOND candidate
+# correction and evicted both library-level offers — the waiting queue and the moved ranking —
+# from an upload that had six things to say. A candidate correction needs three campaigns
+# before it does anything at all; the queue and the ranking name things blocking judgments
+# now. The second comment is still on file and still offerable from the next write; the
+# offer that was dropped had no second chance, which is the asymmetry that decides this.
+_MAX_CORRECTION_OFFERS = 1
 
 
 def _note_what_the_client_said(campaign_id: str, commentary: Optional[list],

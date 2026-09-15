@@ -15,6 +15,7 @@ from pydantic import Field
 
 from mcp.server.mcpserver import MCPServer
 
+import actions
 import config
 import commitments
 import context
@@ -234,6 +235,17 @@ FindingKind = Literal["guardrail_breach", "precedent_departure", "missing_inform
 # writable here: the premise that a computed finding is identical for every user, so a
 # difference is a bug, holds only if the SERVER computed it. §7.1 stamps the other one.
 Basis = Literal["judged"]
+# §10.2/D84+D59: what a PERSON can say about a stored finding. Note what is not here:
+# `explained`. That is what a departure READS as once it has been answered, not something
+# anybody writes — the only route to it is `answer_finding` with `deliberate`, so its presence
+# on a stored finding is proof somebody actually answered rather than a value a model chose.
+# `fixed` and `deliberate` are deliberately separate: "we changed it" and "we kept it, and
+# here is why" are the distinction the whole correction loop reasons from, and one word for
+# both would leave the library unable to tell a brief that was corrected from one defended.
+FindingAnswer = Literal["fixed", "deliberate", "does_not_apply", "misread", "open"]
+# §10.2/D53. `known_not_yet` stays ranked because it is still the thing to fix;
+# `not_applicable` leaves the ranking because a gap that will never close is a complaint.
+GapAnswer = Literal["known_not_yet", "not_applicable", "open"]
 
 
 class Precedent(TypedDict):
@@ -449,7 +461,14 @@ def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optio
     concluded campaign: without a window nothing can be checked against the calendar, so
     "this launch overlapped Ramadan" and "the port was shut for the first half of it" are
     findings the library cannot produce. Absent one, a window is read out of the brief's own
-    dates and clearly labelled as a reading of prose — entering them settles it."""
+    dates and clearly labelled as a reading of prose — entering them settles it.
+
+    **Editing `title` or `detail` rebuilds the search index, and that can fall behind.**
+    `reindexed` says how much was rebuilt, and when `embedded` is short of `chunks` the
+    record will still come back in searches for its OLD wording and not its new — a state
+    search itself cannot report, because it does not say what it failed to consider. A
+    `chunk_not_embedded` warning is returned and stays against the record until it is fixed;
+    read it, say so, and offer `finish_indexing`. Nothing needs re-uploading."""
     conn = store.connect()
     try:
         return core.update_campaign(conn, campaign_id, title=title, detail=detail,
@@ -571,7 +590,8 @@ def record_context_event(starts_on: str, scope: ContextScope, kind: ContextKind,
 
 @mcp.tool()
 @_catch_value_errors
-def attribute_outcome(campaign_id: str, event_id: str, note: str, stated_by: str) -> dict:
+def attribute_outcome(campaign_id: str, event_id: str, note: str, stated_by: str,
+                      bears_on: bool = True) -> dict:
     """Record what a PERSON thinks a context event did to a campaign's numbers (§9.8).
 
     **Never call this on your own reasoning.** "Sell-through was down and there was an
@@ -586,11 +606,18 @@ def attribute_outcome(campaign_id: str, event_id: str, note: str, stated_by: str
     made against, so it confounds nothing until a person says this time it mattered.
 
     A confounded outcome STILL COUNTS. It is a real measured result and nothing down-weights
-    it; it simply stops being quotable as clean evidence."""
+    it; it simply stops being quotable as clean evidence.
+
+    **`bears_on=False` is how somebody says it is NOT why.** "We looked at the port closure
+    and it landed in the two weeks we had no stock anyway" is an answer, and it used to have
+    nowhere to go — so the product asked a question it could not hear a `no` to. A ruled-out
+    event still shows as having run through the window, because the overlap is a fact this
+    library computed and their reading of it is a claim; both go to whoever cites the
+    results. What it stops is the same question coming back."""
     conn = store.connect()
     try:
         return context.attribute(conn, campaign_id=campaign_id, event_id=event_id,
-                                 note=note, stated_by=stated_by)
+                                 note=note, stated_by=stated_by, bears_on=bears_on)
     finally:
         conn.close()
 
@@ -929,7 +956,8 @@ def add_metrics(campaign_id: str, detail: Optional[str] = None,
 
 @mcp.tool()
 @_catch_value_errors
-def bulk_import_metrics(rows: list, confirm: bool = False) -> dict:
+def bulk_import_metrics(rows: Optional[list] = None, confirm: bool = False,
+                        preview_id: Optional[str] = None) -> dict:
     """Load a KPI workbook in one call instead of one add_metrics per row. Each row is an
     object identifying its campaign by campaign_id (preferred) or title (exact,
     case-insensitive — ambiguous or unmatched titles are reported as errors, never guessed),
@@ -949,14 +977,24 @@ def bulk_import_metrics(rows: list, confirm: bool = False) -> dict:
                          figures in those rows are.
 
     Show the user what the columns mean before importing — especially the aliases, which are
-    theirs to accept or refuse. Then send the SAME rows with confirm=True.
+    theirs to accept or refuse. Then confirm with the `preview_id` the preview handed back:
+    **do not resend the rows.** The workbook is held server-side, so confirming quotes a key
+    rather than crossing the wire a second time, and the rows imported are by construction the
+    ones that were previewed.
+
+    The same key is the RESUME key. A workbook larger than the time budget stops partway and
+    returns `not_processed` with the key; call again with the same `preview_id` and it
+    continues from where it stopped. Resending the workbook instead imports the first rows a
+    second time — nothing deduplicates them — so keep calling with the key until
+    `not_processed` is 0, and report once at the end rather than after each pass.
 
     Returns {imported, errors, columns}. Valid rows import even if others fail, and a rejected
     metric_type carries `field`, `valid` and `suggestion` so the retry is data rather than
     prose to parse."""
     conn = store.connect()
     try:
-        return store.bulk_import_metrics(conn, rows, confirm=confirm)
+        return store.bulk_import_metrics(conn, rows, confirm=confirm,
+                                         preview_id=preview_id)
     finally:
         conn.close()
 
@@ -1045,8 +1083,21 @@ def list_campaigns(record_type: Optional[RecordType] = None, status: Optional[St
         # §5.6: eight rows with nothing to say whether eight is enough was the review's own
         # complaint about this tool. Attached only while the library is not yet working.
         guidance = core.readiness_for_listing(conn)
+        # §10.6/D67: "`list_campaigns` answers 'what have I got' one record at a time. This
+        # answers the question a marketer actually has" — which is `coverage`'s own docstring
+        # admitting the listing is the moment for it, in a sentence the listing never carried.
+        #
+        # ONE list. Nested readiness carries its own `next_actions`, so the coverage offer
+        # arrived twice in one response at two nesting levels — and `actions.trim` cannot
+        # deduplicate across sibling keys, so `actions.identity`, the whole point of which is
+        # that it is now one shared function, was never given the chance. Six offers reached
+        # the model and two of them were the same call.
+        offered = core.coverage_offer(conn)
         if guidance:
+            offered = actions.trim(list(guidance.pop("next_actions", []) or []) + offered)
             listed["readiness"] = guidance
+        if offered:
+            listed["next_actions"] = offered
         return listed
     finally:
         conn.close()
@@ -1447,7 +1498,14 @@ def diff_campaigns(earlier: str, later: str) -> dict:
     The question a marketer has when v2 arrives, and the one thing here that was previously
     done by hand. Computed from the two versions' EVALUATION findings, not from their decks:
 
-      `adopted`           a finding the later judgment explicitly resolved by id.
+      `adopted`           a finding the later judgment explicitly resolved by id, OR one a
+                          person recorded as `fixed`/`not_applicable` with answer_finding.
+                          Read `basis`: on the first it is `computed` (the server matched two
+                          ids); on the second it is `stated` and `settled.said_by` names
+                          whose word it is. Those are different claims and only one is a
+                          comparison of the versions. A `deliberate` answer is NOT adoption —
+                          nothing was adopted — and appears in `no_longer_raised` with the
+                          reason, rather than under a caveat saying nobody recorded anything.
       `raised_again`      a finding the later judgment raised too.
       `newly_introduced`  a problem only the later version has.
       `no_longer_raised`  neither resolved nor repeated. Read the caveat, which differs by
@@ -1650,6 +1708,104 @@ def gaps() -> dict:
     conn = store.connect()
     try:
         return core.gaps(conn)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def answer_finding(evaluation_id: str, finding_id: str, answer: FindingAnswer, note: str,
+                   said_by: str) -> dict:
+    """Record what a person says about one finding on a saved judgment (§10.2).
+
+    **Call this whenever the user answers a finding.** They routinely do, in passing — "that
+    was deliberate, the client moved the date", "we fixed that in v2", "that doesn't apply,
+    it's a reference deck" — and until now there was nowhere for it to go, so the same
+    question came back on the next brief and the stored finding kept saying nobody had
+    explained it.
+
+    `answer` is one of three, and the difference between the first two matters:
+      `fixed`            the problem was real and it was addressed.
+      `deliberate`       it was kept on purpose, and the note says why.
+      `does_not_apply`   the point is right in general and not applicable to this brief.
+      `misread`          the finding is WRONG about what the brief says. Use this one rather
+                         than softening it: a person telling this library its judgment was
+                         mistaken is the most valuable thing it gets told, and it is the only
+                         signal that the product itself needs fixing.
+      `open`             never mind — take an earlier answer back. The earlier one stays on
+                         file; it stops being the current one.
+
+    `note` is required — say why, in the user's own words. "Deliberate" with no reason is the
+    same non-answer as `unexplained`, except that it stops the question being asked.
+
+    `said_by` is required. This overrides a stored finding, and every stated claim in this
+    library carries who made it.
+
+    The answer travels: any later judgment that retrieves this record reads it, so a revision
+    of this brief is not asked the settled question again."""
+    conn = store.connect()
+    try:
+        return core.answer_finding(conn, evaluation_id=evaluation_id, finding_id=finding_id,
+                                   answer=answer, note=note, said_by=said_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def answers(said_by: Optional[str] = None) -> dict:
+    """Every answer a person has given this library, newest first.
+
+    Call it when the user asks what has been overridden, who decided something, why a finding
+    stopped being raised, or why a gap is no longer reported — and offer it when they are
+    reviewing the library rather than adding to it.
+
+    This is the record of where somebody argued with a judgment and won, which for this
+    product is the most valuable thing it holds. Each entry carries the answer, the reason in
+    their own words, who gave it, and what it was about.
+
+    Read three fields before summarising:
+      `stands`    whether this is the answer in force. Older statements about the same thing
+                  are KEPT — what somebody said before the numbers arrived and what they said
+                  after are two judgments, and the pair is worth more than either.
+      `silences`  whether this answer makes the product say LESS than it otherwise would.
+                  Those are the ones worth reading first.
+      `stale`     given long enough ago that nobody can say it still holds. Nothing re-asks
+                  automatically; a market written off last year may have been revived.
+
+    An empty log does NOT mean nothing was asked — a judgment raising an unexplained
+    departure asked a question, and so did every gap somebody could not close. It means no
+    answer is on file, so all of them are still open."""
+    conn = store.connect()
+    try:
+        return core.answers(conn, said_by=said_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def answer_gap(code: str, answer: GapAnswer, note: str, said_by: str) -> dict:
+    """Record what a person says about a gap they cannot close (§10.2).
+
+    Some gaps are true and permanent — a market whose campaigns were run by an agency that no
+    longer exists will never have its results — and reporting one every time is a complaint
+    rather than a next step. Offer this when the user says a gap is not going to close.
+
+      `known_not_yet`    known, not being done yet. It STAYS in the ranking, because it is
+                        still the thing to fix; the note travels with it so nobody has to
+                        work out whether anyone has looked.
+      `not_applicable`  this will never be true here. It leaves the ranking.
+      `open`            never mind — treat it as outstanding again.
+
+    Nothing is deleted. A gap somebody set aside still appears under `set_aside` on gaps(),
+    because it is still a fact about the library's evidence and judgments resting on that
+    evidence are still weaker for it. `code` must be a gap the library is actually reporting;
+    call gaps() to see them."""
+    conn = store.connect()
+    try:
+        return core.answer_gap(conn, code=code, answer=answer, note=note,
+                                    said_by=said_by)
     finally:
         conn.close()
 

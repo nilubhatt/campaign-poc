@@ -2637,13 +2637,98 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
 
 ## Phase 10 — Feedback capture
 
-- [ ] **10.1 Define "open"** as *needs something from a human*, ordered by value.
-- [ ] **10.2 `feedback_queue()`** with fixed numbering (1–9 campaigns, 10 concluded, 11 more).
-- [ ] **10.3 Numbered all the way down**; free text invited, never required.
-- [ ] **10.4 Server builds the menu, not the model.**
-- [ ] **10.5 `menu_token`** so a stale selection refreshes instead of writing to the wrong row.
-- [ ] **10.6 Offer the queue proactively** — after uploads/evaluations and on first
-      interaction of a session.
+- [x] **10.1 Define "open"** as *needs something from a human*, ordered by value.
+      Eleven reasons in `feedback._REASONS`, each with a rank and the sentence that says why
+      the row is open. *Closes D20, re-pointed here:* `campaign_notices` persists the
+      `blocked` and `degraded` warnings, so the thing the library most wants somebody to act
+      on stopped being the thing it forgot fastest — it is now the top-ranked reason.
+      *Closes D70 and D87*: a market resting on one campaign, and results on file beside a
+      claim that is still somebody's impression.
+- [x] **10.2 `feedback_queue()`** with fixed numbering (1–9 campaigns, 10 concluded, 11 more).
+      **Demanded a name and discarded it** while saying it had been kept — found by the first
+      review round on the write path.
+      *Closes D53, D59, D84 and D110, all four re-pointed here,* and they turned out to be one
+      thing: **a question this product asks and cannot hear the answer to.** "Is this
+      departure deliberate?" was asked on every judgment and the reply died in a chat window,
+      so the same question came back on the next version — and the UN-answer was stored:
+      `departure: unexplained` is a fact every later judgment reads to decide severity, and it
+      is false the moment somebody explains it. A question nobody can answer decays into a
+      wrong answer, which is worse than not asking. `answer_finding` and `answer_gap`
+      are where the answer goes, attached at `store.get_evaluation` so it reaches every
+      reader; D110 needed no write path at all, only to be *asked again*, which is the
+      queue's job. *Closes D52:* the ranking could not see magnitude, so one unindexed record
+      outranked forty.
+- [x] **10.3 Numbered all the way down**; free text invited, never required.
+      The free-text box is where "slide 23 should be the standard for every market" gets
+      captured — the highest-value sentence in the system — so it is invited and never
+      required, and it is stored in the speaker's words rather than folded into a tag.
+- [x] **10.4 Server builds the menu, not the model.**
+      Including the rendered `line`, which is the point: handing the model a title, a market
+      and a paragraph and hoping two operators format them the same way is the variance this
+      item exists to remove.
+- [x] **10.5 `menu_token`** so a stale selection refreshes instead of writing to the wrong row.
+      *Closes D42, D117 and D118, re-pointed here.* The token is over the ROWS as rendered, so
+      anything that would change what a number means changes it. D117/D118 are the same
+      problem with a bigger argument — an offer that has to survive a round trip — and
+      `import_batches` answers both: the preview stages the workbook and hands back a
+      `preview_id`, so confirming quotes a key instead of resending 500 rows, and the same key
+      resumes an import the time budget cut short. The old note promised "nothing already
+      imported is duplicated by doing so" and **nothing enforced it**: the obvious reading of
+      "send them again" doubled every row already written.
+- [x] **10.6 Offer the queue proactively** — after uploads/evaluations and on first
+      interaction of a session. *"The menu is worthless if the user has to know it exists"* —
+      which is true of the menu and not only of it. *Closes D54, D67, D76, D98 and D116.*
+      **D116 is the one that matters**, because it had happened seven times and each was found
+      by a reviewer rather than by anything in the code: `tests/test_every_tool_is_offered.py`
+      is that checklist executed instead of remembered, and it found **nine** unoffered tools
+      on its first run — `save_evaluation` among them, which the whole second half of the
+      product starts at. It then caught 10.2's two new tools the moment they were added.
+      **A tool nobody offers is a tool nobody calls, and a feature nobody calls cannot fail,
+      so nothing reports it broken** — §8.6's gate had nothing to act on for exactly this
+      reason. `gaps` and `coverage` are offered where they are cheap; D76 folded the two
+      copies of the first-steps path into one, since they could disagree about the same
+      library while each stayed internally consistent; D98's partial re-index raised no
+      notice at all, so an edit that half-failed was observably a successful edit and the
+      record was unfindable by its own new wording.
+
+**Two review rounds followed, and between them found nineteen defects the 2,032-test suite
+could not see.** The shape that recurs is *a new thing quietly switching off an old one*,
+with nothing to notice because each half works perfectly alone:
+
+- **One pair of similarly-worded corrections disabled every proactive offer in the product.**
+  `waiting()` filtered on a key the new rule row does not have; the KeyError went into a bare
+  `except` and came back as `0`. 10.6's entire headline, switched off by 10.2's own new row,
+  permanently and invisibly, in the ordinary state of any agency library.
+- **`diff_campaigns` crashed BECAUSE the user answered the question the product asked** —
+  rewriting `departure` to `explained` hit `_reread`'s positional index. The same rewrite made
+  the finding unreachable by `get_evaluation(departure="unexplained")`, and `explained` could
+  not be passed through the MCP schema at all. The product ate the finding. The rewrite is
+  gone; the predicate moved to the reader instead.
+- **The import resume was a TOCTOU**: the guard read `imported_through` at entry and wrote it
+  at exit with the whole import between, so two sessions on one key both imported every row —
+  the exact corruption D118 removed, arriving through the key that removed it.
+- **`share` divided judgments by campaigns**, so one record with three unchecked judgments
+  reported `share: 3.0` and claimed to outweigh its kind. A ratio of two units is a number
+  that cannot be wrong because it means nothing, and it was published beside
+  `rank_basis: computed`.
+- **The set-aside whitelist gated the offer and not the write**, so `answer_gap` accepted
+  `library_is_empty` and `gaps()` then returned `[]` — the product saying nothing is missing
+  about a library holding nothing.
+- **`chunk_not_embedded` was retracted only by `finish_indexing`**, so a partial edit followed
+  by a successful one left a wholly searchable record permanently occupying `needs_attention`,
+  the top-ranked reason a campaign waits on a person.
+- **`_rule_questions` was O(n²) on every upload** — 8.4s at 400 corrections, a third of the
+  tool's whole time budget, on a library that is not large.
+- **The offer that says "a question needs your answer" prefilled the answer**, against
+  `actions`' own written rule, so "we fixed that" could be recorded as "we kept it on purpose"
+  under the user's name.
+- **`attribute_outcome` asked a yes/no question with no way to say no** — D84's failure
+  reintroduced in new code, in the same diff that fixed it. `bears_on=False` now exists.
+- **The override log was write-only.** §10.2 gave a person's answer somewhere to go and
+  nothing to read it back with; for a product whose pitch is that its judgments can be argued
+  with, the record of where somebody argued and won is the most valuable thing it holds.
+  `answers` is that read, and `stale_answers_offer` is the re-ask the queue's own founding
+  insight demanded and never applied to itself.
 
 ## Phase 11 — Attribution
 

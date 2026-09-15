@@ -475,8 +475,36 @@ def test_the_ranking_is_asserted_against_a_library_that_has_several_gaps(conn, m
     report = core.gaps(conn)
 
     assert len(report["gaps"]) >= 3, [g["code"] for g in report["gaps"]]
-    assert [g["rank"] for g in report["gaps"]] == sorted(g["rank"] for g in report["gaps"])
+    # `order`, not `rank`. D52 made the kind's fixed rank one INPUT to the ordering rather
+    # than the ordering itself — a gap about most of the library moves up a step — so
+    # asserting monotonic `rank` would now fail on a correctly ordered list, and asserting it
+    # loosely would stop checking anything. `order` is the key the list is actually sorted
+    # on, published for exactly this reason.
+    assert [g["order"] for g in report["gaps"]] == sorted(g["order"] for g in report["gaps"])
     assert report["gaps"][0]["code"] == "few_verified_outcomes"
+
+
+def test_the_published_order_is_the_order_the_gaps_are_in(conn, monkeypatch):
+    """The test above rests entirely on `order` being the real sort key. If `order` were
+    computed for display and the sort used something else, both would still pass while the
+    list a reader sees was ordered by a number nobody can see — which is the D52 defect with
+    an extra field on top of it."""
+    import config
+
+    monkeypatch.setattr(config, "TOOL_TIME_BUDGET_SECONDS", 0.0)
+    core.ingest_campaign(conn, title="Cut short", status="concluded", deck_text="\n\n".join(
+        f"section {i} " + "word " * 200 for i in range(4)), confirm=True)
+    for n in range(6):
+        _concluded(conn, f"Bogota {n}", market="LATAM")
+
+    gaps = core.gaps(conn)["gaps"]
+
+    assert [(g["order"], -g["affects"], g["code"]) for g in gaps] == sorted(
+        (g["order"], -g["affects"], g["code"]) for g in gaps)
+    # And `order` is not simply `rank` renamed: at least one gap here is about most of the
+    # library, which is the whole point of the key.
+    assert any(g["order"] < g["rank"] for g in gaps), [
+        (g["code"], g["rank"], g["order"], g["share"]) for g in gaps]
 
 
 def test_an_empty_library_reports_only_that_even_when_other_branches_would_fire(conn,
