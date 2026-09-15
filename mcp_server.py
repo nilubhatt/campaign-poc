@@ -22,6 +22,7 @@ import corrections
 import core
 import drift
 import enums
+import feedback
 import metrics
 import replay
 import store
@@ -1480,6 +1481,89 @@ def diff_campaigns(earlier: str, later: str) -> dict:
     conn = store.connect()
     try:
         return core.diff_campaigns(conn, earlier=earlier, later=later)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def feedback_queue(scope: Optional[str] = None, page: int = 1) -> dict:
+    """The numbered menu of what is waiting on a person (§10.1–10.4).
+
+    Feedback is the only input that makes this library worth anything and it is the hardest
+    thing to give: the user has to remember what is outstanding, name it, and compose prose.
+    This makes it a numbered choice.
+
+    **Read the rows out with their `why`.** "What does this want from me" is the question the
+    user actually has, and a list of titles does not answer it.
+
+    **Offer the numbers and nothing else.** The numbers are fixed: campaigns fill 1–9, 10 is
+    always "a concluded campaign" and 11 is always "show more", whether three are waiting or
+    nine. The gap when fewer than nine are open is deliberate — a moving target breaks the
+    habit the menu exists to create.
+
+    **Do not compose, reorder or renumber this list.** The server builds it so that two users
+    with the same library see the same menu; a list the model assembles is the exact variance
+    the consistency work removes.
+
+    Pass the returned `menu_token` back with the user's choice. It is how a number stays
+    attached to the row they were actually looking at."""
+    conn = store.connect()
+    try:
+        return feedback.queue(conn, scope=scope or "open", page=page)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def feedback_choose(menu_token: str, choice: int) -> dict:
+    """Take the number the user picked off the menu they were shown (§10.5, §10.3).
+
+    `menu_token` is the one that came back with those rows. If the library has changed since —
+    a version landed, somebody tagged something in another window — this returns the REFRESHED
+    menu rather than writing, because "3" would otherwise silently mean a different campaign.
+    Read the new menu out and ask again; nothing is lost.
+
+    What comes back is the next question, also as numbers, and only the ones this campaign
+    actually needs. Ask them in order. The free-text box at the end is where "slide 23 should
+    be the standard" gets captured — the most valuable sentence in the whole system — so
+    invite it, and accept a skip without pressing."""
+    conn = store.connect()
+    try:
+        return feedback.choose(conn, menu_token=menu_token, choice=choice)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def feedback_record(menu_token: str, choice: int, said_by: str,
+                    reaction: Optional[int] = None, performance: Optional[int] = None,
+                    note: Optional[str] = None) -> dict:
+    """Write down what the user said (§10.3).
+
+    `choice` is the number the user pressed — the same one you passed to `feedback_choose` —
+    and the server resolves it against that menu. There is deliberately no `campaign_id`
+    here: a record named from anywhere but the menu the user was looking at is a write landing
+    somewhere they never chose.
+
+    `reaction` and `performance` are the numbers from `feedback_choose`, not words. `note` is
+    their own sentence and is optional — never withhold the write waiting for one.
+
+    `said_by` is who said it. A client is several people with different authority and
+    sometimes different opinions, and an opinion nobody's name is against cannot be weighed
+    against another later. If the user is relaying somebody else's view, that person is the
+    one to name.
+
+    A performance claim recorded here is `stated`, never `verified` — somebody saying it went
+    well is an impression until measurements back it, and this is the easiest place in the
+    product to type one."""
+    conn = store.connect()
+    try:
+        return feedback.record(conn, menu_token=menu_token, choice=choice,
+                               said_by=said_by, reaction=reaction, performance=performance,
+                               note=note)
     finally:
         conn.close()
 

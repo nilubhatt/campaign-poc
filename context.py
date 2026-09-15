@@ -1377,8 +1377,12 @@ def say_the_outcome(confounders: dict) -> str:
             f"CLEAN evidence — and nothing here says the event moved the number.")
 
 
-_NOT_A_PERSON = ("server", "system", "computed", "campaign-poc", "library", "automatic",
-                 "auto", "claude", "the model", "assistant", "n/a", "unknown")
+# Words that mean "not a person". Shared: §9.8 records who says an event moved a number and
+# §10.3 records whose opinion a tag is, and two lists of these drift apart — the one that
+# drifts being the one nobody looks at.
+_NOT_A_PERSON = ("server", "system", "computed", "campaign-poc", "campaign intelligence",
+                 "library", "automatic", "auto", "claude", "the model", "assistant",
+                 "n/a", "unknown", "anonymous", "nobody", "everyone")
 
 
 def _reads_as_the_product(name: str) -> bool:

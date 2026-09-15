@@ -31,6 +31,7 @@ import embedding
 import enums
 import extract
 import facts
+import feedback
 import images
 import learning
 import metrics
@@ -423,10 +424,12 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
             # §9.9/D40: a judgment about this very title that is attached to nothing. This is
             # §5.2's moment — the judgment is on screen because they just asked for it.
             unlinked_judgment=store.unlinked_judgment_for(conn, title),
+            # §10.6: said where it is cheap, rather than waited for.
+            waiting=feedback.waiting(conn, apart_from=cid),
             # §9.6: the window is what makes this record checkable against a calendar at all,
             # and this is the moment somebody is present and thinking about the campaign.
             has_window=bool(current.get("starts_on"))),
-        "warnings": notices.collapse(warnings),
+        "warnings": _persisted(conn, cid, notices.collapse(warnings)),
         # §6.3: the one moment where "was our judgment any good?" is both answerable and
         # free. Attached only when there IS an unreconciled judgment on the record this one
         # replaces — see `_judgment_to_check`.
@@ -534,12 +537,18 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
             # asking again here, `too_early` is a one-way sink that absorbs the answer the
             # feature exists to collect.
             **({"drift_to_revisit": revisit} if revisit else {}),
+            # §10.6: recording a target opens a row in the feedback queue, and a write that
+            # opens a row should name it — the queue is only worth building if the writes that
+            # fill it also say so.
+            **({"waiting_on_feedback": _waiting_elsewhere(conn, campaign_id)}
+               if _waiting_elsewhere(conn, campaign_id) else {}),
             # The moment the precondition for reconciling is satisfied. Offered at
             # save_evaluation time it simply failed: there were no actuals yet (§5.2 review).
             # D116: the workbook's date column is a write that makes `campaign_context`
             # answerable, so its offer joins the list rather than being overwritten by it.
             "next_actions": actions.trim(
-                actions.after_metrics(
+                actions.offer_the_queue(_waiting_elsewhere(conn, campaign_id))
+                + actions.after_metrics(
                     campaign_id=campaign_id,
                     open_evaluation_id=store.unreconciled_evaluation_id(conn, campaign_id)
                     if metric_type == "actual" else None)
@@ -3015,9 +3024,14 @@ def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         # §5.2: the three things anyone actually does after a judgment, prefilled. The
         # supersession offer only appears when there IS an earlier version — an approval of
         # a new brief supersedes nothing, and an offer that is always there stops being read.
-        "next_actions": actions.after_evaluation(
-            subject_title=subject_title, evaluation_id=eid, verdict=verdict,
-            campaign_id=campaign_id),
+        "next_actions": actions.trim(
+            actions.after_evaluation(
+                subject_title=subject_title, evaluation_id=eid, verdict=verdict,
+                campaign_id=campaign_id)
+            # §10.6: a judgment is one of the two moments the review names.
+            # `apart_from`: a write announcing itself is the always-present offer that
+            # teaches a reader to skip the list.
+            + actions.offer_the_queue(feedback.waiting(conn, apart_from=campaign_id))),
         "note": (_how_to_say_it(by_class, cleaned)
                  + _say_the_evidence_strength(evidence)
                  + _say_the_disconfirming_check(disconfirming)),
@@ -4566,6 +4580,9 @@ def readiness(conn) -> dict:
     else:
         stage = "working"
 
+    # §10.6: "the first interaction of a session" is the review's own second moment for the
+    # queue, and this is that surface.
+    waiting = feedback.waiting(conn)
     return {
         "stage": stage,
         "campaigns": len(campaigns),
@@ -4574,9 +4591,15 @@ def readiness(conn) -> dict:
         "can": can,
         "cannot": cannot,
         "shortest_path": path,
+        "waiting_on_feedback": waiting,
+        **({"next_actions": actions.trim(actions.offer_the_queue(waiting))}
+           if waiting else {}),
         "note": ("Say the stage and what it cannot do yet before giving any judgment from a "
                  "library this size — a confident, evidence-free verdict is the thing a new "
-                 "user will believe. `shortest_path` is ordered: it is a path, not a menu."),
+                 "user will believe. `shortest_path` is ordered: it is a path, not a menu."
+                 + (f" {waiting} campaign(s) are waiting on feedback; say so and offer the "
+                    f"queue rather than waiting to be asked for it."
+                    if waiting else "")),
     }
 
 
@@ -5107,6 +5130,33 @@ def _date_columns(structured) -> set:
     return {key for key in (structured or {})
             if context.window_from_columns({key: (structured or {})[key]})
             or key.strip().lower().replace(" ", "_") in context.DATE_COLUMNS}
+
+
+def _persisted(conn, campaign_id: str, warnings: list) -> list:
+    """Keep the warnings that need a PERSON, against the record (§10.1/D20).
+
+    A warning lives for exactly one response, so the thing the library most wanted somebody to
+    act on was the thing it forgot fastest — and §10.1's definition of open is precisely "the
+    library is missing something a human has to supply". `blocked` and `degraded` are the two
+    severities that mean somebody has to do something; the rest are information.
+
+    Never lets a notice break the write it is attached to: a warning about a degraded upload
+    that prevented the upload would be a worse failure than the one it describes.
+    """
+    for warning in warnings or []:
+        if warning.get("severity") not in ("blocked", "degraded"):
+            continue
+        try:
+            store.record_notice(conn, code=warning["code"], campaign_id=campaign_id,
+                                detail=warning.get("affects") or warning.get("detail"))
+        except Exception:                    # noqa: BLE001
+            pass
+    return warnings
+
+
+def _waiting_elsewhere(conn, campaign_id: Optional[str]) -> int:
+    """How many OTHER campaigns are waiting on feedback (§10.6)."""
+    return feedback.waiting(conn, apart_from=campaign_id)
 
 
 def _window_from_the_workbook(conn, campaign_id: str, structured) -> Optional[dict]:

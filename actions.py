@@ -41,6 +41,8 @@ numbers arrive — which is the honest version of the same offer.
 """
 from __future__ import annotations
 
+import json
+
 from typing import Optional
 
 # "a short list". Past three, a reader is choosing from a menu rather than being offered a
@@ -77,13 +79,17 @@ def trim(offers: list[dict]) -> list[dict]:
     different arguments both survive — the earlier docstring said "de-duplicate by tool",
     which is not what the code does and would have been wrong if it were.
     """
-    seen: set[tuple] = set()
+    seen: set[str] = set()
     kept = []
     for offer in offers:
         if not offer:
             continue
-        key = (offer["tool"], tuple(sorted(offer["prefilled_args"].items(),
-                                           key=lambda kv: kv[0])))
+        # Serialised, not tupled. A prefilled argument can be a LIST — `tags=[{...}]` is one
+        # this module builds itself, two functions down — and a tuple containing a list is
+        # unhashable, so an offer carrying one crashed the deduplication rather than being
+        # deduplicated. It survived because nothing had yet produced two offers alongside one.
+        key = json.dumps([offer["tool"], offer.get("prefilled_args") or {}],
+                         sort_keys=True, default=str)
         if key in seen:
             continue
         seen.add(key)
@@ -130,6 +136,28 @@ def after_evaluation(*, subject_title: str, evaluation_id: str, verdict: str,
         consent="ask", title=subject_title)])
 
 
+def offer_the_queue(waiting: int) -> list[dict]:
+    """§10.6: "the menu is worthless if the user has to know it exists".
+
+    Surfaced wherever it is cheap — after any upload or judgment, and on the first interaction
+    of a session. Same instinct as `gaps()`: the library knows what it is missing and should
+    say so rather than being interrogated.
+
+    Silent at zero, because an offer that is always there stops being read — the rule every
+    other offer in this product follows.
+    """
+    if waiting < 1:
+        return []
+    return [action(
+        f"{waiting} campaign{'s' * (waiting != 1)} "
+        f"{'are' if waiting != 1 else 'is'} waiting on feedback — clear a few?",
+        "feedback_queue",
+        why="Feedback is the only input that makes this library worth anything, and it is "
+            "the hardest thing to give: the user has to remember what is outstanding, name "
+            "it, and compose prose. The queue makes it a numbered choice.",
+        consent="ask")]
+
+
 def after_metrics(*, campaign_id: str, open_evaluation_id: Optional[str]) -> list[dict]:
     """Results have just been recorded. If a judgment about this campaign is still open, the
     precondition for reconciling it is now satisfied — which is what makes this the right
@@ -148,7 +176,8 @@ def after_upload(*, campaign_id: str, status: Optional[str],
                  has_metrics: bool, earlier_judgment: Optional[dict] = None,
                  commentary: Optional[list] = None, title: str = "",
                  has_window: bool = True,
-                 unlinked_judgment: Optional[dict] = None) -> list[dict]:
+                 unlinked_judgment: Optional[dict] = None,
+                 waiting: int = 0) -> list[dict]:
     """After a record lands.
 
     One thing is worth offering, and only sometimes: a concluded campaign with no outcome
@@ -237,6 +266,9 @@ def after_upload(*, campaign_id: str, status: Optional[str],
             needs=["linked_by — whose call it is that these are the same thing"],
             evaluation_id=unlinked_judgment["id"], campaign_id=campaign_id))
     offers += _note_what_the_client_said(campaign_id, commentary, title)
+    # §10.6: last, because it is about the LIBRARY rather than about this record — the things
+    # above are what this upload specifically needs.
+    offers += offer_the_queue(waiting)
     return trim(offers)
 
 

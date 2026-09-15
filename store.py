@@ -226,6 +226,38 @@ CREATE TABLE IF NOT EXISTS context_events (
     withdrawn_why TEXT,
     created_at    REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS campaign_notices (
+    -- §10.1/D20: a persisted `blocked` or `degraded` notice, per record. "A notice addressed
+    -- to a person is by definition 'needs something from a human'", which is 10.1's own
+    -- definition of open — and a warning lives for exactly one response, so the thing the
+    -- library most wanted somebody to act on was the thing it forgot fastest. C14 persisted
+    -- one of these (`commentary_checked`) and left the rest; this is the rest.
+    id            TEXT PRIMARY KEY,
+    campaign_id   TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    code          TEXT NOT NULL,   -- notices.CODES: the stable name, never the prose
+    detail        TEXT,
+    created_at    REAL NOT NULL,
+    cleared_at    REAL,            -- set when the thing it asked for actually happened
+    UNIQUE (campaign_id, code)     -- one open notice per kind per record; re-raising the same
+                                   -- condition is the same outstanding job, not a second one
+);
+CREATE TABLE IF NOT EXISTS feedback_notes (
+    -- §10.3: "the free-text box is where 'slide 23 should be the standard' gets captured —
+    -- the highest-value sentence in the whole system".
+    --
+    -- Its OWN table, because the two places it was tried both corrupted something. A metrics
+    -- row means "a number about outcomes": prose filed there unlocked §2.3's `verified` gate,
+    -- entered §9.9's calibration denominator, was served by `reconcile_evaluation` as the
+    -- campaign's actual result, and — as a `predicted` row — re-opened a finished campaign in
+    -- the feedback queue as "targets only, no actuals", permanently. A sentence is not a
+    -- measurement of any kind.
+    id            TEXT PRIMARY KEY,
+    campaign_id   TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    note          TEXT NOT NULL,
+    said_by       TEXT NOT NULL,   -- §11: whose sentence this is. A client is several people
+    said_at       TEXT NOT NULL,   -- and the answer to "do they still hold it" needs a date
+    created_at    REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS context_attributions (
     -- §9.8: "A human can add an attribution note, stored as `stated`." The server records that
     -- a metric and an event overlapped; whether the event MOVED the number is exactly the
@@ -481,6 +513,8 @@ CREATE INDEX IF NOT EXISTS context_scope_idx     ON context_events(scope, scope_
 CREATE UNIQUE INDEX IF NOT EXISTS context_seed_key_idx ON context_events(seed_key)
     WHERE seed_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS attributions_campaign_idx ON context_attributions(campaign_id);
+CREATE INDEX IF NOT EXISTS feedback_notes_campaign_idx ON feedback_notes(campaign_id);
+CREATE INDEX IF NOT EXISTS campaign_notices_idx ON campaign_notices(campaign_id, cleared_at);
 """
 
 
@@ -826,6 +860,13 @@ def normalize_tags(tags, *, has_actual_metrics: bool = False) -> list[dict]:
 
     Duplicate values (case/whitespace-insensitive) are deduped, preferring 'verified' over
     'stated' if both appear for the same value.
+
+    §10.3/§11: a tag may also carry `said_by` and `said_at` — WHO holds this opinion and when
+    they said it. A client is several people with different authority and sometimes different
+    opinions, and a tag with no author cannot be weighed against a contradicting one, traced
+    back to whoever set it, or removed when that person leaves. Optional, because most tags
+    predate the field and a missing author is an honest "nobody recorded one" rather than a
+    reason to refuse the write.
     """
     if tags is None:
         return []
@@ -840,7 +881,7 @@ def normalize_tags(tags, *, has_actual_metrics: bool = False) -> list[dict]:
     out = []
     for t in tags:
         if isinstance(t, str):
-            value, source = t.strip(), "stated"
+            value, source, said_by, said_at = t.strip(), "stated", None, None
         elif isinstance(t, dict):
             raw_value = t.get("value")
             if not isinstance(raw_value, str) or not raw_value.strip():
@@ -850,6 +891,8 @@ def normalize_tags(tags, *, has_actual_metrics: bool = False) -> list[dict]:
                                      valid=VALID_TAG_SOURCES,
                                      synonyms=enums.TAG_SOURCE_SYNONYMS,
                                      allow_none=False)
+            said_by = (t.get("said_by") or "").strip() or None
+            said_at = (t.get("said_at") or "").strip() or None
         else:
             raise ValueError(f"tag must be a string or {{value, source}} object, got {t!r}")
         if not value:
@@ -860,12 +903,18 @@ def normalize_tags(tags, *, has_actual_metrics: bool = False) -> list[dict]:
                 f"metric_type='actual' record on file yet. Add real metrics first "
                 f"(add_metrics/bulk_import_metrics), then update_campaign to mark it verified."
             )
-        out.append({"value": value, "source": source})
+        out.append({"value": value, "source": source,
+                    **({"said_by": said_by} if said_by else {}),
+                    **({"said_at": said_at} if said_at else {})})
 
     deduped: dict[str, dict] = {}
     for entry in out:
         key = entry["value"].lower()
-        if key not in deduped or (deduped[key]["source"] != "verified" and entry["source"] == "verified"):
+        # Later wins on a tie, so re-recording an opinion updates who holds it rather than
+        # keeping the first person's name on somebody else's answer.
+        if (key not in deduped
+                or (deduped[key]["source"] != "verified" and entry["source"] == "verified")
+                or (deduped[key]["source"] == entry["source"])):
             deduped[key] = entry
     return list(deduped.values())
 
@@ -906,7 +955,12 @@ def _parse_stored_tags(raw: Optional[str]) -> list[dict]:
         if isinstance(e, str):
             out.append({"value": e, "source": "stated"})
         elif isinstance(e, dict):
-            out.append({"value": e.get("value", ""), "source": e.get("source", "stated")})
+            # Carried through, not rebuilt from two keys. Reconstructing each tag as exactly
+            # {value, source} silently dropped §10.3's `said_by`/`said_at` on the way back
+            # out — so the author was demanded at the menu, written to the row, and invisible
+            # to every reader, while the response said it had been kept.
+            out.append({**e, "value": e.get("value", ""),
+                        "source": e.get("source", "stated")})
     return out
 
 
@@ -1062,6 +1116,9 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
     # campaign been measured" is what decides whether to go and ask for its numbers, and a
     # campaign carrying only the figure somebody was aiming at has not been measured at all.
     d["has_actual_metrics"] = any(m["metric_type"] == "actual" for m in d["metrics"])
+    # §10.3: the sentences people gave about this record, in their words. The most valuable
+    # content the library holds, and a table nothing reads is where it goes to die.
+    d["feedback_notes"] = feedback_notes(conn, campaign_id)
     d.pop("_overlapping", None)
     # §9.1: whether anything has come back. A concluded campaign whose assets are all
     # `proposed` has never been checked against what actually ran, which is the state the
@@ -1442,6 +1499,66 @@ def delete_campaign(conn, campaign_id: str) -> bool:
     cur = conn.execute("DELETE FROM campaigns WHERE id = ?", (campaign_id,))
     conn.commit()
     return cur.rowcount > 0
+
+
+def record_notice(conn, *, code: str, campaign_id: str, detail: Optional[str] = None) -> str:
+    """Persist a notice against a record (§10.1/D20).
+
+    Re-raising the same condition on the same record updates it rather than stacking: it is
+    the same outstanding job, and a queue that showed it four times would be counting how
+    often somebody looked rather than what is wrong.
+    """
+    nid = _id("notice")
+    conn.execute(
+        "INSERT INTO campaign_notices (id, campaign_id, code, detail, created_at) "
+        "VALUES (?,?,?,?,?) ON CONFLICT(campaign_id, code) DO UPDATE SET "
+        "detail = excluded.detail, cleared_at = NULL",
+        (nid, campaign_id, code, detail, _now()))
+    conn.commit()
+    row = conn.execute("SELECT id FROM campaign_notices WHERE campaign_id = ? AND code = ?",
+                       (campaign_id, code)).fetchone()
+    return row["id"]
+
+
+def clear_notice(conn, notice_id: str) -> None:
+    conn.execute("UPDATE campaign_notices SET cleared_at = ? WHERE id = ?",
+                 (_now(), notice_id))
+    conn.commit()
+
+
+def open_notices(conn, campaign_id: str) -> list[dict]:
+    if not _columns(conn, "campaign_notices"):
+        return []
+    return [dict(r) for r in conn.execute(
+        "SELECT id, code, detail, created_at FROM campaign_notices "
+        "WHERE campaign_id = ? AND cleared_at IS NULL ORDER BY created_at, id",
+        (campaign_id,)).fetchall()]
+
+
+def campaigns_with_open_notices(conn) -> set:
+    if not _columns(conn, "campaign_notices"):
+        return set()
+    return {r["campaign_id"] for r in conn.execute(
+        "SELECT DISTINCT campaign_id FROM campaign_notices WHERE cleared_at IS NULL")}
+
+
+def add_feedback_note(conn, *, campaign_id: str, note: str, said_by: str,
+                      said_at: str) -> str:
+    nid = _id("note")
+    conn.execute("INSERT INTO feedback_notes (id, campaign_id, note, said_by, said_at, "
+                 "created_at) VALUES (?,?,?,?,?,?)",
+                 (nid, campaign_id, note, said_by, said_at, _now()))
+    conn.commit()
+    return nid
+
+
+def feedback_notes(conn, campaign_id: str) -> list[dict]:
+    """What people have said about this campaign in their own words (§10.3), oldest first."""
+    if not _columns(conn, "feedback_notes"):
+        return []
+    return [dict(r) for r in conn.execute(
+        "SELECT id, note, said_by, said_at FROM feedback_notes WHERE campaign_id = ? "
+        "ORDER BY created_at, id", (campaign_id,)).fetchall()]
 
 
 def link_evaluation(conn, evaluation_id: str, campaign_id: str) -> None:
@@ -3177,6 +3294,13 @@ def citations(conn) -> list[list[str]]:
             continue
         out.append([c for c in cited if isinstance(c, str)])
     return out
+
+
+def evaluations_for(conn, campaign_id: str) -> list[dict]:
+    """Every judgment recorded about this record (§10.1)."""
+    return [dict(r) for r in conn.execute(
+        "SELECT id, verdict, created_at FROM evaluations WHERE campaign_id = ? "
+        "ORDER BY created_at", (campaign_id,)).fetchall()]
 
 
 def list_evaluations(conn) -> list[dict]:
