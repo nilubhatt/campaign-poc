@@ -82,8 +82,19 @@ _MONEY_RE = re.compile(
 # A money figure is not a budget. A retail price, a ticket price and "$0 spend on paid" are
 # all money and none of them is the thing the review means by "budget detected". The figure
 # has to sit near a word that says it is one.
+# D94: the languages this library's markets actually use. The amount itself is
+# language-neutral — `_MONEY_RE` finds "45.000 EUR" perfectly well — so the ENGLISH WORD was
+# the whole of what made this check English-only, and `Presupuesto: 45.000 EUR` was reported
+# as no budget at all. The file already carries stopwords for five languages, so the shape
+# was established; this is the same list for the word that matters.
 _BUDGET_WORDS = re.compile(
-    r"\b(?:budget|spend|investment|fee|cost|funding|media\s+spend|working\s+media)\b",
+    r"\b(?:budget|spend|investment|fee|cost|funding|media\s+spend|working\s+media"
+    # es / pt
+    r"|presupuesto|inversi[oó]n|gasto|coste|costo|or[cç]amento|investimento|verba"
+    # fr
+    r"|budget|co[uû]t|investissement|d[eé]penses?"
+    # id / ms
+    r"|anggaran|biaya|belanja)\b",
     re.IGNORECASE)
 _BUDGET_WINDOW = 60
 
@@ -402,6 +413,119 @@ def _channels(text: str) -> dict:
                  checklist=list(_CHANNELS))
 
 
+# D94: the commonest words in the languages this library's markets actually use. Stopwords,
+# because content words are the ones a marketing deck borrows from English — "brief",
+# "engagement", "launch" and every channel name appear untranslated in a Spanish deck, so
+# matching on those would report English for half of LATAM.
+_STOPWORDS_BY_LANGUAGE = {
+    "en": {"the", "and", "for", "with", "this", "that", "from", "will", "have", "are",
+           "our", "their", "over", "into", "each", "than", "been", "were"},
+    "es": {"de", "la", "el", "en", "los", "las", "una", "por", "con", "para", "del", "que",
+           "se", "su", "al", "lo", "como", "más", "pero", "sus"},
+    "pt": {"de", "da", "do", "em", "os", "as", "uma", "por", "com", "para", "que", "se",
+           "sua", "ao", "mais", "mas", "seus", "nas", "nos", "pelo"},
+    "fr": {"le", "la", "les", "des", "une", "pour", "avec", "dans", "que", "sur", "pas",
+           "par", "plus", "sont", "ont", "leur", "aux", "ce"},
+    "id": {"yang", "dan", "untuk", "dengan", "dari", "ini", "itu", "akan", "pada", "ke",
+           "di", "adalah", "atau", "juga", "tidak", "sudah"},
+}
+
+# Below this many words there is no sample to judge, and guessing would suppress the checks on
+# an English brief — reporting `unchecked` where the answer was sitting in the text, which is
+# the same defect pointing the other way.
+_ENOUGH_TO_TELL = 12
+
+# How far ahead of English another language has to be before the checks stand down. A deck is
+# a mix — a Spanish brief carries English channel names, an English one carries a market name
+# — so a narrow lead is not a language, it is noise.
+_CLEARLY_AHEAD = 2
+
+
+def language_of(text: Optional[str]) -> dict:
+    """Which language this reads as, and whether the English-only checks apply (D94).
+
+    A HEURISTIC and it says so. This is stopword counting, not a language model, and a
+    confident `language: es` would be a computed-looking claim resting on counting little
+    words — which is the kind of claim this whole product exists to stop making. D61 settled
+    the vocabulary: a threshold deciding something is `heuristic`, never `judged`.
+
+    When it cannot tell, the checks RUN. They are English-only, so an unknown sample is more
+    likely English than not, and a false `unchecked` hides a real finding — which is worse
+    than the alternative, because a finding nobody sees cannot be argued with either.
+    """
+    words = [w for w in re.findall(r"[^\W\d_]+", (text or "").lower()) if len(w) > 1]
+    if len(words) < _ENOUGH_TO_TELL:
+        # Too little to judge — and `reads_as_english` is TRUE here, deliberately. This
+        # product's users write English; a six-word snippet with no budget in it genuinely has
+        # no budget, and reporting that as `unchecked` would turn every short brief into a
+        # shrug. The suppression is for POSITIVE evidence of another language, or for enough
+        # text to expect English words and none appearing — not for the absence of a sample.
+        return {
+            "code": "language", "status": "checked",
+            "language": "unknown", "checks_apply": True, "reads_as_english": True,
+            "basis": "heuristic",
+            "evidence": [], "counts": {}, "what_it_means": (
+                "Too little text to tell what language this is, so the checks ran and their "
+                "results are reported as they stand. A sample this short is more likely "
+                "English than not, and a false “could not check” on every short brief "
+                "would hide findings that were there."),
+        }
+    counts = {code: sum(1 for w in words if w in stop)
+              for code, stop in _STOPWORDS_BY_LANGUAGE.items()}
+    english = counts.get("en", 0)
+    best = max((c for code, c in counts.items() if code != "en"), default=0)
+    winner = next((code for code, c in counts.items() if c == best and code != "en"), None)
+    if best >= max(_CLEARLY_AHEAD, english * _CLEARLY_AHEAD) and winner:
+        return {
+            "code": "language", "status": "checked",
+            "language": winner, "checks_apply": False, "reads_as_english": False,
+            "basis": "heuristic",
+            "evidence": [], "counts": counts, "what_it_means": (
+                f"This reads as {winner!r} rather than English — {best} common {winner} words "
+                f"against {english} English ones. The mechanical checks only read English, so "
+                f"they did NOT run: what they would have reported as absent is unchecked, "
+                f"which is a different thing. Read the brief yourself for the facts they "
+                f"would have established."),
+        }
+    if not english:
+        # No English words in a text long enough to have some. That is evidence AGAINST
+        # English, not evidence for it — and falling through to "en" here is how Vietnamese
+        # and Thai, the SEA markets D94 names explicitly, were read as English and told their
+        # decks carried no budget. There is no stopword list for them and there does not need
+        # to be: the absence of English is the whole of what this has to establish.
+        return {
+            "code": "language", "status": "checked", "evidence": [],
+            "language": "unknown", "checks_apply": True, "reads_as_english": False,
+            "basis": "heuristic", "counts": counts,
+            "what_it_means": (
+                "No common English words appear in this brief, and none of the other "
+                "languages this recognises is clearly ahead either — so it is probably not "
+                "English and this cannot say what it is. Anything the checks FOUND is still "
+                "reported; anything they did not is reported as unchecked rather than as a "
+                "finding that the brief lacks it."),
+        }
+    return {
+        "code": "language", "status": "checked", "evidence": [],
+        "language": "en", "checks_apply": True, "reads_as_english": True,
+        "basis": "heuristic", "counts": counts,
+        "what_it_means": "This reads as English, so the mechanical checks ran normally.",
+    }
+
+
+def _unchecked(code: str, language: dict) -> dict:
+    """A check that did not run, said as itself (D94).
+
+    `absent` on a Spanish brief is "we could not look" wearing "we looked and found nothing",
+    with the server's authority attached — and §9.6 spent a whole round on exactly that
+    distinction. `Presupuesto: 45.000 €` is a budget, and the library was telling marketers
+    their decks had none.
+    """
+    return _fact(code, "unchecked", (
+        f"Not checked: this brief does not appear to be in English "
+        f"(reads as {language['language']!r}), and this check only reads English. That is "
+        f"NOT a finding that the brief lacks it — read the brief for this fact."))
+
+
 def compute(text: Optional[str]) -> dict:
     """Every mechanical check, against BODY text only.
 
@@ -410,13 +534,36 @@ def compute(text: Optional[str]) -> dict:
     signature takes the text and not the record.
     """
     text = text or ""
-    return {fact["code"]: fact for fact in (
+    # D94: what language this is, and therefore whether the checks below mean anything. Every
+    # one of them is an English regex, so on a Spanish deck they reported `absent` — "we could
+    # not look" wearing "we looked and found nothing", with the server's authority attached.
+    # `Presupuesto: 45.000 €` is a budget, and the library was telling marketers they had none.
+    language = language_of(text)
+    found = {fact["code"]: fact for fact in (
         _date_coverage(text),
         _date_consistency(text),
         _budget(text),
         _engagement_rate(text),
         _channels(text),
     )}
+    # D94, and the asymmetry is the whole design: **finding something is trustworthy in any
+    # language; finding nothing is only trustworthy if we could read it.**
+    #
+    # The first version suppressed every check on a non-English brief, which was wrong twice
+    # over. It stood down checks whose matchers are language-NEUTRAL — the amount in
+    # "Presupuesto: 45.000 EUR" is found by a currency regex, and the English word beside it
+    # was the whole of what made that check English-only. And it made every check hostage to
+    # a stopword count that misfires on bullet decks, which have almost no stopwords and are
+    # the commonest deck shape there is: two market names ("Los Angeles", "Las Vegas")
+    # outvoted zero English words and silenced a perfectly readable English brief.
+    #
+    # Under this rule a wrong guess costs at most a real `absent` reading `unchecked` —
+    # conservative, and never the other way, which is the direction that invents findings.
+    if not language["reads_as_english"]:
+        for code, fact in found.items():
+            if fact["status"] in ("absent", "nothing_to_check"):
+                found[code] = _unchecked(code, language)
+    return {"language": language, **found}
 
 
 def for_campaign(conn, campaign_id: str) -> dict:

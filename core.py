@@ -31,6 +31,7 @@ import embedding
 import enums
 import extract
 import facts
+import identity
 import feedback
 import images
 import learning
@@ -197,6 +198,13 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         # project has now hit three times.
         starts_on=starts_on, ends_on=ends_on,
     )
+
+    # §11.5, at the door most people arrive by. A tag may carry `said_by`, and `upload_campaign`
+    # accepts one — but only `update_campaign` walked them, so an opinion recorded at UPLOAD
+    # sat on the campaign and was absent from the table that is supposed to be the authority
+    # on opinions. Reading the stored list rather than the argument, for the same reason as
+    # there: what was stored is the normalised form, and the raw one disagrees with it.
+    _keep_the_view(conn, cid, store.get_campaign(conn, cid).get("tags"))
 
     # Images embedded IN the deck, extracted and processed automatically — a separate
     # manual upload_image_asset call per image isn't a workflow anyone would actually use
@@ -1633,6 +1641,49 @@ _SAID_IT_WAS_CONFOUNDED = ("confounded", "confounding", "not clean evidence",
                            "context event", "caveat")
 
 
+# §11.5's equivalent of `_SAID_IT_WAS_CONFOUNDED`. A verdict that names the split has said
+# what there was to say.
+_SAID_IT_WAS_CONTESTED = ("disagree", "disagreed", "disagreement", "contested", "split",
+                          "divided", "two views", "both views", "not unanimous",
+                          "one of them", "mixed view")
+
+
+def _contested_silence(conn, cited_ids, written: str) -> dict:
+    """Which cited campaigns people disagreed about that the verdict never mentions (§11.5).
+
+    Byte for byte the shape of `_confounded_silence`, and for the reason review named: §9.8
+    built a CHECK that reads what the model actually wrote, and §11.5 built only a sentence in
+    a note carrying fifteen other instructions. This product has twice learned that an
+    instruction in a payload gets dropped — so a judgment citing a two-to-one split as though
+    it were unanimous produced no finding, no flag, nothing, which is the exact loss §11.5
+    exists to prevent and undetectable from the outside.
+
+    The finding is the SILENCE, not the split: a verdict that says the precedent was contested
+    is doing the right thing, and raising one anyway is the wallpaper that teaches a reader to
+    skip server findings.
+    """
+    said = context._plain(written)
+    if any(context._plain(phrase) in said for phrase in _SAID_IT_WAS_CONTESTED):
+        return {"status": "absent", "basis": "computed", "unaddressed": [],
+                "what_it_means": "The verdict says the evidence it rests on was contested."}
+    unaddressed = []
+    for cid in list(dict.fromkeys(cited_ids or [])):
+        record = store.get_campaign(conn, cid)
+        if record and record.get("disagreement"):
+            unaddressed.append(record["title"])
+    if not unaddressed:
+        return {"status": "absent", "basis": "computed", "unaddressed": [],
+                "what_it_means": "Nothing this verdict cites was disagreed about."}
+    return {
+        "status": "present", "basis": "computed", "unaddressed": unaddressed,
+        "what_it_means": (
+            f"This verdict rests on {', '.join(unaddressed)}, which two people recorded "
+            f"different views about, and does not say so. A contested precedent is stronger "
+            f"evidence about this client's taste than an uncontested one — and quoting it as "
+            f"though everybody agreed throws that away."),
+    }
+
+
 def _confounded_silence(conn, cited_ids, written: str) -> dict:
     """Which cited campaigns' confounded outcomes the verdict never mentions (§9.8).
 
@@ -2633,6 +2684,11 @@ _COMPUTED_FINDINGS = {
     # item's whole confounding rule exists to avoid.
     "confounded_evidence": ("unaddressed", "should_fix",
                             "The verdict rests on an outcome that is not clean evidence"),
+    # §11.5, the same machinery for the same reason: the sentence in the note is an
+    # instruction, and this is the check. `should_fix` — a contested precedent is weaker
+    # support, not a reason the brief cannot proceed.
+    "contested_precedent": ("unaddressed", "should_fix",
+                            "The verdict rests on a precedent people disagreed about"),
 }
 
 
@@ -2668,6 +2724,11 @@ def _computed_findings(subject_text: Optional[str], computed: Optional[dict]) ->
                 continue
             headline = (f"The verdict rests on {', '.join(fact['unaddressed'])}, whose result "
                         f"is confounded, without saying so")
+        elif code == "contested_precedent":
+            if fact.get("status") != "present" or not fact.get("unaddressed"):
+                continue
+            headline = (f"The verdict rests on {', '.join(fact['unaddressed'])}, which two "
+                        f"people recorded different views about, without saying so")
         elif code == "calendar_clash":
             # A clash is not a finding; the SILENCE is. "Mexico's own deck flagged that it
             # clashed with the World Cup and then never addressed it" — a plan that names what
@@ -2969,10 +3030,12 @@ def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
     # §9.8's half of the same machinery: does the verdict lean on a confounded outcome and
     # never mention it? Computed over what the model actually WROTE, which is the only place
     # the silence can be seen.
-    established["confounded_evidence"] = _confounded_silence(
-        conn, cited_ids, " ".join(filter(None, [summary, approve_if] + [
-            " ".join(str(f.get(k) or "") for k in ("finding", "detail", "fix"))
-            for f in (findings or [])])))
+    written = " ".join(filter(None, [summary, approve_if] + [
+        " ".join(str(f.get(k) or "") for k in ("finding", "detail", "fix"))
+        for f in (findings or [])]))
+    established["confounded_evidence"] = _confounded_silence(conn, cited_ids, written)
+    # §11.5's half, on the same written text and for the same reason.
+    established["contested_precedent"] = _contested_silence(conn, cited_ids, written)
     cleaned += _computed_findings(subject_text, established or None)
     # Counted AFTER the server's own findings join the list — counting before it meant the
     # one figure that says which half of the output is the model's did not include the other
@@ -3501,15 +3564,33 @@ def _fields_never_recorded(conn, campaigns: list) -> list:
             statuses = [c.get(field, {}).get("status") for c in computed]
             # "not_applicable" is not a miss — a brief with no creators is not missing their
             # engagement rates, and counting it would make the gap unclosable.
-            relevant = [s for s in statuses if s != "not_applicable"]
+            #
+            # D94: neither is "unchecked", and for a sharper reason. It is not evidence the
+            # field is absent, so it cannot support the claim; and it is not evidence the
+            # field is present, so it must not REFUTE the claim either. Left in, one
+            # non-English deck falsified the `all()` and the whole gap disappeared — the
+            # customer had been told about it for weeks, uploaded one Spanish deck, and the
+            # product stopped saying it with nothing to explain why. That is this phase's own
+            # defect with the sign flipped: an unknown must not be reported as a finding, and
+            # it must not silently cancel one that is real.
+            unreadable = sum(1 for s in statuses if s == "unchecked")
+            relevant = [s for s in statuses
+                        if s not in ("not_applicable", "unchecked")]
             if relevant and all(s == "absent" for s in relevant):
                 found.append({
                     "code": "field_never_recorded",
                     "field": field,
                     "market": market,
                     "campaigns": len(relevant),
-                    "what": f"No campaign in {market} has ever recorded a {field.replace('_', ' ')} "
-                            f"({len(relevant)} record(s) checked, all missing it).",
+                    # Said, not hidden: the count is a claim about the records this library
+                    # could READ, and a reader who is not told that will take it for a claim
+                    # about the market.
+                    "unreadable": unreadable,
+                    "what": f"No campaign in {market} has ever recorded a "
+                            f"{field.replace('_', ' ')} "
+                            f"({len(relevant)} record(s) checked, all missing it"
+                            + (f"; {unreadable} more could not be read — not in English"
+                               if unreadable else "") + ").",
                     "why_it_matters": "A field missing from every record in a market is a gap "
                                       "no single upload reveals — every judgment there is "
                                       "made without it and nothing says so.",
@@ -3706,6 +3787,12 @@ def answers(conn, *, said_by: Optional[str] = None) -> dict:
             # The overrides that matter most are the ones that made the product say LESS.
             "silences": row["answer"] in ("not_applicable", "deliberate", "misread"),
         }
+        # §11.1: the account beside the name. `answers` is the surface built to review
+        # overrides, so it is the surface where "who was actually at the keyboard" belongs.
+        who = store.authorship_for(conn, "answer", row["subject_key"])
+        entry["captured_by"] = (who or {}).get("captured_by") or {
+            "method": "unattributed", "source": "stated",
+            "what_it_means": "Recorded before this library kept the account."}
         if row["subject_kind"] == "finding":
             entry["evaluation_id"] = row["evaluation_id"]
             entry["finding_id"] = row["subject_key"]
@@ -3743,6 +3830,75 @@ def _what_the_answer_was_about(conn, row: dict) -> str:
     return row["subject_key"]
 
 
+def backfill_author_unknown(conn) -> dict:
+    """Stamp records stored before this library read commentary, with the date (§11.6).
+
+    What it stamps is a fact about US: "this record predates commentary extraction, so the
+    file may well have said who wrote it and nobody looked." Reporting that as the document's
+    silence would blame a customer's deck for a gap in what this product captured.
+
+    It never touches a name. A record whose commentary WAS read carries real people, and
+    writing `unknown` over them would destroy the personal data §11.7 has to be able to show
+    and erase, while making the library look as though it had never known.
+
+    Runs once per record. A second stamp is not wrong so much as untrue: it moves the import
+    date onto the day somebody happened to re-run this.
+    """
+    when = store._now_iso()
+    stamped = store.records_without_authorship_backfill(conn)
+    for record in stamped:
+        store.mark_authorship_backfilled(conn, record["id"], when)
+    return {
+        "records": len(stamped), "backfilled_at": when, "basis": "computed",
+        "titles": [r["title"] for r in stamped[:10]],
+        "what_it_means": (
+            f"{len(stamped)} record(s) were stored before this library read commentary at "
+            f"all, and are now marked as such with today's date. Their authorship reads "
+            f"`unknown` because nobody looked — not because the files were silent — and a "
+            f"judgment citing their words is told which of those it is looking at."
+            if stamped else
+            "Every record already says why it can or cannot name an author. Nothing needed "
+            "stamping, which is the answer on a library whose records were all read."),
+    }
+
+
+def record_reaction(conn, *, campaign_id: str, value: str, said_by: str,
+                    role: Optional[str] = None, source: str = "stated") -> dict:
+    """Record one person's view of a campaign, keeping everyone else's (§11.5).
+
+    The write `update_campaign`'s tag list could not be: it REPLACES, so a second opinion
+    erased the first. Both are kept here, and neither is ranked — see `store.disagreement_on`
+    and D10 for why this library refuses to say who is right.
+    """
+    if store.get_campaign(conn, campaign_id) is None:
+        raise ValueError(f"{campaign_id!r} is not a record in this library.")
+    if value not in store.REACTION_AXES:
+        raise ValueError(
+            f"{value!r} is not something this library records a view about. The closed sets "
+            f"are what make two people comparable: {sorted(store.REACTION_AXES)}.")
+    said_by = identity.person(said_by, field="said_by")
+    if source not in identity.AUTHOR_SOURCES:
+        raise ValueError(f"`source` must be one of {list(identity.AUTHOR_SOURCES)}.")
+    said_at = store._now_iso()
+    store.record_reaction(conn, campaign_id=campaign_id, value=value, said_by=said_by,
+                          source=source, said_at=said_at, role=role)
+    store.record_authorship(conn, subject_kind="reaction", subject_key=campaign_id,
+                            on_behalf_of=said_by, role=role)
+    split = store.disagreement_on(conn, campaign_id)
+    return {
+        "campaign_id": campaign_id, "value": value, "said_by": said_by, "said_at": said_at,
+        "source": source, "basis": "stated", "status": "recorded",
+        **({"role": role} if role else {}),
+        **({"disagreement": split} if split else {}),
+        "what_it_means": (
+            f"{said_by}'s view is on file. Everything anybody else said is still on file too "
+            f"— this never replaces."
+            + (" They and somebody else have recorded different views, which is worth citing "
+               "as a split rather than as a verdict."
+               if split else "")),
+    }
+
+
 def answer_finding(conn, *, evaluation_id: str, finding_id: str, answer: str, note: str,
                    said_by: str) -> dict:
     """Record what a person says about one finding on a saved judgment (§10.2/D84+D59).
@@ -3771,10 +3927,10 @@ def answer_finding(conn, *, evaluation_id: str, finding_id: str, answer: str, no
             "`note` is required — say why, in the words somebody used. An answer with no "
             "reason is the same non-answer as `unexplained`, except that it stops the "
             "question being asked, which makes it worse than saying nothing.")
-    if not (said_by or "").strip():
-        raise ValueError(
-            "`said_by` is required — whose answer this is. It overrides a stored finding, "
-            "and an unattributed override is a claim nobody can weigh or go back to.")
+    # §11.1/§11.2: `identity.person` is the one guard, so every path that names somebody
+    # refuses the same things. It also refuses the product naming itself, which this check
+    # did not — and this is the field that overrides a stored judgment.
+    said_by = identity.person(said_by, field="said_by")
     judgment = store.get_evaluation(conn, evaluation_id)
     if not judgment:
         raise ValueError(f"{evaluation_id!r} is not a judgment on file")
@@ -3788,6 +3944,8 @@ def answer_finding(conn, *, evaluation_id: str, finding_id: str, answer: str, no
     store.record_answer(conn, subject_kind="finding", subject_key=finding_id,
                         evaluation_id=evaluation_id, answer=answer, note=note.strip(),
                         said_by=said_by.strip())
+    store.record_authorship(conn, subject_kind="answer", subject_key=finding_id,
+                            on_behalf_of=said_by)
     return {
         "status": "settled",
         "evaluation_id": evaluation_id,
@@ -3822,8 +3980,7 @@ def answer_gap(conn, *, code: str, answer: str, note: str, said_by: str) -> dict
         raise ValueError(
             "`note` is required — say why this gap is not going to close, or when it will. "
             "A gap set aside with no reason is one nobody can reopen intelligently.")
-    if not (said_by or "").strip():
-        raise ValueError("`said_by` is required — whose call this is.")
+    said_by = identity.person(said_by, field="said_by")
     # Against the gaps this library ACTUALLY has, not against the registry of codes. A
     # silent no-op for a gap nobody is reporting reads as done and is not — and `_GAP_RANK`
     # would happily accept `no_window` for a library where every record has dates.
@@ -3851,6 +4008,8 @@ def answer_gap(conn, *, code: str, answer: str, note: str, said_by: str) -> dict
 
     store.record_answer(conn, subject_kind="gap", subject_key=code, answer=answer,
                         note=note.strip(), said_by=said_by.strip())
+    store.record_authorship(conn, subject_kind="answer", subject_key=code,
+                            on_behalf_of=said_by)
     return {
         "status": "recorded", "code": code, "answer": answer, "note": note.strip(),
         "said_by": said_by.strip(), "basis": "stated",
@@ -3864,6 +4023,27 @@ def answer_gap(conn, *, code: str, answer: str, note: str, said_by: str) -> dict
             "open": "Back in the ranking, as though nothing had been said.",
         }[answer],
     }
+
+
+def authorship_backfill_offer(conn) -> list[dict]:
+    """Offer the §11.6 stamp when records actually need it.
+
+    The moment is a library holding records from before commentary extraction: their search
+    hits say `unknown` for a reason nobody has recorded, so a reader cannot tell "the file was
+    silent" from "we never looked". Silent otherwise — a library whose records were all read
+    has nothing to stamp, and offering it anyway is the footer this product keeps refusing.
+    """
+    waiting = store.records_without_authorship_backfill(conn)
+    if not waiting:
+        return []
+    return [actions.action(
+        f"Record that {len(waiting)} older record(s) predate commentary extraction",
+        "backfill_author_unknown",
+        why=f"{len(waiting)} record(s) were stored before this library read commentary, so "
+            f"their authorship reads `unknown` with nothing saying whether the file was "
+            f"silent or nobody looked. A judgment citing their words cannot tell a client's "
+            f"objection from the deck talking to itself.",
+        consent="do")]
 
 
 def stale_answers_offer(conn) -> list[dict]:
@@ -5354,7 +5534,8 @@ def readiness(conn) -> dict:
     waiting = feedback.waiting(conn)
     set_aside = _ranked_gaps(conn).get("set_aside") or []
     offers = actions.trim(actions.offer_the_queue(waiting) + gaps_offer(conn)
-                          + stale_answers_offer(conn))
+                          + stale_answers_offer(conn)
+                          + authorship_backfill_offer(conn))
     return {
         "stage": stage,
         "campaigns": len(campaigns),
@@ -5773,8 +5954,16 @@ def _matched_source(matched: Optional[dict]) -> dict:
     if not raw:
         return {}
     source = _json.loads(raw) if isinstance(raw, str) else raw
+    # §11.6: never a bare null. `matched_author: null` is what a judgment actually sees, and
+    # it reads as "nobody" for four different situations — a format that carries no author, a
+    # person who withheld one, a record nobody looked at, and text that is not a comment at
+    # all. §2.5's distinction between the deck talking to itself and a client objecting is
+    # exactly what the null erased.
+    said = store.author_of(source)
     return {"matched_anchor": source.get("anchor"),
-            "matched_author": source.get("author"),
+            "matched_author": said["author"],
+            **({"matched_author_why": said["why"]} if said.get("why") else {}),
+            **({"matched_author_means": said["what_it_means"]} if said.get("why") else {}),
             "matched_date": source.get("date"),
             "matched_commentary_kind": source.get("kind")}
 
@@ -5946,6 +6135,11 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
             # read. §9.8 changes what this key CONTAINS rather than having to establish, across
             # four call sites, that it exists.
             "context": _context_note(conn, c["id"]),
+            # §11.5, on the same principle: the caveat travels with the citation. A judgment
+            # weighing this precedent needs to know it was contested — told only "liked", it
+            # cites a two-to-one split as though it were unanimous, which is the whole of what
+            # append-only reactions are for.
+            **({"disagreement": c["disagreement"]} if c.get("disagreement") else {}),
         })
     return evidence
 
@@ -6098,6 +6292,48 @@ def _confounded_note(conn, campaign_id: str) -> dict:
                               for e in actual[0]["confounded_by"]]}
 
 
+def _say_the_language(computed: dict) -> str:
+    """Tell the model the checks did not run, and why (D94).
+
+    §7.1's own instruction is that the model treat computed facts as established and not
+    re-derive them. Handed five `unchecked` with no sentence, it does exactly what it did
+    before the language signal existed — reports the brief as missing a budget — which is the
+    finding this exists to stop, arriving through the instruction meant to prevent it.
+    """
+    language = computed.get("language") or {}
+    if language.get("checks_apply", True):
+        return ""
+    return (f"THE MECHANICAL CHECKS DID NOT RUN: this brief is not in English (it reads as "
+            f"{language.get('language')!r}) and every one of them is an English pattern. "
+            f"They are reported as `unchecked`, which is NOT a finding that the brief lacks "
+            f"anything — do not say it has no budget, no dates or no channels on that basis. "
+            f"Read the brief yourself for those facts, and say plainly that the automatic "
+            f"checks could not be applied. ")
+
+
+def _say_the_disagreement(evidence: list) -> str:
+    """What the model is told about precedents people disagreed about (§11.5).
+
+    Structure alone does not survive a summary — §7.1's lesson, and the reason every other
+    computed fact in this note has a sentence beside it. A `disagreement` block the model has
+    to infer the significance of is one it flattens into "they liked it", which is the exact
+    loss this item exists to prevent.
+
+    Silent when there are none, for §9.5's reason: a standing paragraph about disagreement on
+    a library with none is the note that fires on everything and is read on nothing.
+    """
+    split = [e for e in evidence if e.get("disagreement")]
+    if not split:
+        return ""
+    return (f"{len(split)} of these campaigns are ones people DISAGREED about, and both views "
+            f"are on file. Cite the split, not a side: a campaign two people saw differently "
+            f"is stronger evidence about this client's taste than one everybody liked, and "
+            f"quoting it as unanimous throws that away. This library will not tell you who "
+            f"was right — authority order is configured in the rulebook and nothing is "
+            f"configured yet, so preferring the later view or the grander job title would be "
+            f"authority nobody granted it. ")
+
+
 def _say_the_confounded(evidence: list) -> str:
     """What the model is told about outcomes that ran through something (§9.8).
 
@@ -6223,6 +6459,18 @@ def update_campaign(conn, campaign_id: str, **fields) -> dict:
     """
     if not store.update_campaign(conn, campaign_id, **fields):
         return {"error": f"campaign {campaign_id} not found"}
+    # §11.5: a tag carrying a person's name IS an opinion, however it arrived. Without this
+    # the table would hold only what came through the menu, and `update_campaign` — which the
+    # docstring itself calls the way to upgrade a tag's provenance — would be a second door
+    # into the same fact, with the library losing every view that came through it.
+    # What was STORED, not what the caller sent. The two differ on exactly the fields this
+    # walk gates on: `" liked "` is stored as `liked` and was skipped here as not a reaction
+    # axis, and `"client stated"` is stored as `stated` and was copied in raw — the campaign
+    # and the append-only record disagreeing about one opinion, which is the split this walk
+    # exists to prevent. Gated on the caller having SENT tags, because tags replace: reading
+    # the stored list on a title-only edit would re-walk opinions this call never touched.
+    if fields.get("tags") is not None:
+        _keep_the_view(conn, campaign_id, store.get_campaign(conn, campaign_id).get("tags"))
     reindexed = _reindex_if_content_changed(conn, campaign_id, fields)
     record = store.get_campaign(conn, campaign_id)
     earlier_judgment = _judgment_to_check(conn, fields.get("supersedes") or None)
@@ -6282,6 +6530,58 @@ def _settle_indexing_notice(conn, campaign_id: str) -> None:
     for notice_row in store.open_notices(conn, campaign_id):
         if notice_row["code"] == "chunk_not_embedded":
             store.clear_notice(conn, notice_row["id"])
+
+
+def _keep_the_view(conn, campaign_id: str, tags) -> None:
+    """Append any opinion carried in a tag list to the append-only record (§11.5).
+
+    Only tags that name somebody: a `liked` with no `said_by` is the library's own bookkeeping
+    or an import, and filing it as a person's view would put an opinion on the record with
+    nobody's name against it — which is the one thing `reactions` exists to prevent.
+    """
+    # Read, never re-validated. `store.update_campaign` normalises these with the record's own
+    # `has_actual_metrics` in hand; calling `normalize_tags` again here without it re-ran the
+    # `verified` gate blind and refused a tag the write had just accepted — a second copy of a
+    # rule, disagreeing with the first because it was given less to work with.
+    for tag in (tags if isinstance(tags, list) else [tags]) if tags is not None else []:
+        if not isinstance(tag, dict):
+            continue
+        who = (tag.get("said_by") or "").strip()
+        if not who or tag.get("value") not in store.REACTION_AXES:
+            continue
+        # §11.2 is NOT re-checked here. It used to be — as a `try`/`except ValueError` that
+        # skipped the tag — and mutation proved the branch could not be reached: deleting the
+        # guard changed nothing any test could see. That was the tell. `store.update_campaign`
+        # has already run these same tags through `normalize_tags`, which refuses a `said_by`
+        # that does not name a person and fails the whole write, so anything arriving here has
+        # passed the rule. Re-running it was a second copy of one rule, and the skip made this
+        # path DISAGREE with the stored record rather than agree with it: the tag was written
+        # and the opinion was dropped.
+        # Not a second copy of a view already on file. `store.update_campaign` REPLACES tags,
+        # so every caller re-sends the ones it is keeping — and each re-send appended the same
+        # opinion again, marking the copy as a revision of itself. A phantom disagreement with
+        # nobody on the other side of it.
+        # A STATED time makes this a particular occasion; without one, "again" means nothing.
+        # The dedupe compared `said_at` for exact equality against a stamp taken from the
+        # clock, so a re-send one second later read as R. Vega revising their own view — C95
+        # closed for calls landing inside the same second, which is not what the row claimed.
+        # Tags REPLACE, so any second edit that touches them re-sends them, and §11.5 calls a
+        # revision pair the most informative row this table holds: manufacturing a false one
+        # costs more than the duplicate it was avoiding.
+        said_at = (tag.get("said_at") or "").strip()
+        already = any(
+            v["said_by"] == who and v["value"] == tag["value"]
+            and (v["said_at"] == said_at if said_at else True)
+            for v in store.reactions_for(conn, campaign_id))
+        if already:
+            continue
+        said_at = said_at or store._now_iso()
+        store.record_reaction(conn, campaign_id=campaign_id, value=tag["value"],
+                              source=tag.get("source") or "stated", said_by=who,
+                              said_at=said_at)
+        # §11.1: the account beside the name, on this door too.
+        store.record_authorship(conn, subject_kind="reaction", subject_key=campaign_id,
+                                on_behalf_of=who)
 
 
 def _reindex_if_content_changed(conn, campaign_id: str, fields: dict) -> dict:
@@ -6630,12 +6930,14 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
             "observation naming the code and quoting the evidence, and reason from what you "
             "can see. Do not silently re-derive it, and do not defer to it against the "
             "evidence in front of you. "
+            + _say_the_language(computed)
             + _say_the_expected_measures(expected_now)
             + _say_the_standing_corrections(standing_now)
             + _say_the_execution_drift(evidence)
             + _say_the_context(evidence)
             + _say_the_calendar(computed.get("calendar_clash"))
-            + _say_the_confounded(evidence) +
+            + _say_the_confounded(evidence)
+            + _say_the_disagreement(evidence) +
             "`outcomes` splits this evidence into what WORKED and what did NOT, by measured "
             "result rather than by impression. Read both before deciding: resemblance to a "
             "strong performer is not evidence, and a brief that looks like something that "
@@ -6887,10 +7189,10 @@ def link_evaluation(conn, *, evaluation_id: str, campaign_id: str,
             f"with it. Judge the other record on its own.")
     if store.get_campaign(conn, campaign_id) is None:
         raise ValueError(f"{campaign_id!r} is not a record in this library.")
-    if not (linked_by or "").strip():
-        raise ValueError(
-            "`linked_by` is required: saying that a judgment was about this record is a claim "
-            "a person makes, and one nobody's name is against is one nobody can question.")
+    # §11.1: empty-only, so `linked_by="Claude"` attached a judgment to a record and recorded
+    # that a person had said they were the same thing — on the write that decides what a
+    # judgment was a judgment OF.
+    linked_by = identity.person(linked_by, field="linked_by")
     store.link_evaluation(conn, evaluation_id, campaign_id)
     return {"evaluation_id": evaluation_id, "campaign_id": campaign_id, "status": "linked",
             "basis": "stated", "linked_by": linked_by.strip(),

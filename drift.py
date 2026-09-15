@@ -89,10 +89,13 @@ def classify(conn, *, campaign_id: str, subject: str, classification: str, why: 
             "`why` is required: this is read months later by somebody deciding whether to "
             "repeat the change, and a judgment with no reason cannot be weighed against "
             "anything.")
-    if not (classified_by or "").strip():
-        raise ValueError(
-            "`classified_by` is required: whether a change was good is a judgment a PERSON "
-            "makes, and one nobody's name is against is one nobody can question later.")
+    # §11.2: `identity.person` is the rule. This checked only for an empty string, so
+    # `classified_by="the system"` recorded that a person had judged whether a departure from
+    # the brief was an improvement — which is the library marking its own homework, in the
+    # field §9.4 built to stop exactly that.
+    import identity
+
+    classified_by = identity.person(classified_by, field="classified_by")
 
     # Stamped at the moment of the judgment, not read back later — the point is to record what
     # the person could see when they said it.
@@ -101,6 +104,11 @@ def classify(conn, *, campaign_id: str, subject: str, classification: str, why: 
         conn, campaign_id=campaign_id, subject=subject.strip(), item=about,
         classification=classification, why=why.strip(),
         classified_by=classified_by.strip(), outcome_known=outcome_known)
+    # §11.1: the account beside the name. Judging whether a departure from the brief was an
+    # improvement decides what every later citation of this campaign's results carries.
+    store.record_authorship(conn, subject_kind="drift_classification",
+                            subject_key=f"{campaign_id}:{subject.strip()}",
+                            on_behalf_of=classified_by)
     # §9.5 stores the classified counts beside the outcome, so a judgment changes what a later
     # citation carries — and a snapshot that never sees the classification is the stale half of
     # the same figure.

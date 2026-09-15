@@ -455,6 +455,10 @@ def graduate(conn, correction_id: str, *, confirmed_by: str) -> dict:
     if not gate["eligible"]:
         raise ValueError(gate["what_it_means"])
     store.graduate_correction(conn, correction_id, markets=gate["seen_in"], confirmed_by=who)
+    # §11.1: the account beside the name, on the write that puts a rule in front of every
+    # future brief in its markets.
+    store.record_authorship(conn, subject_kind="correction", subject_key=correction_id,
+                            on_behalf_of=who)
     entry = describe(conn, correction_id)
     return {**entry, "graduated": True,
             "next_actions": actions.after_graduation(what=entry["text"],

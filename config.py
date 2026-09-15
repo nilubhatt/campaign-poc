@@ -180,6 +180,18 @@ VOYAGE_API_KEY = os.getenv("VOYAGE_API_KEY", "")
 VOYAGE_MODEL = os.getenv("CAMPAIGN_POC_VOYAGE_MODEL", "voyage-3.5")
 
 # ── http / auth ──────────────────────────────────────────────────────────────
+# §11.1: who the operator IS, when they care to say. `os_user` is an account — `nbhatt` is
+# not a name a colleague would recognise — and this is the one place a human-readable name
+# can come from without the server inventing it. Absent when unset: a field that sometimes
+# holds a real name and sometimes a title-cased login is a field nobody can read.
+OPERATOR_NAME = os.getenv("CAMPAIGN_POC_OPERATOR_NAME", "").strip()
+
+# Set by `http_app` at start-up. §11.1 needs it because the OS account means something very
+# different on a desktop stdio server (it IS the user) than on a shared HTTP deployment
+# (it is whoever launched the service), and reporting the second as an author files every
+# caller's decisions under one name.
+SERVING_HTTP = False
+
 HTTP_HOST = os.getenv("CAMPAIGN_POC_HOST", "0.0.0.0")
 HTTP_PORT = int(os.getenv("CAMPAIGN_POC_PORT", "8086"))
 PUBLIC_BASE_URL = os.getenv("CAMPAIGN_POC_BASE_URL", f"http://localhost:{HTTP_PORT}").rstrip("/")

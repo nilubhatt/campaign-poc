@@ -17,6 +17,7 @@ from mcp.server.mcpserver import MCPServer
 
 import actions
 import config
+import people
 import commitments
 import context
 import corrections
@@ -214,6 +215,26 @@ class TagObject(TypedDict):
     # instead of a two-branch dump whose first line tells a marketer their object should be
     # a string.
     source: NotRequired[TagSource]  # omitted -> defaults to 'stated'
+    # §11.5: WHOSE view this is. `store.normalize_tags` has carried these since §10.3 and the
+    # schema did not, so pydantic stripped them at the tool boundary — the field the whole
+    # append-only mechanism depends on never arrived over the protocol, and every reaction
+    # recorded this way was anonymous. Found by the stdio probe, green in every unit test,
+    # because the tests call `core.update_campaign` directly and the loss happens one layer
+    # above it.
+    # A person's name, if given at all: `store.normalize_tags` refuses the whole write for
+    # "the team", "someone else" or an initial, because a tag is a surface people READ and an
+    # opinion held by nobody nameable is the state the append-only record exists to prevent.
+    # Omitting it is the honest alternative and is always accepted.
+    said_by: NotRequired[str]
+    said_at: NotRequired[str]
+    # What is LEFT of an attribution this library should never have accepted — a v0.2.0
+    # `said_by` naming "the client" or "the team", which `feedback.record` wrote server-side
+    # past a weaker list. The opinion is kept and is no longer recorded as held by anybody.
+    # In the schema because tags REPLACE: a model that reads a campaign and re-sends its tags
+    # would otherwise have this stripped at the boundary and lose it — which is exactly how
+    # `said_by` itself went missing for a release. Never send it on a new tag; give `said_by`
+    # a person's name instead.
+    said_by_unresolved: NotRequired[str]
 
 TagInput = Union[str, TagObject]
 
@@ -554,12 +575,15 @@ ContextScope = _enum("market", "region", "global")
 @mcp.tool()
 @_catch_value_errors
 def record_context_event(starts_on: str, scope: ContextScope, kind: ContextKind,
-                         description: str, recorded_by: str,
+                         description: str, recorded_by: str, role: Optional[str] = None,
                          ends_on: Optional[str] = None, scope_value: Optional[str] = None,
                          source: Optional[str] = None, delay_days: Optional[int] = None,
                          budget_change_pct: Optional[float] = None,
                          channels_disrupted: Optional[list[str]] = None) -> dict:
     """Put on the record what else was going on in a market (§9.6).
+
+    `recorded_by` is whose account this is — a PERSON, never the product or the model. `role`
+    is their role as stated at the time, optional and never inferred (§11.4).
 
     Conflict, natural disaster, regulatory change, supply-chain or port disruption, platform
     outage, competitor launch, macro shock, or a fixed calendar event — anything that was
@@ -583,7 +607,7 @@ def record_context_event(starts_on: str, scope: ContextScope, kind: ContextKind,
             conn, starts_on=starts_on, ends_on=ends_on, scope=scope, scope_value=scope_value,
             kind=kind, description=description, source=source, delay_days=delay_days,
             budget_change_pct=budget_change_pct, channels_disrupted=channels_disrupted,
-            recorded_by=recorded_by)
+            recorded_by=recorded_by, role=role)
     finally:
         conn.close()
 
@@ -1596,10 +1620,22 @@ def feedback_choose(menu_token: str, choice: int) -> dict:
 
 @mcp.tool()
 @_catch_value_errors
-def feedback_record(menu_token: str, choice: int, said_by: str,
+def feedback_record(menu_token: str, choice: int, said_by: str, role: Optional[str] = None,
                     reaction: Optional[int] = None, performance: Optional[int] = None,
                     note: Optional[str] = None) -> dict:
     """Write down what the user said (§10.3).
+
+    **`said_by` is WHOSE VIEW it is, not who is typing (§11.3).** The account at the keyboard
+    is recorded automatically and separately — that is a different fact and the server already
+    knows it. If the user is relaying a colleague's or a client's opinion, name that person;
+    do not put the operator's name on somebody else's view because they are the one talking
+    to you. Two years on, whether the person who held a view is the person who entered it is
+    the thing nobody can reconstruct, and it is the difference between evidence and hearsay.
+
+    `role` is that person's role AS THEY STATE IT NOW — "Regional planner, LATAM". Optional,
+    and never inferred: a role looked up later is the role they hold TODAY, so a planner who
+    becomes head of strategy would retroactively have made every past decision as head of
+    strategy, and the record would gain authority nobody granted it.
 
     `choice` is the number the user pressed — the same one you passed to `feedback_choose` —
     and the server resolves it against that menu. There is deliberately no `campaign_id`
@@ -1621,7 +1657,7 @@ def feedback_record(menu_token: str, choice: int, said_by: str,
     try:
         return feedback.record(conn, menu_token=menu_token, choice=choice,
                                said_by=said_by, reaction=reaction, performance=performance,
-                               note=note)
+                               note=note, role=role)
     finally:
         conn.close()
 
@@ -1747,6 +1783,119 @@ def answer_finding(evaluation_id: str, finding_id: str, answer: FindingAnswer, n
     try:
         return core.answer_finding(conn, evaluation_id=evaluation_id, finding_id=finding_id,
                                    answer=answer, note=note, said_by=said_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def person_on_file(name: str) -> dict:
+    """Everything this library holds about one person (§11.7).
+
+    Call it when somebody asks what is stored about them, before erasing anybody, or when the
+    user asks what personal data this product keeps. Each mention says what it IS — a view
+    they recorded, a comment they left on a deck — because that is what somebody is deciding
+    whether to have erased.
+
+    A name is not an identifier: matching is case- and spacing-insensitive, and an empty
+    result means nothing is on file under THAT SPELLING. Say so plainly rather than reporting
+    it as "we hold nothing about you", which is a different and stronger claim.
+
+    Free-text notes and reasons are NOT searched. Those are somebody's own sentences and may
+    mention anyone; this covers every field the product puts a name in, which is what it can
+    promise to find and to erase."""
+    conn = store.connect()
+    try:
+        return people.on_file(conn, name)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def pseudonymise_person(name: str, why: str, said_by: str) -> dict:
+    """Replace one person's name everywhere with a stable token (§11.7).
+
+    Ask before calling this, always, and show `person_on_file` first — it rewrites records
+    that saved judgments rest on, and this product cannot turn it back.
+
+    **Say what it is, if somebody asks whether their name has been deleted.** The token is
+    derived from the name, so somebody holding this database AND a list of candidate names
+    could confirm a match. That makes it PSEUDONYMISATION, not anonymisation, and under GDPR
+    these records remain personal data. Do not tell a data subject their name is gone: tell
+    them it has been replaced by a token this product cannot reverse. For true erasure, delete
+    the campaigns their words are attached to.
+
+    It replaces rather than deletes because deleting would break the judgments. Every mention
+    becomes the same token, so a judgment that cited this person still reads as one person —
+    two findings about them are still about the same someone. A blank would make "two
+    reviewers objected" and "one reviewer objected twice" indistinguishable.
+
+    It refuses a name that is PART of a longer name on file, and says which: erasing "Vega"
+    would otherwise rewrite the deck author "Ana Vega" and file her under this person's token.
+
+    `why` and `said_by` are required and go on a permanent record — without the name, which
+    would defeat the exercise. A record silently rewritten is a record nobody can trust."""
+    conn = store.connect()
+    try:
+        return people.erase(conn, name, why=why, said_by=said_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def correct_person_name(name: str, to: str, why: str, said_by: str) -> dict:
+    """Fix a misspelled name, everywhere it appears (§11.7, GDPR Art. 16).
+
+    Offer this when the user notices a name was entered wrong. Without it the only remedy for
+    a typo was `pseudonymise_person`, which this product cannot undo — so somebody whose name
+    was mistyped had to choose between a wrong record and no record. (Not "irreversible": the
+    token is derived from the name, and that tool says so itself. What is true is that nothing
+    here can turn it back, which is what makes it the wrong remedy for a typo.)
+
+    It refuses to merge two people: if `to` is already somebody on file, folding them together
+    would turn a disagreement between two voices into a single view nobody holds. Correct it
+    to a spelling nobody else uses."""
+    conn = store.connect()
+    try:
+        return people.rename(conn, name, to=to, why=why, said_by=said_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def personal_data_position() -> dict:
+    """What this product holds about people, for how long, and what they can do (§11.7).
+
+    Answer the user from this rather than from memory when they ask about privacy, GDPR,
+    retention, or what is stored about whom. It names the fields HARVESTED from uploaded decks
+    — PDF annotation authors and PowerPoint comment authors — which is the part a customer
+    does not expect, because nobody typed those names into this product.
+
+    It deliberately does not claim a lawful basis: this runs on the customer's machine against
+    their own files, and which basis applies is theirs to decide with their own counsel. What
+    it guarantees is that the data is enumerable and erasable on request."""
+    return people.retention()
+
+
+@mcp.tool()
+@_catch_value_errors
+def backfill_author_unknown() -> dict:
+    """Mark records stored before this library read commentary, with today's date (§11.6).
+
+    Offer it when the user asks why a search hit cannot name an author, or when reviewing what
+    the library knows about who wrote what. Safe to run at any time and it runs once per
+    record: it never touches a name, and a record whose commentary WAS read is left alone.
+
+    What it records is a fact about THIS LIBRARY, not about the customer's files: "we did not
+    look." Without it, a record from before commentary extraction is indistinguishable from
+    one whose deck genuinely said nothing — and a judgment citing "a reviewer objected" cannot
+    tell a client's anonymous comment from the agency's own speaker note."""
+    conn = store.connect()
+    try:
+        return core.backfill_author_unknown(conn)
     finally:
         conn.close()
 

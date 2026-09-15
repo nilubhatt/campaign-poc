@@ -2732,32 +2732,138 @@ with nothing to notice because each half works perfectly alone:
 
 ## Phase 11 — Attribution
 
-- [ ] **11.1 Environment-derived author** — `os_user`, `host`, config display name.
-- [ ] **11.2 Reuse `verified` vs `stated`** for author rather than inventing a vocabulary;
-      add `method` (stdio_local | sso | import).
-- [ ] **11.3 `captured_by` vs `on_behalf_of`** — the field most products miss; asked as one
-      numbered question.
-- [ ] **11.4 Context** — `captured_at`, channel, session id, role **as stated at the time**.
-- [ ] **11.5 Append-only reactions** — keep both sides of a disagreement, surface it in
-      retrieval, authority order configured in the rulebook, never inferred. *Now also
-      covers commentary: 2.5 stores a `kind` (speaker_note / comment / annotation) and makes
-      it filterable, but deliberately does NOT weigh a client's comment above an author's
-      own note — the kind records the format the words arrived in, not their authority (a
-      PDF export turns speaker notes into annotations), and authority order is configured
-      here, never inferred there.*
-- [ ] **11.6 Backfill existing records as `author: unknown`** with import date, explicitly.
-      *Applies to `campaign_chunks.source.author`: a speaker note carries no author field at
-      all and a PDF annotation often has no `/T`, so a null there means "the file did not
-      say", which is a different statement from "nobody said it". Documented in the
-      docstrings by 2.5; the explicit convention is this item's.*
-- [ ] **11.7 Treat it as personal data** — install disclosure, per-person view, deletion or
-      anonymisation preserving the judgment, stated retention position. ***Live obligation
-      as of 2.5:*** *`campaign_chunks.source.author` is the first field in the library
-      holding a person's name harvested from a file rather than typed by the operator — PDF
-      `/T` and PowerPoint comment authors — and it is returned as `matched_author` on search
-      hits and through `get_campaign`. Today it is deletable only by cascade when the
-      campaign is deleted. Per-person view and erasure are owed here, and the names are in
-      scope for the install disclosure.*
+- [x] **11.1 Environment-derived author** — `os_user`, `host`, config display name.
+      Ships with 11.2, because an author the server derives and does not label is exactly the
+      unlabelled claim this product refuses. `identity.captured_by()` never accepts anything:
+      a parameter would make the one fact this server can establish for itself into one more
+      claim it has to take on trust.
+      **The case the item did not foresee, and the one that matters most:** `unattributed`. A
+      shared HTTP deployment with no identity provider would otherwise report the OS account
+      it was STARTED as for every caller, filing nine people's decisions under whoever
+      launched the service.
+- [x] **11.2 Reuse `verified` vs `stated`** for author rather than inventing a vocabulary;
+      add `method` (stdio_local | sso | import). *Closes D35:* `TAG_SOURCE_SYNONYMS` is NOT
+      reused — "measured" is a sentence about a number and meaningless about a person, and a
+      synonym table accepting it would let `source: measured` through on an identity claim.
+      **`method` is what keeps `verified` honest.** `stdio_local` means "the desktop account
+      this runs as" — nobody authenticated, and reporting that as `verified` with nothing
+      beside it would inflate a fact about a process into a fact about a person.
+      *Closes D105:* sweeping for the guard found **five** implementations of "is this a
+      person", two of which checked only for an empty string — so
+      `withdraw_context_event(withdrawn_by="the system")` took an event off the record, and
+      `link_evaluation(linked_by="Claude")` decided what a judgment was a judgment OF. The
+      weakest door was deciding what the library believed about who decided things.
+      A **sixth** door turned up when mutation testing removed the guard from `_keep_the_view`
+      and no test noticed: `store.normalize_tags`, which is what actually decides what a tag
+      STORES, had no check at all. So `said_by: "the team"` was refused from the append-only
+      record and written onto the campaign anyway — `get_campaign` telling every reader the
+      team held an opinion the table built to be the authority on opinions had never heard of.
+      Two implementations of one rule, disagreeing, with the reader-facing one being the
+      wrong half. The guard now sits at the single door both paths pass through and refuses
+      the write naming the tag, and the copy in `_keep_the_view` is DELETED rather than kept
+      as defence in depth: it was unreachable, and a second copy is how this drifts again.
+      **Why the earlier sweeps could not have found it.** They grepped for the marker strings
+      of a duplicate implementation, and a door with NO check leaves no marker. That is now
+      `test_every_write_that_takes_a_name_reaches_the_one_guard`, which walks the AST for
+      every function taking a name-shaped parameter and asserts it reaches `identity.person`.
+      `store.record_authorship` deliberately does not count as the guard: it fires AFTER the
+      row is written, so a caller relying on it raises the right error having already stored
+      the thing — which is what `drift.classify` did, refusing "the system" with the judgment
+      already on file under it.
+      *And the check itself was refusing real people.* `reads_as_the_product` was a substring
+      scan, so "Themba Nkosi" was the library because of "them" — along with Claudette,
+      Automne, Sautoy, Lautoka, Matthey, Serverin and Autolycus. That is not a safe failure:
+      it is a hard block on recording somebody's view, it falls hardest on names that are not
+      Anglo, and the remedy the message offers — give another spelling — does not exist for a
+      person's own name. It strikes the disqualifying words out and asks what is left, which
+      keeps "Claude Monet" a person and "Claude" not one.
+- [x] **11.3 `captured_by` vs `on_behalf_of`** — the field most products miss; asked as one
+      numbered question. They miss it because it only matters later: on the day the note is
+      written everybody knows who was in the room, and two years on the record says a name
+      with nothing to say whether that person held the view or merely typed it.
+      Numbered per §10.3 — the operator is by far the commonest answer and the server already
+      knows their name, so spelling it was the one bit of typing the menu had left. Offered
+      only when a display name is CONFIGURED: `os_user` is an account, and "1 = nbhatt" would
+      make the easy answer the wrong one. `speaking_for_themselves` is computed from the two
+      names, and is `None` rather than `False` where the account has no name to compare —
+      answering "no, somebody else" out of an absence would be a claim made from ignorance.
+- [x] **11.4 Context** — `captured_at`, channel, session id, role **as stated at the time**.
+      The emphasis is the whole point: a role looked up later is the role somebody holds
+      TODAY, so a planner who becomes head of strategy would retroactively have made every
+      past decision as head of strategy, the record silently gaining authority nobody granted
+      it. Stored with `role_basis: "as stated at the time"` beside it, optional, never
+      inferred. Session is per PROCESS, which is what a session is for a stdio server — it
+      makes "eleven decisions in one sitting" distinguishable from "eleven over a month",
+      which is the difference between working a queue and agreeing with everything.
+      *Closes D21:* `scope: machine` can now say whether the current user IS the account it
+      is telling them to go and ask.
+- [x] **11.5 Append-only reactions** — keep both sides of a disagreement, surface it in
+      retrieval, authority order configured in the rulebook, never inferred. *Closes D10.*
+      `update_campaign` REPLACED the tag list, so R. Vega recording `liked` in March and A.
+      Duarte recording `not_liked` in June left only June — not superseded, not outvoted,
+      gone, with nothing saying March was ever there. **That is the most expensive thing this
+      library can lose:** a campaign two people disagreed about is stronger evidence about
+      this client's taste than one everybody liked, and the whole premise here is reasoning
+      from what this client thinks.
+      **It does not decide who wins**, and `disagreement` has no `winner` field at all.
+      Preferring the later view, or the client's, or the grander job title would be authority
+      nobody granted it — and §2.5 refused exactly this once, because a PDF export turns
+      speaker notes into annotations, so even the FORMAT cannot say whose words weigh more.
+      Three distinctions, each with a test for the silence: two PEOPLE rather than two values
+      (one person changing their mind is a revision); per AXIS ("they liked it and it
+      underperformed" is the most ordinary finding in marketing); and agreement is
+      corroboration, not a split.
+- [x] **11.6 Backfill existing records as `author: unknown`** with import date, explicitly.
+      *Closes D13.* A null was saying FOUR things at once, with different consequences for a
+      judgment citing the words: `format_carries_none` (a speaker note has no author field —
+      the agency talking to itself), `file_did_not_say` (a PDF annotation CAN carry `/T` and
+      this one does not — somebody commented anonymously), `not_captured` (stored before this
+      library read commentary; a fact about US, and reporting it as the document's silence
+      would blame the customer's deck for our gap), and `never_claimed` (body text is not a
+      comment). Told `null`, a judgment citing "a reviewer objected" cannot tell a client's
+      objection from the deck's own note — §2.5's distinction, erased at the last step.
+      The backfill never touches a name: overwriting one would destroy the personal data 11.7
+      must be able to show and erase, while making the library look as though it never knew.
+- [x] **11.7 Treat it as personal data** — install disclosure, per-person view, deletion or
+      anonymisation preserving the judgment, stated retention position. *Closes D14, D22, D26,
+      D30 and D111.*
+      **The hard part is "or anonymisation PRESERVING THE JUDGMENT", and both naive readings
+      are wrong.** Delete the rows and a judgment citing "R. Vega objected" cites nothing —
+      the library asserting a finding whose evidence silently vanished. Redact to a blank and
+      "two reviewers objected" becomes indistinguishable from "one reviewer objected twice",
+      which is often the whole finding. So: a stable pseudonym per person, and the erasure
+      itself on a permanent record — without the name, which would defeat it.
+      **"Irreversible" is what this item originally said, and it was not true.** The token is
+      derived from the name, so anybody holding this database and a list of candidate names
+      can confirm a match — Art. 4(5) pseudonymisation, and pseudonymised data is still
+      personal data. A per-database salt defeats the guess for somebody holding the token
+      WITHOUT the database, and nothing more, because the salt lives in the same file. The
+      tool is named `pseudonymise_person` and every user-facing string says so, which is the
+      one claim here it would be worst to get wrong: a data subject told their name is gone.
+      *D111's care:* the swap inside `correction_sightings.provenance` is whole-word, because
+      replacing "R. Vega, client email, 4 March" wholesale would remove WHEN and WHERE a
+      client said something — weakening a standing rule's evidence to remove a name, which
+      D111 says explicitly must not happen silently.
+      *D22:* a filesystem path does not look like personal data until you notice that on two
+      of three platforms it carries somebody's login — in `detail`, the field this product
+      explicitly tells people to send to support. The filename survives; the login does not.
+      *D26/D30:* the disclosure is GENERATED from `retention()`, because a disclosure
+      maintained separately is the copy that drifts — and here the drift is between what a
+      customer agreed to and what the product does.
+      **The worst sentence this product can produce, and it produced it.** `_scan` folded a
+      name to NFC and found it; `_swap` then matched that folded pattern against the RAW
+      stored bytes, so a macOS-decomposed "José" was found and not replaced — and the skip was
+      never counted, so `status: pseudonymised` came back with a paragraph telling a data
+      subject their name was gone. There was no partial-failure state at all. Both halves are
+      fixed: the haystack is normalised too, and an erasure that leaves any row it FOUND
+      unchanged rolls back and refuses. The guarantee is that either it is gone, or you are
+      told it is not, and nothing moved.
+      *The controller statement reads the deployment.* "A database only you can read" is true
+      of the stdio install and false of the `serve` subcommand this product ships, where
+      `auth`'s default provider is `none` and every request is anonymous — and it is, in its
+      own words, the strongest fact this product has, which makes it the sentence a DPO will
+      quote back. It is also IN the install disclosure now, rather than reachable only behind
+      a tool call, which is the whole point of D26 naming a moment.
 
 ## Phase 12 — Rulebook as versioned configuration
 

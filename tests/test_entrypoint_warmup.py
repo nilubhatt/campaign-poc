@@ -59,3 +59,34 @@ def test_stdio_subcommand_still_initialises_dirs_and_db(monkeypatch, stub_runtim
 
     assert "ensure_dirs" in stub_runtime
     assert "init_db" in stub_runtime
+
+
+# §11.7/D26. The disclosure is generated text with no return value and no state change, so
+# nothing about the library proves it is ever SHOWN — and the first version of the item closed
+# exactly that way, with a generator and no call sites, ticked. Mutation confirmed the gap was
+# still there after the wiring: deleting the print from `init` broke no test. These two are
+# the only thing standing between "the string exists" and "somebody reads it at install."
+
+
+def test_init_shows_the_personal_data_disclosure(monkeypatch, stub_runtime, capsys):
+    """`init` is what the installers run, so it is the moment somebody setting this up can
+    still decide not to. A disclosure at first use is a disclosure after the decision."""
+    import people
+
+    monkeypatch.setattr(sys, "argv", ["campaign-intelligence", "init"])
+
+    main.main()
+
+    assert people.install_disclosure() in capsys.readouterr().out
+
+
+def test_the_disclosure_subcommand_prints_it_without_installing(monkeypatch, capsys):
+    """Reachable without running an install, so the Windows wizard page, the two shell
+    installers and an admin asking "what does this keep?" read the same generated text."""
+    import people
+
+    monkeypatch.setattr(sys, "argv", ["campaign-intelligence", "disclosure"])
+
+    main.main()
+
+    assert people.install_disclosure() in capsys.readouterr().out

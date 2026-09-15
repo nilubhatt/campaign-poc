@@ -19,6 +19,11 @@ from typing import Any, Optional, Union
 
 import config
 import enums
+# §11.2's one guard. Imported at module level: an earlier comment here claimed `identity`
+# reads this module and a top-level import would cycle — it does not (it imports `auth` and
+# `config` only), and a justification that is not true is how a real constraint stops being
+# recognisable when one does appear.
+import identity
 import vectorstore
 
 _SCHEMA = """
@@ -61,6 +66,10 @@ CREATE TABLE IF NOT EXISTS campaigns (
     detail        TEXT,            -- freeform: brief, audience, budget, channel, timeline, anything
     deck_text     TEXT,            -- extracted PDF/PPTX text
     commentary_checked INTEGER NOT NULL DEFAULT 0,  -- was a file actually read for comments
+    -- §11.6: when this library stamped "we never looked" onto this record's authorship. The
+    -- item asks for the import date explicitly, and without it "nobody looked" is undated —
+    -- so a record from before §2.5 reads identically to one whose extraction failed today.
+    authorship_backfilled_at TEXT,
                                     -- and speaker notes? (§5.3/D17) A warning lives for one
                                     -- response; this is what lets gaps() still report months
                                     -- later that a deck's commentary was never looked at
@@ -257,6 +266,87 @@ CREATE TABLE IF NOT EXISTS library_state (
     key         TEXT PRIMARY KEY,
     value       TEXT,
     updated_at  REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS erasures (
+    -- §11.7: every time a person's name was removed from this library.
+    --
+    -- WITHOUT the name. A log recording what it removed would be the personal data again, in
+    -- the one table nobody would think to erase — so it holds the pseudonym that replaced it,
+    -- which is what a reader needs to understand a record that now says `erased-3f2a1b9c`.
+    --
+    -- A record silently rewritten is a record nobody can trust: a saved judgment whose
+    -- evidence changed under it needs somewhere that says the change happened, on whose
+    -- authority, and why.
+    id          TEXT PRIMARY KEY,
+    pseudonym   TEXT NOT NULL,
+    mentions    INTEGER NOT NULL,
+    why         TEXT NOT NULL,
+    said_by     TEXT NOT NULL,
+    erased_at   TEXT NOT NULL,
+    created_at  REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reactions (
+    -- §11.5: what people made of a campaign, APPEND-ONLY, both sides kept.
+    --
+    -- `campaigns.tags` replaces on write, so R. Vega recording `liked` in March and A. Duarte
+    -- recording `not_liked` in June left only June — not superseded, not outvoted, gone, with
+    -- nothing saying March was ever there. That is the most expensive thing this library can
+    -- lose: a campaign two people disagreed about is worth MORE as evidence than one everybody
+    -- liked, because the disagreement is where the client's actual taste lives, and the whole
+    -- premise here is reasoning from what this client thinks.
+    --
+    -- Nothing in this table decides who is right. D10 and §11.5 both say it: authority order
+    -- is configured in the rulebook (§12), never inferred. Preferring the newer view, or the
+    -- client's, or the one from a grander job title, would be this library inventing an
+    -- authority nobody granted it — and §2.5 already refused that once, because a PDF export
+    -- turns speaker notes into annotations, so even the FORMAT cannot say whose words weigh
+    -- more.
+    id           TEXT PRIMARY KEY,
+    campaign_id  TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    axis         TEXT NOT NULL,   -- 'reaction' | 'performance': what the value is ABOUT
+    value        TEXT NOT NULL,
+    source       TEXT NOT NULL,   -- 'stated' | 'verified', as everywhere else
+    said_by      TEXT NOT NULL,
+    said_at      TEXT NOT NULL,
+    role         TEXT,            -- §11.4: as stated at the time
+    created_at   REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS authorship (
+    -- §11.1–§11.4: who made a decision, and how much that claim is worth.
+    --
+    -- Nine write paths took a person's name as a free string and the server had no idea what
+    -- it was receiving — D105, about the sharpest of them: "nothing distinguishes a real
+    -- confirmation from one the model wrote itself." `confirmed_by` promotes a rule to the
+    -- checklist where every future brief in its markets is judged against it.
+    --
+    -- Two facts, kept apart, because they are not the same claim:
+    --   on_behalf_of  whose judgment this is. Only a person can say, so it is `stated` and
+    --                 required. Deriving it would file every decision under whoever typed.
+    --   captured_*    the account that made the call. The server derives it and never
+    --                 accepts it, and `captured_method` is what keeps `verified` honest —
+    --                 `stdio_local` means "the desktop account this runs as", not "this
+    --                 person authenticated".
+    --
+    -- One row per decision, never updated: §11.5's rule, and the same reason `answers` is
+    -- append-only. What somebody's role was AT THE TIME is the fact worth keeping, and a
+    -- person who changes team should not retroactively have decided things as their new one.
+    id                TEXT PRIMARY KEY,
+    subject_kind      TEXT NOT NULL,   -- 'context_event' | 'correction' | 'answer' | ...
+    subject_key       TEXT NOT NULL,
+    on_behalf_of      TEXT NOT NULL,
+    on_behalf_of_role TEXT,            -- §11.4: as STATED at the time, never looked up later
+    captured_source   TEXT NOT NULL,   -- identity.AUTHOR_SOURCES
+    captured_method   TEXT NOT NULL,   -- identity.METHODS
+    captured_account  TEXT,            -- os_user, or the SSO subject
+    captured_host     TEXT,
+    captured_display  TEXT,
+    channel           TEXT,            -- §11.4: stdio, http, import
+    session_id        TEXT,            -- §11.4
+    captured_at       TEXT NOT NULL,   -- §11.4
+    created_at        REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS answers (
@@ -920,7 +1010,45 @@ def _normalise_status(value):
                            synonyms=enums.STATUS_SYNONYMS)
 
 
-def normalize_tags(tags, *, has_actual_metrics: bool = False) -> list[dict]:
+def _folded_name(name: str) -> str:
+    """One spelling of a name, for comparison only — `people._folded` without the import.
+
+    Kept here rather than calling `people` because `people` reads this module for every table
+    it scans, and this is two lines of the same rule: NFC then casefold then collapse, so
+    "R.  Vega" and "r. vega" are one person on both sides of the comparison.
+    """
+    import unicodedata
+
+    return " ".join(unicodedata.normalize("NFC", name or "").split()).casefold()
+
+
+def attributions_on_file(tags) -> set:
+    """Every (tag value, `said_by`) pair already stored on a record, folded.
+
+    What makes a re-send distinguishable from a new claim. The VALUE is part of the key on
+    purpose: a legacy `liked` held by "the client" is not a licence to file a new
+    `performed_well` under the same non-name — that is the claim the rule is about, arriving
+    on a record that happens to carry an old one. Read from the STORED tags, so a caller
+    cannot grandfather anything by asserting it was already there.
+    """
+    return {(t["value"].strip().lower(), _folded_name(t["said_by"])) for t in (tags or [])
+            if isinstance(t, dict) and (t.get("said_by") or "").strip()
+            and isinstance(t.get("value"), str)}
+
+
+def _short(text: str, limit: int = 60) -> str:
+    """A value, cut to something a refusal can carry.
+
+    A tag value is caller-supplied and unbounded: interpolating one whole turned a 100,000-
+    character tag into a 100,198-character exception. An error nobody can read is a different
+    way of not saying what went wrong.
+    """
+    text = text or ""
+    return text if len(text) <= limit else text[:limit] + "\u2026"
+
+
+def normalize_tags(tags, *, has_actual_metrics: bool = False,
+                   already_said_by=()) -> list[dict]:
     """
     Normalize tags to [{"value": str, "source": "verified"|"stated"}, ...]. A plain string
     is accepted for ergonomics (LLM-first, conversational intake — §6.9) and defaults to
@@ -947,6 +1075,13 @@ def normalize_tags(tags, *, has_actual_metrics: bool = False) -> list[dict]:
     back to whoever set it, or removed when that person leaves. Optional, because most tags
     predate the field and a missing author is an honest "nobody recorded one" rather than a
     reason to refuse the write.
+
+    But a `said_by` that is PRESENT has to name a person (§11.2). This is the door tags come
+    through, and it had no such check: `_keep_the_view` refused `said_by="the team"` from the
+    append-only record and this function wrote it onto the campaign anyway, where
+    `get_campaign` hands it to every reader. The surface people read said the team held an
+    opinion; the record built to be the authority on who holds which opinion had never heard
+    of it. One rule, in the one place both paths pass through.
     """
     if tags is None:
         return []
@@ -962,6 +1097,7 @@ def normalize_tags(tags, *, has_actual_metrics: bool = False) -> list[dict]:
     for t in tags:
         if isinstance(t, str):
             value, source, said_by, said_at = t.strip(), "stated", None, None
+            unresolved = None
         elif isinstance(t, dict):
             raw_value = t.get("value")
             if not isinstance(raw_value, str) or not raw_value.strip():
@@ -972,11 +1108,50 @@ def normalize_tags(tags, *, has_actual_metrics: bool = False) -> list[dict]:
                                      synonyms=enums.TAG_SOURCE_SYNONYMS,
                                      allow_none=False)
             said_by = (t.get("said_by") or "").strip() or None
+            # Carried through rather than dropped: it is what is left of an attribution this
+            # library should never have accepted, and the next round-trip would lose it.
+            unresolved = (t.get("said_by_unresolved") or "").strip() or None
+            if said_by:
+                try:
+                    said_by = identity.person(said_by, field="said_by")
+                except ValueError as bad:
+                    if (value.lower(), _folded_name(said_by)) in already_said_by:
+                        # ALREADY ON FILE. Tags replace, so every caller re-sends the ones it
+                        # is keeping — `feedback.record` re-sends the whole stored list on
+                        # every menu answer — and applying the rule blind made one legacy
+                        # `said_by: "the client"` (v0.2.0 wrote them, past a name list that
+                        # did not yet have the placeholders on it) permanently unwritable:
+                        # every answer refused, naming a tag the caller never sent, with no
+                        # remedy in the message. A guard that bricks a record to enforce a
+                        # naming rule has cost more than the record it objected to.
+                        #
+                        # Grandfathered is not endorsed. The opinion survives — losing it is
+                        # the §11.5 loss — but it stops being recorded as HELD by somebody,
+                        # because nothing can find that person, erase them on request, or
+                        # weigh their view against another. The text stays where a person can
+                        # still act on it.
+                        said_by, unresolved = None, unresolved or said_by
+                    else:
+                        # Named, because `normalize_tags` refuses whole writes and a caller
+                        # sending five tags cannot resend four of them without knowing which
+                        # one this was. The same shape as the `verified` refusal below.
+                        raise ValueError(f"tag {_short(raw_value.strip())!r}: {bad}") from None
             said_at = (t.get("said_at") or "").strip() or None
+            if unresolved and not said_by:
+                said_at = None   # a time nobody is attached to says nothing
         else:
             raise ValueError(f"tag must be a string or {{value, source}} object, got {t!r}")
         if not value:
             raise ValueError(f"tag value cannot be empty or whitespace-only, got {t!r}")
+        # The product's OWN vocabulary, canonicalised. `REACTION_AXES` is lowercase and tag
+        # values were never folded, so `"Liked"` — the likelier spelling for a model writing
+        # prose — was stored on the campaign and dropped by `_keep_the_view` as not a
+        # reaction: the campaign saying R. Vega liked it and the append-only record never
+        # having heard of it, which then costs §11.5's `contested_precedent` finding.
+        # Only these seven words: a marketer's "Back-to-School" is their words, and
+        # lowercasing every tag to fix seven of them would rewrite the library.
+        if value.lower() in REACTION_AXES:
+            value = value.lower()
         if source == "verified" and not has_actual_metrics:
             raise ValueError(
                 f"tag {value!r} cannot be marked source='verified' — this campaign has no "
@@ -985,11 +1160,18 @@ def normalize_tags(tags, *, has_actual_metrics: bool = False) -> list[dict]:
             )
         out.append({"value": value, "source": source,
                     **({"said_by": said_by} if said_by else {}),
+                    **({"said_by_unresolved": unresolved}
+                       if unresolved and not said_by else {}),
                     **({"said_at": said_at} if said_at else {})})
 
-    deduped: dict[str, dict] = {}
+    deduped: dict[tuple, dict] = {}
     for entry in out:
-        key = entry["value"].lower()
+        # WHO is part of the key. It used to be the value alone, so a second person recording
+        # `liked` replaced the first — §11.5's loss arriving through the de-duplication
+        # instead of the replace, and invisible because the raw-list walk still filed both
+        # reactions. Agreement is corroboration: two people liking something is the evidence,
+        # not a duplicate of it.
+        key = (entry["value"].lower(), _folded_name(entry.get("said_by") or ""))
         # Later wins on a tie, so re-recording an opinion updates who holds it rather than
         # keeping the first person's name on somebody else's answer.
         if (key not in deduped
@@ -1199,6 +1381,14 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
     # §10.3: the sentences people gave about this record, in their words. The most valuable
     # content the library holds, and a table nothing reads is where it goes to die.
     d["feedback_notes"] = feedback_notes(conn, campaign_id)
+    # §11.5, attached HERE — the one place a record loads, and therefore the only place the
+    # split can be attached once and reach every reader, including retrieval. The same
+    # reasoning §9.8 reached about confounders: a list of call sites is a copy of the
+    # codebase, and this project has been bitten by that shape six times.
+    d["reactions"] = reactions_for(conn, campaign_id)
+    split = disagreement_on(conn, campaign_id, rows=d["reactions"])
+    if split:
+        d["disagreement"] = split
     d.pop("_overlapping", None)
     # §9.1: whether anything has come back. A concluded campaign whose assets are all
     # `proposed` has never been checked against what actually ran, which is the state the
@@ -1404,7 +1594,16 @@ def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_t
             "SELECT 1 FROM metrics WHERE campaign_id = ? AND metric_type = 'actual' LIMIT 1",
             (campaign_id,),
         ).fetchone() is not None
-        tags = normalize_tags(tags, has_actual_metrics=has_actual)
+        # The names already stored on THIS record, so a re-send of a legacy attribution is
+        # distinguishable from somebody typing one today. Read from the row rather than taken
+        # from the caller: otherwise a caller could grandfather any name by claiming it was
+        # already there.
+        stored = conn.execute("SELECT tags FROM campaigns WHERE id = ?",
+                              (campaign_id,)).fetchone()
+        tags = normalize_tags(
+            tags, has_actual_metrics=has_actual,
+            already_said_by=attributions_on_file(json.loads(stored["tags"]) if stored
+                                                 and stored["tags"] else []))
         fields.append("tags = ?"); params.append(json.dumps(tags))
     if region is not None:
         fields.append("region = ?"); params.append(region)
@@ -1613,6 +1812,273 @@ def open_notices(conn, campaign_id: str) -> list[dict]:
         "SELECT id, code, detail, created_at FROM campaign_notices "
         "WHERE campaign_id = ? AND cleared_at IS NULL ORDER BY created_at, id",
         (campaign_id,)).fetchall()]
+
+
+# Which axis a value belongs to. Two people saying "liked" and "underperformed" have not
+# disagreed — that is the most ordinary finding in marketing — so the axis is what makes a
+# contradiction a contradiction.
+REACTION_AXES = {
+    "liked": "reaction", "not_liked": "reaction", "mixed_reaction": "reaction",
+    "performed_well": "performance", "underperformed": "performance",
+    "performed_as_expected": "performance", "no_data_yet": "performance",
+}
+
+
+# §11.6/D13: the four different reasons this library cannot name an author. A null said all
+# four at once, and they have completely different consequences for a judgment citing the
+# words — §2.5's whole point was that a deck's own speaker note and a client's objection are
+# not the same thing, and `author: null` on both erases exactly that.
+AUTHOR_UNKNOWN = {
+    # A PowerPoint notesSlide has no author FIELD. Nobody withheld anything and the words are
+    # almost certainly the deck's own authors: the agency talking to itself.
+    "format_carries_none":
+        "This kind of commentary does not carry an author at all — a speaker note has no such "
+        "field — so nobody withheld a name. These are almost certainly the deck authors' own "
+        "words, which is a different thing from a client's comment and carries different "
+        "weight.",
+    # A PDF annotation CAN carry `/T` and this one does not: a fact about the person, not the
+    # format.
+    "file_did_not_say":
+        "This kind of commentary can carry an author and this one does not. Somebody "
+        "commented without a name, or their reader was not configured with one — so the "
+        "words are somebody's and the library cannot say whose.",
+    # §11.6's backfill: a fact about US, not about the customer's deck.
+    "not_captured":
+        "This record was stored before this library read commentary at all, so the file may "
+        "well have said who wrote it and nobody looked. That is a gap in what was captured, "
+        "not silence in the document.",
+    # Body text is not a comment and has no author question to answer.
+    "never_claimed":
+        "Nothing about this text claims an author. It is the brief itself rather than a "
+        "comment on it, so there is no missing name here.",
+}
+
+# Which commentary kinds can carry an author at all. §2.5 stores the FORMAT the words arrived
+# in, and this is the one thing that format legitimately tells you.
+_CARRIES_AN_AUTHOR = ("comment", "annotation")
+
+
+def mark_authorship_backfilled(conn, campaign_id: str, when: str) -> None:
+    conn.execute("UPDATE campaigns SET authorship_backfilled_at = ? WHERE id = ?",
+                 (when, campaign_id))
+    conn.commit()
+
+
+def records_without_authorship_backfill(conn) -> list[dict]:
+    """Records stored before this library read commentary, and not yet stamped (§11.6)."""
+    if "authorship_backfilled_at" not in _columns(conn, "campaigns"):
+        return []
+    return [dict(r) for r in conn.execute(
+        "SELECT id, title FROM campaigns WHERE authorship_backfilled_at IS NULL "
+        "AND COALESCE(commentary_checked, 0) = 0 ORDER BY created_at, id").fetchall()]
+
+
+def author_of(source: Optional[dict], *, commentary_checked: bool = True) -> dict:
+    """Who wrote this, or WHICH KIND of unknown it is (§11.6/D13).
+
+    Never a bare null. "The file did not say", "the format cannot say", "we never looked" and
+    "nothing here claims an author" are four different statements, and a reader given one null
+    for all four cannot tell a client's anonymous objection from the deck talking to itself.
+    """
+    source = source or {}
+    named = (source.get("author") or "").strip()
+    if named:
+        return {"author": named, "basis": "stated"}
+    kind = source.get("kind") or "body"
+    if kind not in _CARRIES_AN_AUTHOR and kind != "speaker_note":
+        why = "never_claimed"
+    elif not commentary_checked:
+        why = "not_captured"
+    elif kind == "speaker_note":
+        why = "format_carries_none"
+    else:
+        why = "file_did_not_say"
+    return {"author": "unknown", "why": why, "basis": "computed",
+            "what_it_means": AUTHOR_UNKNOWN[why]}
+
+
+def record_erasure(conn, *, pseudonym: str, why: str, said_by: str, mentions: int) -> str:
+    """Put an erasure on the record, without the name it removed (§11.7)."""
+    eid = _id("erase")
+    conn.execute(
+        "INSERT INTO erasures (id, pseudonym, mentions, why, said_by, erased_at, created_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (eid, pseudonym, mentions, why, said_by, _now_iso(), _now()))
+    conn.commit()
+    return eid
+
+
+def erasures(conn) -> list[dict]:
+    if not _columns(conn, "erasures"):
+        return []
+    return [dict(r) for r in conn.execute(
+        "SELECT pseudonym, mentions, why, said_by, erased_at FROM erasures "
+        "ORDER BY created_at DESC, id DESC").fetchall()]
+
+
+def record_reaction(conn, *, campaign_id: str, value: str, said_by: str, source: str,
+                    said_at: str, role=None) -> str:
+    """One person's view, appended (§11.5). Never an update: see the table comment."""
+    rid = _id("react")
+    conn.execute(
+        "INSERT INTO reactions (id, campaign_id, axis, value, source, said_by, said_at, "
+        "role, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (rid, campaign_id, REACTION_AXES.get(value, "reaction"), value, source,
+         said_by, said_at, role, _now()))
+    conn.commit()
+    return rid
+
+
+def reactions_for(conn, campaign_id: str) -> list[dict]:
+    """Every view on file, oldest first (§11.5)."""
+    if not _columns(conn, "reactions"):
+        return []
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM reactions WHERE campaign_id = ? ORDER BY created_at, id",
+        (campaign_id,)).fetchall()]
+    seen: dict = {}
+    for row in rows:
+        key = (row["said_by"].strip().casefold(), row["axis"])
+        # Somebody revisiting their own view is a SEQUENCE, not a split — and the pair is the
+        # interesting part: "this looked fine before the numbers came in" is the most
+        # informative row this table holds, which is §9.8's argument about attributions.
+        row["supersedes_own_earlier_view"] = key in seen
+        seen[key] = row["id"]
+    return rows
+
+
+def recent_voices(conn, *, limit: int = 4) -> list:
+    """The people who have most recently recorded a view (§11.3).
+
+    So the menu can number them. Most recent rather than most frequent: an agency's queue is
+    worked in bursts about whoever is live this month, and the person who answered most often
+    two years ago is not the likely answer today.
+    """
+    if not _columns(conn, "reactions"):
+        return []
+    return [r["said_by"] for r in conn.execute(
+        "SELECT said_by, MAX(created_at) AS last FROM reactions GROUP BY said_by "
+        "ORDER BY last DESC LIMIT ?", (limit,)).fetchall()]
+
+
+def disagreement_on(conn, campaign_id: str, rows=None) -> Optional[dict]:
+    """Where two different PEOPLE hold different views on one axis (§11.5).
+
+    Two voices, not two values: one person changing their mind is a revision, and counting it
+    as a split would report a disagreement that never happened to every judgment citing the
+    record. Per axis, because "they liked it and it underperformed" is not a contradiction.
+    """
+    rows = reactions_for(conn, campaign_id) if rows is None else rows
+    by_axis: dict = {}
+    for row in rows:
+        by_axis.setdefault(row["axis"], []).append(row)
+    split = {}
+    for axis, voices in by_axis.items():
+        # Collapsed per PERSON first, keeping their latest — and that collapse is what makes
+        # this about two people rather than two values. Somebody changing their own mind
+        # leaves one entry holding one value, so it cannot read as a split. An explicit
+        # `len(standing) > 1` beside this was redundant: mutation showed removing it changed
+        # nothing, because the collapse had already decided.
+        standing: dict = {}
+        for voice in voices:
+            standing[voice["said_by"].strip().casefold()] = voice
+        values = sorted({v["value"] for v in standing.values()})
+        if len(values) > 1:
+            split[axis] = {
+                "values": values,
+                # No `winner`, no `standing`. That is the whole of D10.
+                "voices": [{"said_by": v["said_by"], "value": v["value"], "role": v["role"],
+                            "said_at": v["said_at"], "source": v["source"]}
+                           for v in sorted(standing.values(), key=lambda v: v["created_at"])],
+            }
+    if not split:
+        return None
+    return {
+        **split, "basis": "computed",
+        "what_it_means": (
+            "Two people recorded different views about this campaign and both are on file. "
+            "This library will NOT say which one stands: authority order is configured in "
+            "the rulebook and is not configured here, and preferring the later view, or the "
+            "client's, or somebody's job title would be authority nobody granted it. Cite "
+            "the split rather than a side — a campaign people disagreed about is stronger "
+            "evidence about this client's taste than one everybody liked, and quoting it as "
+            "unanimous throws that away."),
+    }
+
+
+def record_authorship(conn, *, subject_kind: str, subject_key: str, on_behalf_of: str,
+                      role: Optional[str] = None) -> dict:
+    """Record who decided this, and the account that made the call (§11.1–§11.4).
+
+    `captured_*` is derived here and never accepted from a caller — that is the whole point.
+    A parameter would make it a second thing the model can write, and the one fact this
+    server can establish for itself would become one more claim it has to take on trust.
+    """
+    import identity
+
+    who = identity.who_said_it(on_behalf_of=on_behalf_of)
+    captured = who["captured_by"]
+    row = _id("who")
+    conn.execute(
+        "INSERT INTO authorship (id, subject_kind, subject_key, on_behalf_of, "
+        "on_behalf_of_role, captured_source, captured_method, captured_account, "
+        "captured_host, captured_display, channel, session_id, captured_at, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (row, subject_kind, subject_key, who["on_behalf_of"]["name"], role,
+         captured["source"], captured["method"],
+         captured.get("os_user") or captured.get("subject"), captured.get("host"),
+         captured.get("display_name"), identity.channel(), identity.session_id(),
+         _now_iso(), _now()))
+    conn.commit()
+    return who
+
+
+def authorship_for(conn, subject_kind: str, subject_key: str) -> Optional[dict]:
+    """Who decided this, or None. The LATEST, with the history still on file."""
+    if not _columns(conn, "authorship"):
+        return None
+    row = conn.execute(
+        "SELECT * FROM authorship WHERE subject_kind = ? AND subject_key = ? "
+        "ORDER BY created_at DESC, id DESC LIMIT 1", (subject_kind, subject_key)).fetchone()
+    return _as_authorship(row) if row else None
+
+
+def _as_authorship(row) -> dict:
+    import identity
+
+    # The sentence, rebuilt from the stored method. It was dropped here — it lives on the live
+    # dict `identity.captured_by()` returns and was never persisted — so `answers()`, the
+    # surface built to review human overrides, reported `source: verified` by a named person
+    # with the caveat that makes it honest stripped off. §11.2 says in writing that this is
+    # the thing it refuses.
+    captured = {"source": row["captured_source"], "method": row["captured_method"],
+                "what_it_means": identity.METHOD_MEANS.get(
+                    row["captured_method"], "This account was not recorded.")}
+    for field, key in (("captured_account", "account"), ("captured_host", "host"),
+                       ("captured_display", "display_name")):
+        if row[field]:
+            captured[key] = row[field]
+    said = {"name": row["on_behalf_of"], "source": "stated"}
+    if row["on_behalf_of_role"]:
+        said["role"] = row["on_behalf_of_role"]
+        said["role_basis"] = "as stated at the time"
+    # §11.3: computed from the two names rather than stored, so it cannot disagree with them.
+    # This is the distinction "most products miss" and the reason they miss it: on the day the
+    # note is written everybody knows who was in the room, and two years on the record says a
+    # name with nothing to say whether that person held the view or merely typed it.
+    #
+    # None, not False, when the account has no name to compare — `unattributed` and `import`
+    # know nothing about who was there, and answering "no, somebody else" would be a claim
+    # made out of an absence.
+    mine = (row["captured_display"] or "").strip().casefold()
+    speaking = (mine == row["on_behalf_of"].strip().casefold()) if mine else None
+    return {
+        "on_behalf_of": said, "captured_by": captured,
+        "speaking_for_themselves": speaking,
+        "captured_at": row["captured_at"],
+        **({"channel": row["channel"]} if row["channel"] else {}),
+        **({"session_id": row["session_id"]} if row["session_id"] else {}),
+    }
 
 
 def record_answer(conn, *, subject_kind: str, subject_key: str, answer: str, note: str,

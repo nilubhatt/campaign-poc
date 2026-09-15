@@ -33,6 +33,8 @@ from __future__ import annotations
 import datetime
 from typing import Optional
 
+import identity
+
 # The review's own list, one value each. A vocabulary missing one sends that event to whichever
 # word is nearest, and the nearest word to "port strike" is whatever the person typing happens
 # to be thinking of — which is how a taxonomy stops being one.
@@ -73,7 +75,7 @@ def record(conn, *, starts_on: str, scope: str, kind: str, description: str,
            delay_days: Optional[int] = None, budget_change_pct: Optional[float] = None,
            channels_disrupted: Optional[list] = None, seeded: bool = False,
            seed_key: Optional[str] = None, certainty: Optional[str] = None,
-           recurs_annually: bool = False) -> dict:
+           recurs_annually: bool = False, role: Optional[str] = None) -> dict:
     """Put an event on the record (§9.6).
 
     `basis` is `stated` and never anything else. The server did not measure a three-day delay
@@ -117,10 +119,11 @@ def record(conn, *, starts_on: str, scope: str, kind: str, description: str,
         raise ValueError(
             "`description` is required: a date range and a kind cannot tell a reader what "
             "happened, and this is read beside a campaign's results months afterwards.")
-    if not (recorded_by or "").strip():
-        raise ValueError(
-            "`recorded_by` is required: what was going on in a market is an account a PERSON "
-            "gives, and one nobody's name is against is one nobody can question later.")
+    # §11.1/§11.2: one guard, and the seeded calendar is the only thing exempt — it is
+    # shipped with the product and says so, which is a true statement about authorship rather
+    # than a person's name borrowed by a machine.
+    if not seeded:
+        identity.person(recorded_by, field="recorded_by")
     if delay_days is not None and delay_days < 0:
         raise ValueError(
             f"`delay_days` is {delay_days}: a delay cannot be negative. Zero is the value for "
@@ -151,6 +154,9 @@ def record(conn, *, starts_on: str, scope: str, kind: str, description: str,
         channels_disrupted=_tidy_channels(channels_disrupted),
         recorded_by=recorded_by.strip(), seeded=seeded, seed_key=seed_key,
         certainty=certainty, recurs_annually=recurs_annually)
+    if not seeded:
+        store.record_authorship(conn, subject_kind="context_event", subject_key=eid,
+                                on_behalf_of=recorded_by, role=role)
     saved = _public(store.get_context_event(conn, eid))
     if warnings:
         saved = {**saved, "warnings": warnings}
@@ -687,10 +693,9 @@ def withdraw(conn, *, event_id: str, why: str, withdrawn_by: str) -> dict:
             "`why` is required: this event may already be carried as a caveat on several "
             "campaigns' outcomes, and removing it without saying why leaves nobody able to "
             "tell a correction from a mistake.")
-    if not (withdrawn_by or "").strip():
-        raise ValueError(
-            "`withdrawn_by` is required: taking something off the record is a PERSON's "
-            "decision, and one nobody's name is against is one nobody can question later.")
+    # §11.1: this checked only that the string was non-empty, so `withdrawn_by="the system"`
+    # took an event off the record and recorded that a person had decided to.
+    withdrawn_by = identity.person(withdrawn_by, field="withdrawn_by")
 
     was_reaching = campaigns_overlapping(conn, _public(event))
     store.withdraw_context_event(conn, event_id, why=why.strip(),
@@ -1098,18 +1103,12 @@ def attribute(conn, *, campaign_id: str, event_id: str, note: str, stated_by: st
             "`note` is required: this is the whole content of the attribution — what you "
             "think the event did to these numbers, in your words. Without it the row says "
             "only that somebody thought something.")
-    if not (stated_by or "").strip():
-        raise ValueError(
-            "`stated_by` is required: whether an event moved a number is a judgment a PERSON "
-            "makes, and one nobody's name is against is one nobody can question later.")
-    if _reads_as_the_product(stated_by):
-        # In the one item whose premise is that a model asked to explain a disappointing
-        # number will reach for whatever is nearby, a name that reads as the library itself is
-        # the model laundering its own guess into the record.
-        raise ValueError(
-            f"{stated_by!r} is not a PERSON. This records what somebody thinks an event did to "
-            f"these numbers — the library does not work that out and must not appear to have. "
-            f"If nobody has said it, there is nothing to record here.")
+    # §11.2: `identity.person` is the rule everywhere. In the one item whose premise is that a
+    # model asked to explain a disappointing number will reach for whatever is nearby, a name
+    # that reads as the library itself is the model laundering its own guess into the record —
+    # which is why this path had its own check long before the others did, and why it is the
+    # one that must not drift from them.
+    stated_by = identity.person(stated_by, field="stated_by")
     window = window_of(conn, campaign_id)
     if not window["starts_on"]:
         raise ValueError(
@@ -1410,14 +1409,15 @@ def say_the_outcome(confounders: dict) -> str:
 # Words that mean "not a person". Shared: §9.8 records who says an event moved a number and
 # §10.3 records whose opinion a tag is, and two lists of these drift apart — the one that
 # drifts being the one nobody looks at.
-_NOT_A_PERSON = ("server", "system", "computed", "campaign-poc", "campaign intelligence",
-                 "library", "automatic", "auto", "claude", "the model", "assistant",
-                 "n/a", "unknown", "anonymous", "nobody", "everyone")
-
-
 def _reads_as_the_product(name: str) -> bool:
-    folded = _plain(name)
-    return any(word in folded for word in _NOT_A_PERSON)
+    """§11.1: `identity`'s list, not a second copy. Two lists of words meaning "not a person"
+    drift apart, and the one that drifts is the one nobody looks at.
+
+    The list itself is gone from this file — it was still sitting here unused after the guard
+    moved, which is the copy that would have drifted: somebody adding a word to one of them
+    would have had no way to know the other existed.
+    """
+    return identity.reads_as_the_product(_plain(name))
 
 
 def withdraw_attribution(conn, *, campaign_id: str, event_id: str, why: str,
@@ -1440,10 +1440,9 @@ def withdraw_attribution(conn, *, campaign_id: str, event_id: str, why: str,
             "`why` is required: this may be the only reason an outcome is marked confounded, "
             "and removing it without saying why leaves nobody able to tell a correction from "
             "a mistake.")
-    if not (withdrawn_by or "").strip() or _reads_as_the_product(withdrawn_by):
-        raise ValueError(
-            "`withdrawn_by` is required and must be a PERSON: taking something off the record "
-            "is somebody's decision.")
+    # §11.2: `identity.person` is the rule. This carried its own pair of checks after the
+    # sweep that claimed to leave one implementation, which is how a sweep leaves two.
+    withdrawn_by = identity.person(withdrawn_by, field="withdrawn_by")
     store.withdraw_attribution(conn, campaign_id=campaign_id, event_id=event_id,
                                why=why.strip(), withdrawn_by=withdrawn_by.strip())
     return {"campaign_id": campaign_id, "event_id": event_id, "status": "withdrawn",

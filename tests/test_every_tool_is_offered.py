@@ -60,6 +60,13 @@ NEVER_OFFERED = {
     # DIAGNOSTICS AND LIFECYCLE, which a person invokes deliberately. `delete_campaign` in
     # particular: a product that suggests deleting your records is not one to trust with them.
     "health_check", "getting_started", "delete_campaign",
+    # §11.7. `person_on_file` and `personal_data_position` answer a question somebody asked —
+    # nothing this library WRITES makes them newly answerable, because the personal data is
+    # there from the first upload. `pseudonymise_person` is the sharpest never-offer in the product:
+    # it is irreversible, it rewrites records that saved judgments rest on, and a product that
+    # SUGGESTS erasing a person is one nobody should trust with their colleagues' names.
+    "person_on_file", "personal_data_position", "pseudonymise_person",
+    "correct_person_name",
     # THE NUMBERED MENU IS THE OFFER. §10.2's whole complaint is that a floating set of
     # affordances breaks the habit the menu exists to create — so `feedback_queue` returns
     # numbered rows and a `next_actions` beside them would be a second, competing way to

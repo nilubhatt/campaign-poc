@@ -336,6 +336,52 @@ def _rule_questions(conn) -> list:
     return rows
 
 
+# How many people already on file to offer. Past a handful this stops being a numbered
+# choice and becomes a directory somebody has to read.
+_RECENT_VOICES = 4
+
+
+def _whose_opinion(conn) -> Optional[dict]:
+    """§11.3's numbered question, or None when there is nobody to offer.
+
+    The PEOPLE ALREADY IN THE LIBRARY, not just the operator. The first version offered the
+    operator alone as option 1 with "someone else" as a typing task — and §11.3's whole
+    premise is that the person typing is usually NOT the person whose view it is, so that
+    optimised the ergonomics of the failure mode. In an agency the queue is worked by one
+    person recording what clients and colleagues said.
+
+    Everyone who has recorded a view is known, so they can be numbered too: fewer keystrokes
+    than before for the colleague case, and the operator stops being the cheap default.
+    """
+    import identity
+    import store
+
+    names: list = []
+    for voice in store.recent_voices(conn, limit=_RECENT_VOICES):
+        if voice not in names:
+            names.append(voice)
+    operator = (identity.captured_by().get("display_name") or "").strip()
+    if operator and operator not in names:
+        names.append(operator)
+    if not names:
+        return None
+    options = {n: name for n, name in enumerate(names, start=1)}
+    options[len(options) + 1] = "Someone else — who?"
+    return {
+        "field": "said_by", "ask": "Whose view is this?",
+        "options": options,
+        # Every other question here is answered with a number the SERVER resolves. This one is
+        # a free string on the tool, and the payload's own summary says "offering the
+        # numbers" — so nothing told the model that picking the last option means asking for
+        # a name and sending THAT.
+        "answer_with": "a name",
+        "why": ("Send the NAME, not the number — this is the one question on this menu the "
+                "server cannot resolve for you. Recorded either way; the difference is "
+                "whether the person who holds this view is the person entering it, and two "
+                "years on that is the thing nobody can reconstruct."),
+    }
+
+
 def _what_would_close_it(record: dict, row: dict) -> list:
     """The tool that answers a reason no number can (§10.3, D116).
 
@@ -645,6 +691,18 @@ def _ask_about(conn, menu: dict, choice: int) -> dict:
     if not needs:
         needs = {"no_outcome"}
     questions = []
+    # §11.3, FIRST: whose opinion is this? "The field most products miss", and they miss it
+    # because it only matters later — on the day the note is written everybody knows who was
+    # in the room, and two years on the record says a name with nothing to say whether that
+    # person held the view or merely typed it.
+    #
+    # Numbered, because §10.3 says answering should never need typing and the operator is by
+    # far the commonest answer — the server already knows their name, so making them spell it
+    # was the one bit of typing this menu had left. Offered only when the operator CONFIGURED
+    # a name: `os_user` is an account, and "1 = nbhatt" would make the easy answer wrong.
+    whose = _whose_opinion(conn)
+    if whose:
+        questions.append(whose)
     if {"no_outcome", "no_reaction_tag"} & needs:
         questions.append({"field": "reaction", "ask": "How did the work land?",
                           "options": dict(REACTIONS)})
@@ -703,7 +761,7 @@ def _ask_about(conn, menu: dict, choice: int) -> dict:
 
 def record(conn, *, menu_token: str, choice: int, said_by: str,
            reaction: Optional[int] = None, performance: Optional[int] = None,
-           note: Optional[str] = None) -> dict:
+           note: Optional[str] = None, role: Optional[str] = None) -> dict:
     """Write down what somebody said (§10.3, §10.5).
 
     Takes the NUMBER the user pressed, resolved server-side against the menu that token names.
@@ -762,9 +820,13 @@ def record(conn, *, menu_token: str, choice: int, said_by: str,
         value = vocabulary[answer]
         # REPLACES within its family. Appending produced `liked` AND `not_liked` on one
         # record — which the queue then read as answered and closed forever — and there is no
-        # reading of one person's answer to one question in which both are true. §11.5 will
-        # add keeping BOTH SIDES of a disagreement between two people, which is a different
-        # thing and needs a table rather than a contradiction in a blob.
+        # reading of one person's answer to one question in which both are true.
+        #
+        # §11.5 is now the other half, and it is a different thing: two PEOPLE disagreeing is
+        # not a contradiction, it is the most informative row this library can hold. The tag
+        # blob stays what it is — the latest view per axis, which is what filtering and
+        # search need — and `reactions` below keeps everyone's, so `get_campaign` can say
+        # they disagreed rather than reporting whichever was written last as the answer.
         tags = [t for t in tags if t.get("value") not in set(vocabulary.values())]
         # `stated`, always — §2.3's rule reaches the menu too, and this is the easiest place
         # in the product to type an impression. WITH the name: a tag nobody's name is against
@@ -775,6 +837,16 @@ def record(conn, *, menu_token: str, choice: int, said_by: str,
         added.append(value)
     if added:
         store.update_campaign(conn, record["id"], tags=tags)
+    # §11.5: appended, never replaced. This is where opinions actually arrive, so a reaction
+    # that reached the blob and not the table would be a view the library silently lost.
+    for value in added:
+        store.record_reaction(conn, campaign_id=record["id"], value=value, source="stated",
+                              said_by=said_by.strip(), said_at=said_at, role=role)
+    # §11.1/§11.3: the account beside the name, on the surface built to make answering easy —
+    # which is exactly where "whoever was at the keyboard" and "whose view this is" are most
+    # likely to be the same string and most likely to be different people.
+    store.record_authorship(conn, subject_kind="feedback", subject_key=record["id"],
+                            on_behalf_of=said_by, role=role)
     offers = []
     if (note or "").strip():
         # `predicted`, ALWAYS. Keyed off `performance` it made "no data yet" — a truthy 4 —
@@ -816,27 +888,20 @@ def record(conn, *, menu_token: str, choice: int, said_by: str,
 
 
 def _check_the_name(said_by: str) -> None:
-    """Whose opinion this is, and that it is a person's (§10.3).
+    """Whose opinion this is, and that it is a person's (§10.3, §11.2).
 
-    The guard is §9.8's, imported rather than rewritten: two lists of words that mean "not a
-    person" drift apart, and the one that drifts is the one nobody looks at. This is the
-    easier place to abuse it — the payload the model just read says "answering should never
-    need typing", which reads as an invitation to fill the field in.
+    `identity.person` IS the rule now. This function kept its own copy of the length and
+    product-name checks after §11.2 gathered the other four, so the sweep that claimed to
+    leave one implementation left two — and mutation showed the shared one's length rule was
+    untested, because the test covering it was about THIS function's message.
+
+    It stays as a named function because this is the easiest place in the product to abuse the
+    field: the payload the model just read says "answering should never need typing", which
+    reads as an invitation to fill it in.
     """
-    import context
+    import identity
 
-    text = (said_by or "").strip()
-    if not text:
-        raise ValueError(
-            "`said_by` is required: this library's whole value is what a particular client "
-            "thinks, and a client is several PEOPLE with different authority and sometimes "
-            "different opinions. An opinion nobody's name is against cannot be weighed "
-            "against another one later.")
-    if len(text) < 2 or context._reads_as_the_product(text):
-        raise ValueError(
-            f"{said_by!r} is not a PERSON. This records whose opinion it is — if the user is "
-            f"relaying somebody else's view, name that somebody. Do not fill this in on their "
-            f"behalf.")
+    identity.person(said_by, field="said_by")
 
 
 def _now_iso() -> str:

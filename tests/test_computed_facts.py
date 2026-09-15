@@ -174,7 +174,22 @@ def test_every_fact_carries_a_stable_code_and_a_sentence():
     for code, fact in found.items():
         assert fact["code"] == code
         assert fact["what_it_means"], code
-        assert fact["basis"] == "computed"
+        # `language` is the one entry that is NOT computed, and saying it was would be the
+        # overstatement this file exists to test for. It is stopword counting — D61's rule is
+        # that a threshold deciding something is `heuristic`, never `computed` or `judged` —
+        # and it is in this dict because it has to travel WITH the checks it suppresses: a
+        # reader seeing five `unchecked` and no reason reads the product as broken.
+        assert fact["basis"] == ("heuristic" if code == "language" else "computed"), code
+
+
+def test_the_language_signal_never_claims_to_be_computed():
+    """The exception above, pinned. `language` deciding whether every other check runs is
+    exactly the kind of quiet authority that must not borrow the word the model is told to
+    treat as established — §7.1 tells it not to re-derive a computed fact, and this one is a
+    guess about word frequencies."""
+    for text in ("A brief.", "Presupuesto de 45.000 € para el trimestre con creadores "
+                             "locales y publicaciones en redes sociales durante seis semanas."):
+        assert facts.compute(text)["language"]["basis"] == "heuristic"
 
 
 # ── D11: the body layer, and why ────────────────────────────────────────────

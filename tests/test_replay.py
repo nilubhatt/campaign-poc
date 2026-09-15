@@ -417,7 +417,7 @@ def test_the_first_confirmation_is_the_one_that_counts(conn):
     name = _expect_measure(conn)
     first = metrics.describe(conn, name)["confirmed_at"]
     store.retire_metric(conn, name)
-    metrics.graduate(conn, name, confirmed_by="Somebody else")
+    metrics.graduate(conn, name, confirmed_by="A. Duarte")
 
     assert metrics.describe(conn, name)["confirmed_at"] == first
 
@@ -427,7 +427,7 @@ def test_the_same_holds_for_a_rule(conn):
     first = corrections.describe(conn, cid)["confirmed_at"]
     corrections.set_aside(conn, cid)
     corrections.reopen(conn, cid)
-    corrections.graduate(conn, cid, confirmed_by="Somebody else")
+    corrections.graduate(conn, cid, confirmed_by="A. Duarte")
 
     assert corrections.describe(conn, cid)["confirmed_at"] == first
 

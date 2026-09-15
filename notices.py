@@ -32,6 +32,7 @@ from __future__ import annotations
 from typing import Optional
 
 import actions
+import people
 
 # How much it costs. Ordered worst-first, and `collapse` sorts by it, so a surface reading
 # the list in order leads with the right one — ordering as a property of the response rather
@@ -281,7 +282,13 @@ def notice(code: str, *, detail: str, affects: Optional[str] = None,
         "scope": scope,
         "affects": affects or reg_affects,
         "remedy": remedy or reg_remedy,
-        "detail": detail,
+        # D22/§11.7: `detail` interpolates exception text and asset paths, and this field is
+        # explicitly the one this product tells people to send to support. On Windows those
+        # paths embed `C:\Users\<name>\` and on macOS `/Users/<name>/` — a filesystem path
+        # does not look like personal data until you notice it carries somebody's login, in
+        # the one field designed to leave the machine. The filename survives, because that is
+        # what makes the message diagnosable.
+        "detail": people.redact_paths(detail),
     }
     step = next_step if next_step is not None else reg_next
     if step:

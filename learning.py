@@ -133,13 +133,16 @@ def require_a_person(confirmed_by: Optional[str]) -> str:
 
     A promotion with nobody's name against it is a standing requirement nobody can question
     later, and §8.2 spent the loop's only human step on exactly this question.
+
+    §11.1/§11.2: `identity.person` is the rule, not a fourth copy of it. This one checked only
+    that the string was non-empty, so `confirmed_by="the system"` promoted a rule to the
+    checklist — the library confirming its own suggestion and recording that a person had,
+    on the one path D105 names as the sharpest. Four implementations of one rule and the
+    weakest of them deciding what the library believes about who decided things.
     """
-    if not (confirmed_by or "").strip():
-        raise ValueError(
-            "`confirmed_by` is required: the gate is 'confirmed once by a person', and a "
-            "promotion with nobody's name against it is a standing requirement nobody can "
-            "question later.")
-    return confirmed_by.strip()
+    import identity
+
+    return identity.person(confirmed_by, field="confirmed_by")
 
 
 # A checklist is for a brief that is going to run. A reference record is brand guidelines and a

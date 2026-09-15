@@ -33,6 +33,8 @@ def main() -> int:
     sub.add_parser("stdio", help="run over stdio for a local Claude Desktop connector")
 
     sub.add_parser("check-weights", help="report whether the CLIP weights resolved (exit 1 if not)")
+    sub.add_parser("disclosure", help="print what this product stores about people, where, "
+                                      "for how long, and how to see or remove it")
     sub.add_parser("init", help="create the data directory and database (idempotent); "
                                 "run by the installers before the self-test")
 
@@ -92,6 +94,23 @@ def main() -> int:
         store.init_db()
         print(f"Data directory: {config.DATA_DIR}")
         print(f"Database:       {config.DB_PATH}")
+        # §11.7/D26: the disclosure, at the defined moment. It existed as a string generator
+        # with no call sites — closed by dead code, which is worse than not done, because the
+        # tracker said it was finished. A disclosure nobody is ever shown is not a disclosure,
+        # and this is the one artefact in the item whose value is entirely in WHEN it appears.
+        #
+        # Here rather than at first use: `init` is what the installers run, so it is the
+        # moment somebody is setting this up and can still decide not to.
+        import people
+        print()
+        print(people.install_disclosure())
+
+    elif cmd == "disclosure":
+        # §11.7/D26: reachable without running an install, so the Windows wizard page, the
+        # two shell installers and an admin asking "what does this keep?" all read the same
+        # text — generated from `retention()`, so it cannot drift from what the product does.
+        import people
+        print(people.install_disclosure())
 
     elif cmd == "check-weights":
         # Exists so the build can verify the PACKAGED product rather than the source tree:
