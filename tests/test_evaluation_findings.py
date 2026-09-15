@@ -438,7 +438,10 @@ def test_a_pre_cutover_judgment_is_readable_rather_than_silently_empty(conn):
 
     out = core.reconcile_evaluation(conn, evaluation_id="ev_legacy", actual="CTR 1.2%")
 
-    assert out["original_analysis"] == "the original essay"
+    # §9.9 grouped "what we said" into `predicted`, which is where a pre-cutover essay
+    # belongs — it IS what was said. Still readable, still never silently empty.
+    assert out["predicted"]["original_analysis"] == "the original essay"
+    assert out["predicted"]["schema"] == "legacy"
     assert "structured" in out.get("note", "").lower() or out.get("schema") == "legacy"
 
 

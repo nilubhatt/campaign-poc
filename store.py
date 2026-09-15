@@ -407,6 +407,22 @@ CREATE TABLE IF NOT EXISTS reconciliations (
     evaluation_id TEXT NOT NULL REFERENCES evaluations(id) ON DELETE CASCADE,
     actual        TEXT,            -- the real post-conclusion metrics (freeform + optional structured)
     comparison    TEXT NOT NULL,   -- Claude's prediction-vs-actual reconciliation + lesson learned
+    -- §9.9: the SERVER's tally, kept beside the person's lesson. The split this product is
+    -- built on, at the one surface that grades the product: whether 3.4 fell inside 3.0-4.0 is
+    -- arithmetic and is stored as arithmetic; what the miss MEANT is the sentence above, and
+    -- the two must never be read as one kind of claim. `not_comparable` is stored separately
+    -- and never folded into either — a calibration figure that scored unscorable predictions
+    -- as passes would be this product awarding itself marks.
+    counts        TEXT NOT NULL DEFAULT '{}',   -- JSON: held / missed / not_comparable
+    confounded    INTEGER NOT NULL DEFAULT 0,   -- §9.8: was the outcome clean evidence?
+    -- §9.9: "produce ONE record". The four assembled columns, kept — three of them are
+    -- recomputed live over state that keeps moving (the drift figure is rewritten whenever
+    -- the answer changes, a context link is recomputed on every read and an event can be
+    -- withdrawn), so a stored lesson beside three integers left a later reader with no way to
+    -- see what the lesson was about. §9.5 settled this for itself with `execution_at_save`
+    -- and wrote down why; this is the same rule applied to the record that grades the product.
+    record        TEXT NOT NULL DEFAULT '{}',   -- JSON: predicted / delivered / actual /
+                                   -- context / scored, plus `as_of`
     basis         TEXT,            -- results | superseding_version (D85): §6.3 made the
                                     -- version-based reconciliation the common case, so
                                     -- "v2 shows the structure came back" now lands in the
@@ -1428,6 +1444,39 @@ def delete_campaign(conn, campaign_id: str) -> bool:
     return cur.rowcount > 0
 
 
+def link_evaluation(conn, evaluation_id: str, campaign_id: str) -> None:
+    conn.execute("UPDATE evaluations SET campaign_id = ? WHERE id = ?",
+                 (campaign_id, evaluation_id))
+    conn.commit()
+
+
+def unlinked_judgment_for(conn, subject_title: str) -> Optional[dict]:
+    """A judgment about this title that is not attached to any record (§9.9, D40).
+
+    §5.2's "add this to the library" is the moment: the judgment is on screen and the record
+    has just been created. Without this the store-then-reconcile sequence could not complete
+    from the commonest starting point — a pitch nobody had stored yet.
+    """
+    row = conn.execute(
+        """SELECT id, subject_title FROM evaluations
+           WHERE campaign_id IS NULL AND subject_title = ? COLLATE NOCASE
+             AND NOT EXISTS (SELECT 1 FROM reconciliations r WHERE r.evaluation_id = id)
+           ORDER BY created_at DESC LIMIT 1""", (subject_title,)).fetchone()
+    return dict(row) if row else None
+
+
+def superseded_by(conn, campaign_id: str) -> Optional[str]:
+    """Which record replaced this one, or None (§9.9, D120/D127).
+
+    DERIVED, like every other reverse lookup here — `supersedes` points backwards and a cached
+    forward pointer breaks on chains and on fan-in, which is the reasoning the `campaigns`
+    table already records for `is_superseded`.
+    """
+    row = conn.execute("SELECT id FROM campaigns WHERE supersedes = ? "
+                       "ORDER BY created_at LIMIT 1", (campaign_id,)).fetchone()
+    return row["id"] if row else None
+
+
 def get_superseded_campaign_ids(conn) -> set[str]:
     rows = conn.execute("SELECT DISTINCT supersedes FROM campaigns WHERE supersedes IS NOT NULL").fetchall()
     return {r["supersedes"] for r in rows}
@@ -1966,6 +2015,7 @@ def bulk_import_metrics(conn, rows: list[dict], *, confirm: bool = False) -> dic
                 "columns": columns,
                 "what_it_means": _import_preview_sentence(rows, columns, problems)}
     imported, errors = 0, []
+    offers: dict = {}
     # Which campaigns need §9.5's drift figure refreshed once the loop is done.
     touched: set[str] = set()
     # An explicit BEGIN, because without one the per-row SAVEPOINT was the OUTERMOST one — and
@@ -2073,6 +2123,13 @@ def bulk_import_metrics(conn, rows: list[dict], *, confirm: bool = False) -> dic
                 retired.setdefault(gone["measure"], gone)
             for bad in written.get("skipped") or []:
                 skipped.append({"row": i, **bad})
+            # §9.9/D116: this loop harvests every other one-shot side effect and dropped
+            # `next_actions` — which carries the reconcile offer and §9.4's revisit list. §8.8
+            # is how a customer actually loads a workbook, so dropping it here is dropping it
+            # on the path that matters. Gathered per campaign rather than per row.
+            for offer in written.get("next_actions") or []:
+                offers.setdefault((offer["tool"],
+                                   str(offer.get("prefilled_args"))), offer)
         except Exception as exc:
             errors.append({"row": i, "reason": str(exc), **_retry_of(exc)})
 
@@ -2086,7 +2143,8 @@ def bulk_import_metrics(conn, rows: list[dict], *, confirm: bool = False) -> dic
               **({"new_measures": list(asked.values())} if asked else {}),
               **({"newly_eligible": list(eligible.values())} if eligible else {}),
               **({"retired_measures": list(retired.values())} if retired else {}),
-              **({"skipped": skipped} if skipped else {})}
+              **({"skipped": skipped} if skipped else {}),
+              **({"next_actions": _trimmed(list(offers.values()))} if offers else {})}
     if not_processed:
         result["note"] = (
             f"imported {imported} rows before the {config.TOOL_TIME_BUDGET_SECONDS:g}s time "
@@ -3054,12 +3112,53 @@ def unreconciled_evaluation_id(conn, campaign_id: str) -> Optional[str]:
     results, or None. Used to decide whether recording results is worth offering to close a
     loop with (§5.2) — an offer made when there is no open judgment is the standing kind
     that stops being read."""
+    # A `superseding_version` row is NOT a results check. §6.3 offers one when v2 of a judged
+    # brief lands, which is real evidence about the judgment and arrives before any outcome
+    # exists — and "no reconciliation exists" closed the results loop permanently on the
+    # strength of it. D85 created `basis` for exactly this distinction and nothing read it.
+    # The judgment may sit on the record this one REPLACED: results land on the version that
+    # ran, and the judgment stays with the brief it was made about (D120/D127).
     row = conn.execute(
         """SELECT e.id FROM evaluations e
-           WHERE e.campaign_id = ?
-             AND NOT EXISTS (SELECT 1 FROM reconciliations r WHERE r.evaluation_id = e.id)
-           ORDER BY e.created_at DESC LIMIT 1""", (campaign_id,)).fetchone()
+           WHERE (e.campaign_id = ?
+                  OR e.campaign_id = (SELECT supersedes FROM campaigns WHERE id = ?))
+             AND NOT EXISTS (SELECT 1 FROM reconciliations r
+                             WHERE r.evaluation_id = e.id
+                               AND (r.basis IS NULL OR r.basis != 'superseding_version'))
+           ORDER BY e.created_at DESC LIMIT 1""", (campaign_id, campaign_id)).fetchone()
     return row["id"] if row else None
+
+
+def unreconciled_judgments(conn) -> list[dict]:
+    """Every judgment with results on file that nobody has checked against them (§9.9).
+
+    The item's whole diagnosis is that reconciliation "needs somebody to decide to go back and
+    nobody does", and without this no surface can say how many are waiting — §9.6 added its own
+    gap for precisely that reason.
+    """
+    return [dict(r) for r in conn.execute(
+        """SELECT e.id, e.subject_title, e.campaign_id FROM evaluations e
+           WHERE e.campaign_id IS NOT NULL
+             AND EXISTS (SELECT 1 FROM metrics m
+                         JOIN campaigns c ON c.id = m.campaign_id
+                         WHERE m.metric_type = 'actual'
+                           AND (c.id = e.campaign_id OR c.supersedes = e.campaign_id))
+             AND NOT EXISTS (SELECT 1 FROM reconciliations r
+                             WHERE r.evaluation_id = e.id
+                               AND (r.basis IS NULL OR r.basis != 'superseding_version'))
+           ORDER BY e.created_at""").fetchall()]
+
+
+def reconcilable_judgments(conn) -> int:
+    """How many judgments COULD be reconciled — the denominator `calibration` needs."""
+    return conn.execute(
+        """SELECT COUNT(*) AS n FROM evaluations e
+           WHERE e.campaign_id IS NOT NULL
+             AND EXISTS (SELECT 1 FROM metrics m
+                         JOIN campaigns c ON c.id = m.campaign_id
+                         WHERE m.metric_type = 'actual'
+                           AND (c.id = e.campaign_id
+                                OR c.supersedes = e.campaign_id))""").fetchone()["n"]
 
 
 def citations(conn) -> list[list[str]]:
@@ -3103,15 +3202,46 @@ def list_evaluations(conn) -> list[dict]:
 # ── reconciliations ──────────────────────────────────────────────────────────
 
 def insert_reconciliation(conn, *, evaluation_id, comparison, actual=None,
-                          basis: Optional[str] = None) -> str:
+                          basis: Optional[str] = None, counts: Optional[dict] = None,
+                          confounded: bool = False, record: Optional[dict] = None) -> str:
     rid = _id("recon")
     conn.execute(
-        "INSERT INTO reconciliations (id, evaluation_id, actual, comparison, basis, "
-        "created_at) VALUES (?,?,?,?,?,?)",
-        (rid, evaluation_id, actual, comparison, basis, _now()),
+        "INSERT INTO reconciliations (id, evaluation_id, actual, comparison, basis, counts, "
+        "confounded, record, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (rid, evaluation_id, actual, comparison, basis, json.dumps(counts or {}),
+         int(confounded), json.dumps(record or {}, default=str), _now()),
     )
     conn.commit()
     return rid
+
+
+def _trimmed(offers: list) -> list:
+    """`actions.trim`, imported late — `actions` is a leaf and store is imported by it."""
+    import actions
+    return actions.trim(offers)
+
+
+def _reconciliation_row(row) -> dict:
+    d = dict(row)
+    d["counts"] = json.loads(d.get("counts") or "{}")
+    d["confounded"] = bool(d.get("confounded"))
+    d["record"] = json.loads(d.get("record") or "{}")
+    return d
+
+
+def reconciliations(conn) -> list[dict]:
+    """Every reconciliation on file, oldest first (§9.9)."""
+    if not _columns(conn, "reconciliations"):
+        return []
+    return [_reconciliation_row(r) for r in conn.execute(
+        "SELECT * FROM reconciliations ORDER BY created_at, id").fetchall()]
+
+
+def reconciliation_for(conn, evaluation_id: str) -> Optional[dict]:
+    """The reconciliation of one judgment, or None."""
+    row = conn.execute("SELECT * FROM reconciliations WHERE evaluation_id = ? "
+                       "ORDER BY created_at DESC LIMIT 1", (evaluation_id,)).fetchone()
+    return _reconciliation_row(row) if row else None
 
 
 def get_reconciliation(conn, reconciliation_id: str) -> Optional[dict]:

@@ -2573,8 +2573,67 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       earlier; a zero stated impact ("somebody looked and found no delay") was read as somebody
       saying it changed things; and `stated_by="campaign-poc server (computed)"` was accepted
       and rendered as though the library had worked it out.
-- [ ] **9.9 Make `reconcile_evaluation` do its job** — predicted vs delivered vs actual vs
+- [x] **9.9 Make `reconcile_evaluation` do its job** — predicted vs delivered vs actual vs
       context, one record. It has never run.
+      **Four columns, and three of them already existed.** §2.4 recorded what was said,
+      §9.2/§9.3 what shipped, §6.5 what it did, §9.6–§9.8 what else was going on — each built
+      for its own reasons and never once put beside the others. That independence is most of
+      the value: a reconciliation assembled out of one subsystem's opinion of itself proves
+      nothing.
+      **The server lines up and scores arithmetic; it does not mark its own homework.** Whether
+      3.4 falls inside 3.0–4.0 is computed. Whether "the six-week timeline is unrealistic" held
+      is a judgment, and comes back `yours_to_judge`. `not_comparable` is a THIRD answer and
+      never a quiet pass — a calibration figure built from unscorable rows scored as held would
+      be this product awarding itself marks.
+      **`calibration` is the only thing in the product that grades the product**, and it says
+      what it does not cover: how many judgments could have been reconciled, how many were,
+      how many ran through something else, and that one judgment landing is not a record.
+      *Found by review, all reproduced. Every one of these flattered or punished the product's
+      own score, which is the failure mode this item is uniquely exposed to:*
+      **The range parser was wrong on most real formats.** `"3.0-4.0"` read the hyphen as a
+      MINUS, giving −4 to 3 — so every prediction written with the commonest separator scored
+      as a miss, in the direction nobody audits, because a product reporting its own judgments
+      as worse than they were reads as modesty. Fixing that exposed six more: `"2%-3%"` brought
+      the bug back whenever a unit sat before the hyphen, `"Q3 2026: 3.0-4.0"` made the year the
+      upper bound so 1500 "held", `"3,5-4,0"` read a European decimal as 3 to 5,
+      `"5,000-6,000"` became 0 to 5, `"up to 4"` became the point 4, and a single figure could
+      hold only on exact equality. Every ambiguity now resolves to `not_comparable`.
+      **Predictions were scored against the wrong measure.** The registry's prefix rule routes
+      `ctr_lift` into the CTR family — right for storing it, wrong for deciding which number
+      answers a prediction. A predicted 10–20% CTR *lift* was scored against a measured CTR
+      *level* of 2.3 and reported "missed, below by 7.7": arithmetic on two different
+      quantities, wearing the server's authority.
+      **The one automatic route in was closed by the other automatic route.** §6.3's
+      version-based reconciliation wrote a row, and "no reconciliation exists" then closed the
+      RESULTS loop permanently — before any results existed. D85 created `basis` for exactly
+      this distinction and nothing read it.
+      **The same judgment could be counted as many times as it was saved**, and re-saving was
+      also the only way to refresh a stale tally, so the product pushed users into inflating
+      its own score.
+      **The stored tally went stale and `calibration` read it**, so a corrected figure that
+      turned a held prediction into a missed one left the pass standing. The figure is
+      recomputed live now; the stored record remains as what the LESSON rested on, and
+      `get_reconciliation` shows both with a `changed_since`.
+      **Nothing said "you have fourteen judgments nobody has checked"** while `calibration`
+      reported a perfect record beside them — the item whose whole diagnosis is "nobody decides
+      to go back" gave itself no gap, which is the reason §9.6 gave itself one.
+      **The bulk import dropped the offer**, on the path a customer actually loads a workbook —
+      D116's shape for the seventh time.
+      **It was a view, not a record.** The four columns were assembled and thrown away; three
+      of them are recomputed over state that keeps moving. §9.5 solved this for itself with
+      `execution_at_save` and wrote down why.
+      **§9.5 and §9.8 both stamped evidence naming §9.9 in their docstrings, and §9.9 read
+      neither** — so the then-versus-now delta existed for the calendar and nothing else.
+      **A campaign-level prediction was scored against one arbitrary month** — insertion order,
+      on a twelve-row workbook.
+      **The lesson could be "ok", "." or an emoji**, and the repo's own fixtures wrote
+      "Recorded." into the one field carrying what the product learned about itself. §9.8 one
+      item earlier refuses a `stated_by` that reads as the product; adjacent items, opposite
+      rigour.
+      *Closes D40, D120 and D127, all three re-pointed here:* a judgment made about a pitch
+      nobody had stored could never be attached to the record it became (`link_evaluation`),
+      and reconciliation did not walk the supersession chain — so a re-briefed campaign
+      reported `nothing_to_check` and offered to record results against a brief that never ran.
 
 ## Phase 10 — Feedback capture
 

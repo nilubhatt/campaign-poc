@@ -147,7 +147,8 @@ def after_metrics(*, campaign_id: str, open_evaluation_id: Optional[str]) -> lis
 def after_upload(*, campaign_id: str, status: Optional[str],
                  has_metrics: bool, earlier_judgment: Optional[dict] = None,
                  commentary: Optional[list] = None, title: str = "",
-                 has_window: bool = True) -> list[dict]:
+                 has_window: bool = True,
+                 unlinked_judgment: Optional[dict] = None) -> list[dict]:
     """After a record lands.
 
     One thing is worth offering, and only sometimes: a concluded campaign with no outcome
@@ -223,6 +224,18 @@ def after_upload(*, campaign_id: str, status: Optional[str],
             needs=["starts_on — the first day it ran (YYYY-MM-DD)",
                    "ends_on — the last day (YYYY-MM-DD)"],
             campaign_id=campaign_id))
+    # §9.9/D40: a judgment was made about this title before it was a record, and nothing could
+    # join them — so "judge the pitch, then store it, then check what happened" could not
+    # complete from the commonest starting point there is.
+    if unlinked_judgment:
+        offers.append(action(
+            f"Attach the judgment already made about \u201c{title[:40]}\u201d to this record",
+            "link_evaluation",
+            why="That judgment is about a proposal nobody had stored, so nothing can ever "
+                "check it against results. Attaching it is what makes the loop closable.",
+            consent="ask",
+            needs=["linked_by — whose call it is that these are the same thing"],
+            evaluation_id=unlinked_judgment["id"], campaign_id=campaign_id))
     offers += _note_what_the_client_said(campaign_id, commentary, title)
     return trim(offers)
 

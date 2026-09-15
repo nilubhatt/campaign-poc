@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import re
 import sqlite3
 import sys
@@ -419,6 +420,9 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
             # provenance already assembled. Without this the correction loop had no input at
             # all — `note_correction` was a tool nothing in the product ever mentioned.
             commentary=commentary, title=title,
+            # §9.9/D40: a judgment about this very title that is attached to nothing. This is
+            # §5.2's moment — the judgment is on screen because they just asked for it.
+            unlinked_judgment=store.unlinked_judgment_for(conn, title),
             # §9.6: the window is what makes this record checkable against a calendar at all,
             # and this is the moment somebody is present and thinking about the campaign.
             has_window=bool(current.get("starts_on"))),
@@ -1542,18 +1546,35 @@ def _reconciliation_context(conn, evaluation: dict, actual_metrics: list) -> dic
     moment for it.
     """
     confounded = [m for m in actual_metrics if m.get("confounded")]
-    clash = ((evaluation.get("evidence") or {}).get("calendar_clash") or {})
+    evidence = evaluation.get("evidence") or {}
+    clash = evidence.get("calendar_clash") or {}
+    # De-duplicated. Twelve workbook rows confounded by the same six events produced seventy
+    # entries — §9.8 fixed exactly this shape one item earlier and this reintroduced it.
+    linked = {}
+    for m in confounded:
+        for e in m["confounded_by"]:
+            linked.setdefault(e["id"], {"id": e["id"], "description": e["description"],
+                                        "why": e["why"], "attribution": e["attribution"]})
+    # What was KNOWN when the verdict was written. §9.5's `execution_at_save` and §9.8's
+    # `confounded` both name §9.9 in their docstrings — "it cannot do that against a caveat
+    # nobody stored" — and both landed in the evaluation's evidence, and this read neither.
+    # The delta is the most interesting thing in the record: we predicted 55%, we shipped as
+    # briefed, we got 41%, and a port was shut for nine days that nobody knew about then.
+    known = {
+        "confounded_evidence": [e["campaign_id"] for e in evidence.get("confounded") or []],
+        "execution": [{"campaign_id": e["campaign_id"], "status": e["status"]}
+                      for e in evidence.get("execution_at_save") or []],
+        **({"calendar_clash": clash["status"],
+            "what_it_means": clash.get("what_it_means", "")} if clash else {}),
+    }
     return {
         "basis": "computed",
         "confounded": bool(confounded),
-        "confounded_by": [{"id": e["id"], "description": e["description"],
-                           "why": e["why"], "attribution": e["attribution"]}
-                          for m in confounded for e in m["confounded_by"]],
-        # §9.7's stored check is the other half: what the calendar said WHEN the prediction
-        # was made. The interesting record is the delta between the two.
-        **({"known_when_predicted": {"calendar_clash": clash["status"],
-                                     "what_it_means": clash.get("what_it_means", "")}}
-           if clash else {}),
+        "confounded_by": list(linked.values()),
+        "known_when_predicted": known,
+        # Did the world move after the verdict? A confounder nobody knew about when the call
+        # was made is a different lesson from one that was on the record and ignored.
+        "learned_since": bool(confounded) and not evidence.get("confounded"),
     }
 
 
@@ -1561,7 +1582,12 @@ def _say_the_reconciliation_context(conn, evaluation: dict, actual_metrics: list
     confounded = [m for m in actual_metrics if m.get("confounded")]
     if not confounded:
         return ""
-    return (" `context` says something else was going on while this ran, so the actual figures "
+    since = not (evaluation.get("evidence") or {}).get("confounded")
+    return ((" What confounded this outcome WAS NOT KNOWN when the judgment was written — it "
+             "was recorded afterwards. A call made without that information is not the same "
+             "mistake as one made in spite of it, and the lesson should say which."
+             if since else "")
+            + " `context` says something else was going on while this ran, so the actual figures "
             "are not clean evidence of whether the judgment was right. Say so in the lesson: "
             "a prediction that missed because a port was shut is a different lesson from one "
             "that missed because the reasoning was wrong, and recording them the same way is "
@@ -3289,6 +3315,10 @@ _GAP_RANK = {
     # going on while it ran, and this one is cheap to close (two dates) where that one needs
     # photographs.
     "no_window": 4,
+    # Below the gaps about MISSING data, because this one is about data that is all present
+    # and simply has not been looked at — and the looking is a few minutes rather than a
+    # workbook somebody has to go and find.
+    "judgments_never_reconciled": 3,
     # "commentary_never_read" is recorded but not reported — see gaps() for why.
 }
 
@@ -3427,6 +3457,34 @@ def gaps(conn) -> dict:
                 consent="ask",
                 needs=["the photographs themselves"],
                 campaign_id=unchecked[0]["id"], phase="delivered")]),
+        })
+
+    # §9.9: the item's whole diagnosis is that reconciliation "needs somebody to decide to go
+    # back and nobody does" — and it gave itself no gap, so the number waiting was invisible on
+    # every reporting surface. `calibration` meanwhile reported a perfect record beside them.
+    waiting = store.unreconciled_judgments(conn)
+    if waiting:
+        found.append({
+            "code": "judgments_never_reconciled",
+            "what": f"{len(waiting)} judgment"
+                    f"{'s' * (len(waiting) != 1)} with results on file "
+                    f"{'have' if len(waiting) != 1 else 'has'} never been checked against "
+                    f"what actually happened: "
+                    f"{', '.join(j['subject_title'] for j in waiting[:_MAX_NAMED])}"
+                    + (f" (and {len(waiting) - _MAX_NAMED} more)"
+                       if len(waiting) > _MAX_NAMED else "") + ".",
+            "why_it_matters": ("Reconciliation is the only thing in this product that says "
+                               "whether its own judgments are any good, and it needs somebody "
+                               "to go back. Until these are checked, the calibration figure "
+                               "is about whoever bothered."),
+            "counts": {"judgments": len(waiting)},
+            "next_actions": actions.trim([actions.action(
+                f"Check what the library said about \u201c{waiting[0]['subject_title'][:36]}\u201d "
+                f"against what happened",
+                "reconcile_evaluation",
+                why="The results are on file and the judgment has never been tested against "
+                    "them. This is the one surface that grades the product.",
+                consent="ask", evaluation_id=waiting[0]["id"])]),
         })
 
     # §9.6: a concluded campaign with no window is one the calendar can never reach. §9.5 gave
@@ -5721,76 +5779,728 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
 
 def reconcile_evaluation(conn, *, evaluation_id: str, actual: Optional[str] = None) -> dict:
     """
-    Start closing the loop on a past judgment (§6.5: this is what makes reconciliation
-    actually functional). If `actual` isn't given, pull it automatically from the
-    campaign's own metric_type='actual' metrics on file — the user shouldn't have to retype
-    numbers that were already recorded via add_metrics/bulk_import_metrics. Errors if
-    neither is available (only predicted metrics on file don't count as "actual").
+    Line up what was said against what shipped, what it did, and what else was going on (§9.9).
+
+    The review: *"The tool exists and has never run. This is its job: line up predicted against
+    delivered against actual against context, and produce one record — what we said would
+    happen, what we actually shipped, what it did, and what else was going on. That record is
+    the only thing in the entire product capable of telling you whether its own judgment is any
+    good."*
+
+    All four columns already existed and none of them had ever been put beside each other. That
+    independence is most of the value here: a reconciliation assembled out of one subsystem's
+    opinion of itself proves nothing, and these were each built for their own reasons —
+    §2.4 recorded what was said, §9.2/§9.3 what shipped, §6.5 what it did, §9.6–§9.8 what else
+    was happening.
+
+    The server LINES UP and scores arithmetic; it does not mark its own homework. Whether 3.4
+    falls inside 3.0–4.0 is computed. Whether "the six-week timeline is unrealistic" held is a
+    judgment, and it comes back `yours_to_judge` rather than guessed — `not_comparable` never
+    counts as a pass, because a calibration figure built from unscorable rows quietly scored as
+    held would be the system awarding itself marks.
     """
-    import json
     ev = store.get_evaluation(conn, evaluation_id)
     if not ev:
         return {"error": f"evaluation {evaluation_id} not found"}
 
-    # Bound on BOTH branches. §9.8 reads it below for the context half, and it was set only
-    # when `actual` was pulled from file — so passing the numbers in by hand raised a
-    # NameError on the surface §9.9 is named after.
-    actual_metrics: list = []
-    if actual is None:
-        campaign = store.get_campaign(conn, ev["campaign_id"]) if ev["campaign_id"] else None
-        actual_metrics = [m for m in (campaign["metrics"] if campaign else [])
-                          if m["metric_type"] == "actual"]
-        if not actual_metrics:
-            return {"error": "no actual metrics on file for this campaign — pass actual= "
-                              "or record them first with add_metrics/bulk_import_metrics"}
-        # A metrics row can carry `structured` with no freeform `detail` at all (exactly
-        # what bulk_import_metrics produces from a KPI workbook) — include both, not just
-        # detail, or a structured-only row silently contributed nothing (review found this).
-        parts = []
-        for m in actual_metrics:
-            if m["detail"]:
-                parts.append(m["detail"])
-            if m["structured"]:
-                parts.append(m["structured"])  # already a JSON string from the DB row
-        actual = "\n".join(parts)
-        if not actual:
-            return {"error": "actual metrics on file for this campaign have no readable "
-                              "detail or structured data"}
+    # D120/D127: the results of a re-briefed campaign land on the record that RAN, and the
+    # judgment sits on the one it replaced. Reconciling against v1 reported "no measured
+    # result" and offered to record results against a brief that never ran — the exact failure
+    # `actions.after_upload` describes in writing, recreated on this item's own surface.
+    # "Predicted vs delivered vs actual vs SUPERSEDED" is the review's own phrase for it.
+    campaign, measured_on, superseded_by = _the_record_that_ran(conn, ev.get("campaign_id"))
+    actual_metrics = [m for m in ((campaign or {}).get("metrics") or [])
+                      if m["metric_type"] == "actual"]
+    given = (actual or "").strip()
+    if not actual_metrics and not given:
+        # `nothing_to_check`, never an empty comparison. A reconciliation with no outcome on
+        # either side would be the product grading itself against nothing.
+        return {
+            "evaluation_id": evaluation_id, "subject_title": ev["subject_title"],
+            "status": "nothing_to_check", "basis": "computed",
+            "what_it_means": (
+                "This judgment has no measured result to be checked against: the campaign "
+                "carries no actual metrics and none were passed in. That is not the same as "
+                "the judgment having been right."),
+            "next_actions": actions.trim([actions.action(
+                f"Record what \u201c{(campaign or {}).get('title') or ev['subject_title']}\u201d "
+                f"actually achieved",
+                "add_metrics",
+                why="Until there are results, nothing can say whether this judgment was any "
+                    "good — and that is the only thing in this product that grades it.",
+                consent="ask",
+                needs=["the results themselves — CTR, ROI, conversions, or whatever was "
+                       "measured"],
+                # The record that RAN, not the one that was judged.
+                campaign_id=(campaign or {}).get("id") or ev.get("campaign_id"))]),
+        }
 
-    # A judgment written before §2.4 has only the essay: no verdict, no findings. Returning
-    # it as an empty structured evaluation meant reconciling against an original the code
-    # had silently dropped - a confident comparison with nothing on one side of it.
     legacy = bool(ev.get("analysis")) and not ev.get("verdict")
-
+    values, periods = _measured_values(conn, actual_metrics)
+    scored = _score_predictions(conn, ev.get("predictions") or {}, values, periods)
+    counts = {verdict: sum(1 for s in scored if s["verdict"] == verdict)
+              for verdict in ("held", "missed", "not_comparable")}
+    context_half = _reconciliation_context(conn, ev, actual_metrics)
     return {
         "evaluation_id": ev["id"],
         "subject_title": ev["subject_title"],
-        "original_verdict": ev["verdict"],
-        "original_summary": ev["summary"],
-        "original_findings": ev["findings"],
-        **({"original_analysis": ev["analysis"], "schema": "legacy"} if legacy else {}),
-        # Already decoded by store._parse_evaluation - decoding again would be parsing a
-        # dict as JSON.
-        "predictions": ev["predictions"],
+        "status": "checked",
+        # The LINING UP is computed; every judgment inside it stays whoever's it was.
+        "basis": "computed",
+        # 1. What we said would happen.
+        "predicted": {
+            "basis": "judged",
+            "verdict": ev["verdict"],
+            "summary": ev["summary"],
+            "approve_if": ev.get("approve_if"),
+            "predictions": ev.get("predictions") or {},
+            # Each finding, with the one honest verdict the server can give it.
+            "findings": [{**{k: f.get(k) for k in ("id", "severity", "kind", "finding",
+                                                   "fix")},
+                          "verdict": "yours_to_judge"}
+                         for f in (ev.get("findings") or [])],
+            **({"original_analysis": ev["analysis"], "schema": "legacy"} if legacy else {}),
+        },
+        # 2. What we actually shipped — §9.2/§9.3, not the brief. A reconciliation that reads
+        #    the brief as the execution is measuring the wrong document, which is the whole of
+        #    Phase 9.
+        "delivered": _delivered_half(conn, (campaign or {}).get("id")),
+        # 3. What it did.
+        "actual": {
+            # TWO bases, because there are two things here. The sentence is the caller's when
+            # they pass one; the numbers always come off the record. Labelling both `computed`
+            # put a stated sentence and a computed figure that contradict each other under one
+            # word — and a corrected `actual=` text was silently scored against the old rows.
+            "detail": given or _joined_detail(actual_metrics),
+            "detail_basis": "stated" if given else "computed",
+            "values": values, "values_basis": "computed",
+            "measured_rows": len(actual_metrics),
+            "from_campaign_id": measured_on,
+            "what_it_means": (
+                "The sentence here is yours and the numbers are the campaign's own metric "
+                "rows — the scoring below uses the numbers, which do not come from what you "
+                "typed. If they disagree, record the correction with add_metrics."
+                if given else
+                f"{len(actual_metrics)} measured row(s) on this campaign.")},
+        # 4. What else was going on.
+        "context": context_half,
+        "scored": scored,
+        "counts": counts,
         "cited_ids": ev["cited_ids"],
-        "actual": actual,
-        # §9.8: the one surface the review names — "line up predicted against delivered
-        # against actual against CONTEXT" — was the one surface that cited the number with no
-        # caveat, because this function reads `detail` and `structured` off the metric rows
-        # and drops everything else on them.
-        "context": _reconciliation_context(
-            conn, ev,
-            actual_metrics or [m for m in ((store.get_campaign(conn, ev["campaign_id"]) or {})
-                                           .get("metrics") or []) if m["metric_type"] == "actual"]
-            if ev.get("campaign_id") else actual_metrics),
+        "what_it_means": _reconciliation_sentence(counts, context_half, ev, superseded_by),
         "note": ("This judgment predates the structured schema, so there is no verdict or "
                  "findings to compare against — only `original_analysis`, the free text as "
                  "it was written. Read it before comparing."
                  if legacy else
-                 "Compare the original findings and predictions to actual, then call "
-                 "save_reconciliation with the lesson.")
+                 "The server has scored what is arithmetic. Everything marked "
+                 "`yours_to_judge` or `not_comparable` is yours: say whether the finding "
+                 "held, in your words, and call save_reconciliation with the lesson.")
         + _say_the_reconciliation_context(conn, ev, actual_metrics),
+        "next_actions": actions.trim([actions.action(
+            f"Record the lesson from \u201c{ev['subject_title'][:40]}\u201d",
+            "save_reconciliation",
+            why="The tally above is the server's. What it MEANT — whether the reasoning was "
+                "wrong or the world was — is yours, and it is the only thing here that "
+                "improves the next judgment.",
+            consent="ask",
+            needs=["comparison — what you make of it, in your words"],
+            evaluation_id=evaluation_id)]),
     }
+
+
+def link_evaluation(conn, *, evaluation_id: str, campaign_id: str,
+                    linked_by: str) -> dict:
+    """Attach a judgment made before the record existed (§9.9, D40).
+
+    A judgment about a pitch nobody had stored carries a null `campaign_id`, §5.2 offers to
+    add it to the library, and nothing could then join the two — so the loop this whole item
+    exists to close was unreachable from the commonest starting point.
+
+    Refused where one is already set. Re-pointing a judgment at a different campaign would
+    silently change what it was about, and every citation of it with it.
+    """
+    ev = store.get_evaluation(conn, evaluation_id)
+    if ev is None:
+        raise ValueError(f"{evaluation_id!r} is not a judgment in this library.")
+    if ev.get("campaign_id"):
+        raise ValueError(
+            f"this judgment is already about {ev['campaign_id']!r}. Re-pointing it at another "
+            f"record would change what it was a judgment OF, and everything that cites it "
+            f"with it. Judge the other record on its own.")
+    if store.get_campaign(conn, campaign_id) is None:
+        raise ValueError(f"{campaign_id!r} is not a record in this library.")
+    if not (linked_by or "").strip():
+        raise ValueError(
+            "`linked_by` is required: saying that a judgment was about this record is a claim "
+            "a person makes, and one nobody's name is against is one nobody can question.")
+    store.link_evaluation(conn, evaluation_id, campaign_id)
+    return {"evaluation_id": evaluation_id, "campaign_id": campaign_id, "status": "linked",
+            "basis": "stated", "linked_by": linked_by.strip(),
+            "what_it_means": (
+                f"{linked_by.strip()} attached this judgment to the record. Once its results "
+                f"are on file, reconcile_evaluation can say whether the judgment was any "
+                f"good — which it could not do while the two were unconnected.")}
+
+
+def _the_record_that_ran(conn, campaign_id: Optional[str]) -> tuple:
+    """The judged record, or whatever superseded it (§9.9, D120/D127).
+
+    A judgment is about a brief; the results land on whichever version actually ran. Walking
+    the chain is what `diff_campaigns` already does (C25) and what this needs for the same
+    reason — otherwise the one surface that grades the product grades it against a document
+    nobody executed.
+
+    Stops at the first version carrying measured results, so a chain of three re-briefs
+    reconciles against the one that has numbers rather than the newest empty one.
+    """
+    if not campaign_id:
+        return None, None, None
+    judged = store.get_campaign(conn, campaign_id)
+    if judged is None:
+        return None, None, None
+    if any(m["metric_type"] == "actual" for m in judged.get("metrics") or []):
+        return judged, judged["id"], None
+    seen, walking = {campaign_id}, campaign_id
+    while True:
+        later = store.superseded_by(conn, walking)
+        if not later or later in seen:
+            return judged, judged["id"], None
+        seen.add(later)
+        record = store.get_campaign(conn, later)
+        if record is None:
+            return judged, judged["id"], None
+        if any(m["metric_type"] == "actual" for m in record.get("metrics") or []):
+            return record, record["id"], judged["id"]
+        walking = later
+
+
+def _joined_detail(actual_metrics: list) -> str:
+    """The measured rows as text. A row can carry `structured` with no freeform `detail` at all
+    — exactly what a KPI workbook produces — so a detail-only join silently contributed
+    nothing for the commonest import path."""
+    parts = []
+    for m in actual_metrics:
+        if m["detail"]:
+            parts.append(m["detail"])
+        if m["structured"]:
+            parts.append(m["structured"] if isinstance(m["structured"], str)
+                         else json.dumps(m["structured"]))
+    return "\n".join(parts)
+
+
+def _as_number(value) -> Optional[float]:
+    """A workbook cell arriving as "3.4" is a measurement. Saying "no ROAS was measured" about
+    it is a false statement about the library's own contents."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).strip().replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _measured_values(conn, actual_metrics: list) -> tuple:
+    """Every number on the measured rows, canonicalised through the registry, latest wins.
+
+    Through §8.1's registry rather than the raw key, because "roas", "ROAS" and "roi" are one
+    measure and a prediction scored against one spelling and not another is a calibration
+    figure built on a coin toss. A key the registry does not claim keeps its own name — it
+    simply will not match a prediction, which is `not_comparable` and honest.
+    """
+    values: dict = {}
+    periods: dict = {}
+    for m in actual_metrics:
+        raw = m["structured"]
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        for key, value in parsed.items():
+            # §8.2 already refuses a workbook's Month and Store # on the way in; reading them
+            # back out as measurements here undid that, and `month: 12` read as somebody
+            # having measured twelve of something.
+            if not metrics.is_a_measurement(key):
+                continue
+            number = _as_number(value)
+            if number is not None:
+                name = metrics.canonical(conn, key) or key
+                values[name] = number
+                # How many DISTINCT periods this measure was recorded for. "Latest wins" was
+                # insertion order, so a campaign-level prediction was scored against whichever
+                # month the spreadsheet happened to end with — and the calibration figure was
+                # built on it. §9.8 gave metrics their own period; this reads it.
+                periods.setdefault(name, set()).add(
+                    m.get("period_start") or m.get("created_at"))
+    return values, {name: len(seen) for name, seen in periods.items()}
+
+
+# `predicted_roi_range` -> `roi` -> whatever §8.1's registry says that measure is called.
+_PREDICTION_KEY = re.compile(r"^(?:predicted_)?(?P<measure>.+?)(?:_range)?$")
+
+
+def _measure_predicted(conn, key: str) -> Optional[str]:
+    """Which measured value answers this prediction, per the REGISTRY (§9.9).
+
+    Derived rather than hand-mapped. A table here would be a second opinion about what a
+    measure is called, sitting beside §8.1's registry — and it drifts the moment somebody adds
+    a synonym there: the first version mapped `predicted_conversion_range` to
+    `conversion_rate`, which the registry does not recognise, so that entry could never match
+    anything and nothing would have said so.
+
+    It also settles ROI versus ROAS the only defensible way. They are arguably different
+    measures, but the registry already canonicalises `roi` to `roas`, and a calibration figure
+    that disagreed with the library's own naming about which number answers which prediction
+    would be wrong in a way nobody could see.
+    """
+    match = _PREDICTION_KEY.match(str(key or "").strip().strip("_").lower())
+    if not match:
+        return None
+    stem = match.group("measure")
+    name = metrics.canonical(conn, stem)
+    if name and stem != name and stem.startswith(name + "_"):
+        # A LIFT is not a LEVEL. The registry's prefix rule is right for storing a value —
+        # `ctr_lift` belongs to the CTR family — and wrong for deciding which measured number
+        # answers a prediction: "predicted a 10-20% CTR lift" scored against a measured CTR of
+        # 2.3 reads "missed, below by 7.7", which is arithmetic on two different quantities
+        # wearing the server's authority. A prediction scored against the wrong measure is
+        # worse than one not scored at all, because nobody can see it.
+        return None
+    return name
+
+
+def _score_predictions(conn, predictions: dict, values: dict,
+                       periods: Optional[dict] = None) -> list:
+    """Whether each numeric prediction landed (§9.9).
+
+    Arithmetic only. A range and a number are comparable and the server does it — a model
+    re-deriving that is the variance §7.1 exists to remove. Anything else is `not_comparable`,
+    which is a THIRD answer and never a quiet pass.
+    """
+    scored = []
+    if predictions and not isinstance(predictions, dict):
+        # `save_evaluation` accepts whatever the model sent, and `.items()` on a list is an
+        # AttributeError on the surface that grades the product.
+        return []
+    for key, stated in sorted((predictions or {}).items()):
+        measure = _measure_predicted(conn, key)
+        bounds = _range_of(stated)
+        if measure is None or bounds is None:
+            scored.append({
+                "predicted": key, "stated": stated, "kind": "prediction",
+                "verdict": "not_comparable", "basis": "computed", "actual": None,
+                "what_it_means": (
+                    _why_not_a_range(stated)
+                    if bounds is None else
+                    f"No measure in this library is called {key!r}, so nothing on file "
+                    f"answers it and it was not scored. That is not the same as it having "
+                    f"held.")})
+            continue
+        if measure not in values:
+            scored.append({
+                "predicted": key, "stated": stated, "kind": "prediction",
+                "verdict": "not_comparable", "basis": "computed", "actual": None,
+                "measure": measure,
+                "what_it_means": (
+                    f"No {measure.upper()} was measured on this campaign, so this prediction "
+                    f"cannot be checked. That is not the same as it having held.")})
+            continue
+        spans = (periods or {}).get(measure, 1)
+        if spans > 1:
+            # A prediction about a campaign, and a measure recorded for twelve months. Which
+            # month it was about is not something the server can know, and picking one is how
+            # a calibration figure gets built on a coin toss.
+            scored.append({
+                "predicted": key, "stated": stated, "kind": "prediction",
+                "verdict": "not_comparable", "basis": "computed", "actual": None,
+                "measure": measure, "periods": spans,
+                "what_it_means": (
+                    f"{measure.upper()} was recorded for {spans} periods on this campaign, so "
+                    f"which of them this prediction was about is yours to say. Scoring it "
+                    f"against one of them would be arithmetic on a guess.")})
+            continue
+        low, high = bounds
+        got = values[measure]
+        held = low <= got <= high
+        scored.append({
+            "predicted": key, "stated": stated, "kind": "prediction", "measure": measure,
+            "actual": got, "verdict": "held" if held else "missed", "basis": "computed",
+            "what_it_means": (
+                f"Predicted {low:g}\u2013{high:g}; measured {got:g}. "
+                + ("Inside the range." if held else
+                   f"Outside it, {'above' if got > high else 'below'} by "
+                   f"{(got - high) if got > high else (low - got):g}."))})
+    return scored
+
+
+# A number: optional sign, thousands groups of exactly three, optional decimal. Written
+# strictly so "3,5" (a European decimal) does not read as three-thousand-and-something, and
+# "5,000" does.
+_NUMBER = r"[-+]?\d{1,3}(?:,\d{3})*(?:\.\d+)?|[-+]?\d*\.\d+|[-+]?\d+"
+# Two of them with a separator between, and anything unit-ish allowed in the gaps: "2%-3%",
+# "3x to 4x", "300-400bps".
+_RANGE = re.compile(
+    rf"(?P<low>{_NUMBER})\s*[%xX]?\s*(?:bps|pts?|pp)?\s*(?:-|\u2013|\u2014|to|\.\.)\s*"
+    rf"(?P<high>{_NUMBER})\s*[%xX]?\s*(?:bps|pts?|pp)?",
+    re.IGNORECASE)
+# An open-ended claim is not a range this can check, and reading one as a point turns "up to
+# 4" into "exactly 4" — a prediction that was never made.
+_OPEN_ENDED = re.compile(r"(up to|at least|no more than|no less than|under|over|below|above|"
+                         r"minimum|maximum|min\.?|max\.?|[<>\u2264\u2265])", re.IGNORECASE)
+# A comma that is not a thousands separator: "3,5" is a decimal in half of Europe and this
+# cannot tell which half wrote the brief.
+_AMBIGUOUS_COMMA = re.compile(r"\d,\d{1,2}(?!\d)")
+
+
+def _range_of(stated) -> Optional[tuple]:
+    """The low and high a prediction actually stated, or None when it is not a range (§9.9).
+
+    Conservative on purpose. This decides whether the library's own judgment gets a pass, so
+    every ambiguity resolves to `not_comparable` — a prediction nobody scored is honest, and a
+    prediction scored against a number parsed out of a quarter label is the product grading
+    itself on noise. Measured failures that drove each rule:
+
+      "2%-3%"            the hyphen read as a minus once a unit sat before it, giving (-3, 2)
+      "Q3 2026: 3.0-4.0" the year became the upper bound, so 1500 "held"
+      "3,5-4,0"          a European decimal read as (3, 5)
+      "5,000-6,000"      thousands separators split into (0, 5)
+      "up to 4"          an open bound read as the point 4
+      "3.4"              a point estimate that can hold only on exact equality
+    """
+    text = str(stated or "").strip()
+    if not text or _OPEN_ENDED.search(text) or _AMBIGUOUS_COMMA.search(text):
+        return None
+    matches = _RANGE.findall(text)
+    if len(matches) != 1:
+        # None at all, or two — "3.0-4.0 in Q1, 5.0-6.0 in Q2" is two predictions and picking
+        # one is a guess.
+        return None
+    low, high = (float(n.replace(",", "")) for n in matches[0])
+    # Any number NOT inside the range is something this did not understand — a quarter, a
+    # year, a footnote marker. The whole string has to be the range.
+    leftover = _RANGE.sub(" ", text, count=1)
+    if re.search(r"\d", leftover):
+        return None
+    return (min(low, high), max(low, high))
+
+
+def _why_not_a_range(stated) -> str:
+    """Why this prediction could not be checked, specifically enough to fix."""
+    text = str(stated or "").strip()
+    if _OPEN_ENDED.search(text):
+        return (f"\u201c{text}\u201d is open-ended, so there is no upper or lower bound to check a "
+                f"number against. Whether it held is yours to say — and a two-sided range "
+                f"would make the next one checkable.")
+    if _AMBIGUOUS_COMMA.search(text):
+        return (f"\u201c{text}\u201d uses a comma this cannot read safely: 3,5 is a decimal in "
+                f"half of Europe and three-and-a-half-thousand in the other half, and "
+                f"guessing would score the judgment against a number nobody predicted.")
+    if re.search(r"\d", text) and not _RANGE.search(text):
+        return (f"\u201c{text}\u201d is a single figure rather than a range, so it can only be "
+                f"checked by exact equality — which no real measurement ever satisfies. "
+                f"Whether it held is yours to say.")
+    return (f"\u201c{text}\u201d is not a range this server can check against a measured number, "
+            f"so whether it held is yours to say.")
+
+
+def _delivered_half(conn, campaign_id: Optional[str]) -> dict:
+    """What actually shipped (§9.2/§9.3), for the reconciliation record."""
+    if not campaign_id:
+        return {"status": "nothing_to_check", "basis": "computed",
+                "what_it_means": (
+                    "This judgment was about a proposal that is not a record in the library, "
+                    "so there is nothing to compare what shipped against.")}
+    execution = _execution_note(conn, campaign_id)
+    try:
+        promised = commitments.summary_for(conn, campaign_id) or {}
+    except Exception as exc:                 # noqa: BLE001 — the record must still assemble
+        # "Could not check" is not "nothing to check". Every other surface in Phase 9 refuses
+        # that collapse, and this one made it silently.
+        return {"basis": "computed", "execution": execution,
+                "commitments": {"status": "could_not_check", "detail": str(exc)[:120],
+                                "what_it_means": (
+                                    "The promises in this brief could not be checked, so what "
+                                    "shipped against them is unknown — which is not the same "
+                                    "as the brief having promised nothing.")},
+                "what_it_means": execution["what_it_means"]}
+    if not promised:
+        # `{}` is what `summary_for` returns for a brief that promised nothing specific, and an
+        # empty dict in a column headed "what we shipped" reads as an answer. A reader cannot
+        # tell "this brief named no checkable promises" from "the check did not run".
+        promised = {
+            "status": "nothing_to_check", "count": 0,
+            "what_it_means": ("This brief named no specific, checkable promises, so there is "
+                              "nothing to hold the execution to on that axis."),
+        }
+    else:
+        promised = {**promised, "status": "checked"}
+    return {"basis": "computed", "execution": execution, "commitments": promised,
+            "what_it_means": (
+                execution["what_it_means"] + " " + promised["what_it_means"])}
+
+
+def _reconciliation_sentence(counts: dict, context_half: dict, ev: dict,
+                             superseded_by: Optional[str] = None) -> str:
+    scorable = counts["held"] + counts["missed"]
+    if not isinstance(ev.get("predictions") or {}, dict):
+        said = ("This judgment's `predictions` are not a set of named predictions, so nothing "
+                "could be scored. Whether it was right is entirely yours to say.")
+    elif not scorable:
+        said = ("None of this judgment's predictions could be checked against a measured "
+                "number, so the server has scored nothing. Whether it was right is entirely "
+                "yours to say.")
+    else:
+        said = (f"{counts['held']} of {scorable} checkable prediction(s) landed inside the "
+                f"range they were given.")
+    if counts["not_comparable"]:
+        said += (f" {counts['not_comparable']} could not be checked at all — that is a third "
+                 f"answer and not a pass.")
+    if superseded_by:
+        said += (" These results are from the record that SUPERSEDED the one this judgment was "
+                 "about: the brief was re-briefed and the version that ran is the one with "
+                 "numbers on it. Read the predictions against a plan that changed after they "
+                 "were made.")
+    if context_half.get("confounded"):
+        said += (" Something else was going on while this ran, so read the misses twice: a "
+                 "prediction that missed because the world moved is a different lesson from "
+                 "one that missed because the reasoning was wrong.")
+    return said
+
+
+def save_reconciliation(conn, *, evaluation_id: str, comparison: str,
+                        actual: Optional[str] = None,
+                        basis: Optional[str] = None) -> dict:
+    """Record what a person made of the comparison, with the server's tally beside it (§9.9).
+
+    The split this product is built on, at the one surface that grades the product. The
+    LESSON is `stated` and stays in their words; the TALLY is recomputed here rather than
+    accepted from the caller, for the reason §6.4 settled about the disconfirming search — a
+    check is only worth anything if a difference in it is a bug, which holds only when the
+    server did it.
+    """
+    _check_the_lesson(comparison)
+    if store.get_evaluation(conn, evaluation_id) is None:
+        raise ValueError(
+            f"{evaluation_id!r} is not a judgment in this library. `list_evaluations` names "
+            f"the ones on file.")
+    lined_up = reconcile_evaluation(conn, evaluation_id=evaluation_id, actual=actual)
+    if lined_up.get("error"):
+        raise ValueError(lined_up["error"])
+    standing = store.reconciliation_for(conn, evaluation_id)
+    if standing is not None and (standing.get("basis") or "results") != "superseding_version":
+        # Re-reconciling the same judgment added its tally to `calibration` again. Three goes
+        # at one judgment read as three judgments landing, which is the product inflating its
+        # own record by the simple expedient of being asked twice.
+        raise ValueError(
+            f"this judgment has already been reconciled against its results — "
+            f"\u201c{standing['comparison'][:80]}\u201d. Reconciling again would count the same "
+            f"judgment twice in the calibration figure. Read it with get_reconciliation, "
+            f"which also says whether anything has changed since.")
+    counts = lined_up.get("counts")
+    if counts is None:
+        # A `nothing_to_check` line-up — normally the §6.3 version check, which arrives before
+        # any outcome exists. Storing `{}` said "zero not checkable" about a judgment carrying
+        # predictions nobody could check, which is a false statement of fact and quietly
+        # removed those predictions from the calibration figure altogether.
+        ev = store.get_evaluation(conn, evaluation_id) or {}
+        counts = {"held": 0, "missed": 0,
+                  "not_comparable": len(ev.get("predictions") or {})}
+    rid = store.insert_reconciliation(
+        conn, evaluation_id=evaluation_id, comparison=comparison.strip(), actual=actual,
+        basis=basis,
+        counts=counts,
+        confounded=bool((lined_up.get("context") or {}).get("confounded")),
+        # The assembled columns, kept. See the `record` column's comment: three of the four
+        # are recomputed live over state that keeps moving, so a lesson beside three integers
+        # leaves a later reader unable to see what the lesson was about.
+        record={**{k: lined_up[k] for k in
+                   ("predicted", "delivered", "actual", "context", "scored", "counts",
+                    "what_it_means") if k in lined_up},
+                "as_of": _now_iso()})
+    return {
+        "reconciliation_id": rid, "status": "saved",
+        # The lesson is somebody's account; the counts beside it are arithmetic. Labelling the
+        # whole row one way or the other would make one of them unreadable.
+        "basis": "stated",
+        "counts": counts,
+        "counts_basis": "computed",
+        "what_it_means": (
+            f"Recorded. The server's tally for this judgment stands beside your lesson: "
+            f"{counts.get('held', 0)} held, {counts.get('missed', 0)} missed, "
+            f"{counts.get('not_comparable', 0)} not checkable. "
+            f"`calibration` reads every one of these together."),
+    }
+
+
+# Below this a "lesson" is an acknowledgement. The product's only evidence about its own
+# judgment, and its own fixtures were writing "Recorded." into it.
+_MIN_LESSON = 25
+# Everything the tally already says. What is left after removing all of it has to be a
+# sentence — a regex matching the whole string could not see "1 held, 0 missed. 1 held."
+_TALLY_WORDS = re.compile(r"\b(held|missed|not[\s_]?comparable|comparable|checkable|"
+                          r"prediction|predictions|of|and|the|server|tally|out)\b",
+                          re.IGNORECASE)
+
+
+def _check_the_lesson(comparison: str) -> None:
+    """The half that is a person's, and it has to say something (§9.9).
+
+    §9.8 one item earlier refuses a `stated_by` that reads as the product and refuses a zero
+    stated impact read as an attribution. This accepted "ok", "." and an emoji — and the
+    repo's own fixtures were writing "Recorded." into the one field that carries what the
+    product learned about itself.
+    """
+    text = (comparison or "").strip()
+    if len(text) < _MIN_LESSON:
+        raise ValueError(
+            f"`comparison` is the LESSON, and {text!r} is an acknowledgement. The tally is "
+            f"the server's and already on the record; this is the half that is yours — what "
+            f"it meant, whether the reasoning was wrong or the world was. It is the only "
+            f"thing here that improves the next judgment, so it needs a sentence.")
+    if not _TALLY_WORDS.sub("", text).strip(" \t\n.,;:%/()-0123456789"):
+        raise ValueError(
+            "`comparison` restates the tally, which is arithmetic the server already did and "
+            "stored. What belongs here is what it MEANT — why the call was right, or what "
+            "the library got wrong about this kind of brief.")
+
+
+def _now_iso() -> str:
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
+def get_reconciliation(conn, *, evaluation_id: str) -> dict:
+    """The record as it stood when the lesson was written (§9.9).
+
+    And whether the live answer has MOVED since — an earthquake recorded afterwards, a drift
+    figure rewritten, a context event withdrawn. Both halves matter: the record says what the
+    lesson rested on, and the delta says whether to go back.
+    """
+    stored = store.reconciliation_for(conn, evaluation_id)
+    if stored is None:
+        return {
+            "evaluation_id": evaluation_id, "status": "nothing_to_check", "basis": "computed",
+            "what_it_means": ("This judgment has never been checked against what actually "
+                              "happened, so there is no record to read."),
+            "next_actions": actions.trim([actions.action(
+                "Check this judgment against what actually happened", "reconcile_evaluation",
+                why="Nothing in this library says whether this judgment was any good.",
+                consent="ask", evaluation_id=evaluation_id)]),
+        }
+    live = reconcile_evaluation(conn, evaluation_id=evaluation_id)
+    kept = stored.get("record") or {}
+    now = live.get("counts") or {}
+    changed = {
+        "context": bool((kept.get("context") or {}).get("confounded"))
+                   != bool((live.get("context") or {}).get("confounded")),
+        "delivered": ((kept.get("delivered") or {}).get("execution") or {}).get("status")
+                     != ((live.get("delivered") or {}).get("execution") or {}).get("status"),
+        "counts": bool(now) and now != (stored.get("counts") or {}),
+    }
+    return {
+        "evaluation_id": evaluation_id, "status": "checked",
+        "reconciliation_id": stored["id"],
+        # The lesson is a person's; the record beside it is what the server assembled.
+        "basis": "stated",
+        "comparison": stored["comparison"],
+        "against": stored.get("basis") or "results",
+        # What the lesson rested on, and what the same check says today. A reader needs both
+        # and needs to be able to tell them apart.
+        "counts": stored["counts"], "counts_now": now, "counts_basis": "computed",
+        "record": kept,
+        "changed_since": changed,
+        "what_it_means": (
+            f"Recorded {kept.get('as_of', 'at an unknown time')}. "
+            + ("Nothing about this has changed since."
+               if not any(changed.values()) else
+               "The live answer has moved since this was written ("
+               + ", ".join(k for k, v in changed.items() if v)
+               + "), so the lesson may be worth revisiting — the record above is what it "
+                 "actually rested on.")),
+    }
+
+
+def calibration(conn) -> dict:
+    """How often this library's own judgments turned out to be right (§9.9).
+
+    "The only thing in the entire product capable of telling you whether its own judgment is
+    any good." One reconciliation proves nothing; the tally across them is the point — and it
+    is only as honest as its refusal to count an unscorable prediction as a pass.
+    """
+    rows = store.reconciliations(conn)
+    if not rows:
+        return {"status": "nothing_to_check", "basis": "computed",
+                "counts": {"held": 0, "missed": 0, "not_comparable": 0},
+                "reconciled": 0, "reconcilable": store.reconcilable_judgments(conn),
+                "against_a_later_version": 0, "confounded": 0,
+                "what_it_means": (
+                    "No judgment in this library has ever been reconciled against what "
+                    "actually happened, so nothing can say whether its judgments are any "
+                    "good. That is not a score of zero; it is the absence of one.")}
+    # A brief-versus-brief check is not a measured outcome. `store.py`'s own comment on the
+    # `basis` column says why the column exists: "anything computing calibration would read
+    # both as outcome data" — and this did.
+    against_version = [r for r in rows if r.get("basis") == "superseding_version"]
+    rows = [r for r in rows if r.get("basis") != "superseding_version"]
+    reconcilable = store.reconcilable_judgments(conn)
+    counts = {"held": 0, "missed": 0, "not_comparable": 0}
+    confounded = moved = 0
+    for row in rows:
+        # RECOMPUTED, not read off the stored row. The tally is a save-time snapshot and the
+        # inputs keep moving: a corrected figure turns a held prediction into a missed one, an
+        # earthquake recorded afterwards confounds an outcome that read clean. Reading the
+        # stamp left the product still reporting the pass — flattering in exactly the cases
+        # where a correction lowered a figure, which is the direction nobody audits.
+        #
+        # The stored row is not wrong and is not discarded: it is what the LESSON rested on,
+        # and `get_reconciliation` shows both. This figure is about the library as it stands.
+        live = reconcile_evaluation(conn, evaluation_id=row["evaluation_id"])
+        now = live.get("counts") or {}
+        for key in counts:
+            counts[key] += now.get(key, (row.get("counts") or {}).get(key, 0))
+        confounded += 1 if (live.get("context") or {}).get("confounded") else 0
+        if now and now != (row.get("counts") or {}):
+            moved += 1
+    scorable = counts["held"] + counts["missed"]
+    said = (f"{counts['held']} of {scorable} checkable prediction(s) across "
+            f"{len(rows)} reconciled judgment(s) landed."
+            if scorable else
+            f"{len(rows)} judgment(s) have been reconciled and none of their predictions "
+            f"could be checked against a measured number.")
+    # The denominator is whoever bothered, and saying so is the difference between a figure
+    # and a boast: fourteen unchecked judgments beside one reconciled reads as a hundred
+    # per cent.
+    said += (f" This covers {len(rows)} of {reconcilable} judgment(s) that COULD be "
+             f"reconciled, so it is a figure about the ones somebody went back to.")
+    if len(rows) < _MIN_FOR_A_PATTERN:
+        said += (" That is too few to be a record of anything — one judgment landing is a "
+                 "fact about that judgment.")
+    if counts["not_comparable"]:
+        said += (f" A further {counts['not_comparable']} could not be checked — counted "
+                 f"separately, because a figure that scored those as passes would be this "
+                 f"product awarding itself marks.")
+    if confounded:
+        said += (f" {confounded} of these ran through something else that was going on and "
+                 f"are marked confounded: they still count, and a reader weighing this "
+                 f"figure should know how much of it is about the weather.")
+    if moved:
+        said += (f" {moved} of them have CHANGED SINCE the lesson was recorded — a corrected "
+                 f"figure, or something recorded afterwards. This tally is the library as it "
+                 f"stands; `get_reconciliation` shows what each lesson actually rested on.")
+    if against_version:
+        said += (f" A further {len(against_version)} judgment(s) were checked against a later "
+                 f"VERSION of the brief rather than against results; they are counted "
+                 f"separately because that is evidence about the judgment and not an outcome.")
+    return {"status": "checked", "basis": "computed", "counts": counts,
+            "moved_since_recorded": moved,
+            "reconciled": len(rows), "reconcilable": reconcilable,
+            "against_a_later_version": len(against_version),
+            "confounded": confounded, "what_it_means": said}
 
 
 # ── image assets / creative-reuse detection (§6.6) ───────────────────────────

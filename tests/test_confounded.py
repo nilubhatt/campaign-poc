@@ -803,7 +803,7 @@ def test_reconciliation_carries_it_when_the_numbers_are_passed_in(conn):
     out = core.reconcile_evaluation(conn, evaluation_id=saved["evaluation_id"],
                                     actual="Sell-through 41%.")
 
-    assert out["actual"] == "Sell-through 41%."
+    assert out["actual"]["detail"] == "Sell-through 41%."
     assert out["context"]["confounded"] is True
 
 

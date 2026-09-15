@@ -143,8 +143,11 @@ def test_reconcile_evaluation_pulls_actual_metrics_automatically(conn):
     store.add_metrics(conn, cid, detail="actual ROI came in at 1.8", metric_type="actual")
 
     result = core.reconcile_evaluation(conn, evaluation_id=eid)
-    assert "actual ROI came in at 1.8" in result["actual"]
-    assert result["predictions"] == {"roi_range": [1.2, 1.6]}
+    # §9.9 made this a four-column record, so `actual` is the column rather than a bare
+    # string: it carries the text AND the numbers, because scoring a prediction needs the
+    # numbers and a reader needs the words.
+    assert "actual ROI came in at 1.8" in result["actual"]["detail"]
+    assert result["predicted"]["predictions"] == {"roi_range": [1.2, 1.6]}
 
 
 def test_reconcile_evaluation_explicit_actual_overrides_stored_metrics(conn):
@@ -153,15 +156,20 @@ def test_reconcile_evaluation_explicit_actual_overrides_stored_metrics(conn):
     store.add_metrics(conn, cid, detail="stored actual", metric_type="actual")
 
     result = core.reconcile_evaluation(conn, evaluation_id=eid, actual="manually provided actual")
-    assert result["actual"] == "manually provided actual"
+    assert result["actual"]["detail"] == "manually provided actual"
 
 
-def test_reconcile_evaluation_errors_when_no_actual_available(conn):
+def test_reconcile_evaluation_says_there_is_nothing_to_check_yet(conn):
+    """§9.9 replaced the bare error with `nothing_to_check` and the offer that closes it. An
+    error naming nothing anybody can do is a complaint, and "no actual metrics on file" is not
+    the same claim as a judgment having been wrong — the distinction every other surface in
+    Phase 9 draws."""
     cid = store.insert_campaign(conn, title="X")
     eid = store.insert_evaluation(conn, subject_title="X", verdict="approve", summary="predicted", findings=[], campaign_id=cid)
 
     result = core.reconcile_evaluation(conn, evaluation_id=eid)
-    assert "error" in result
+    assert result["status"] == "nothing_to_check"
+    assert result["next_actions"][0]["tool"] == "add_metrics"
 
 
 def test_reconcile_evaluation_includes_structured_only_actuals(conn):
@@ -174,7 +182,10 @@ def test_reconcile_evaluation_includes_structured_only_actuals(conn):
 
     result = core.reconcile_evaluation(conn, evaluation_id=eid)
     assert "error" not in result
-    assert "0.05" in result["actual"] or "ctr" in result["actual"]
+    assert "0.05" in result["actual"]["detail"]
+    # §9.9: and the numbers are parsed out, so a prediction can actually be scored against
+    # them — the workbook path is the commonest way results arrive.
+    assert result["actual"]["values"]["ctr"] == 0.05
 
 
 def test_reconcile_evaluation_ignores_predicted_metrics_when_auto_pulling(conn):
@@ -183,4 +194,5 @@ def test_reconcile_evaluation_ignores_predicted_metrics_when_auto_pulling(conn):
     store.add_metrics(conn, cid, detail="forecast only", metric_type="predicted")
 
     result = core.reconcile_evaluation(conn, evaluation_id=eid)
-    assert "error" in result  # no *actual* metrics on file yet
+    # No *actual* metrics on file yet: a forecast is not an outcome.
+    assert result["status"] == "nothing_to_check"

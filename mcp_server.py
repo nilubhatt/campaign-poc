@@ -1620,7 +1620,10 @@ def reconcile_evaluation(evaluation_id: str, actual: Optional[str] = None) -> di
     otherwise pass actual= with the real post-campaign metrics yourself. Returns the
     original verdict, summary and findings (or, for a judgment written before the structured
     schema, `original_analysis` — the free text as it was written) alongside the actuals.
-    Compare them, then call save_reconciliation with the lesson."""
+    The server has already scored every prediction it could check — read `scored` and
+    `counts` rather than re-deriving them. What is left for you is everything marked
+    `yours_to_judge` or `not_comparable`, and the lesson: what it MEANT, which is the only
+    half that improves the next judgment. Then call save_reconciliation."""
     conn = store.connect()
     try:
         return core.reconcile_evaluation(conn, evaluation_id=evaluation_id, actual=actual)
@@ -1900,6 +1903,73 @@ def measure_status(measure: str) -> dict:
 
 @mcp.tool()
 @_catch_value_errors
+def link_evaluation(evaluation_id: str, campaign_id: str, linked_by: str) -> dict:
+    """Attach a judgment made about a pitch to the record it turned into (§9.9).
+
+    A judgment about something that was not in the library yet is attached to nothing, so
+    nothing can ever check it against results. This joins the two — normally straight after
+    `upload_campaign`, which offers it.
+
+    **Ask before calling it.** That two things share a title is not proof they are the same
+    campaign, and a judgment attached to the wrong record is a verdict about a brief nobody
+    wrote. `linked_by` is whose call it is.
+
+    It cannot be changed afterwards: re-pointing a judgment would change what it was a
+    judgment OF, and everything citing it with it."""
+    conn = store.connect()
+    try:
+        return core.link_evaluation(conn, evaluation_id=evaluation_id,
+                                    campaign_id=campaign_id, linked_by=linked_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def get_reconciliation(evaluation_id: str) -> dict:
+    """Read back what a judgment was checked against, as it stood at the time (§9.9).
+
+    The lesson somebody wrote, the server's tally beside it, and the four columns the lesson
+    actually rested on — what was predicted, what shipped, what it did, what else was going
+    on. Three of those are recomputed live everywhere else in the product, so this is the only
+    place that says what was true when the conclusion was drawn.
+
+    `changed_since` says whether the live answer has moved — a corrected figure, an event
+    recorded afterwards, a drift check that has since run. When it has, the lesson may be
+    worth revisiting, and `counts_now` is what the same check says today."""
+    conn = store.connect()
+    try:
+        return core.get_reconciliation(conn, evaluation_id=evaluation_id)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def calibration() -> dict:
+    """How often this library's own judgments turned out to be right (§9.9).
+
+    The only thing in the product that grades the product. Everything else is the system
+    talking about briefs; this is the system being held to account.
+
+    **Read the three counts separately.** `held` and `missed` are predictions the server could
+    check against a measured number — that half is arithmetic. `not_comparable` is the rest,
+    and it is a third answer, never a pass: a score that folded those in would be this product
+    awarding itself marks. `confounded` says how many of these outcomes ran through something
+    else that was going on; they still count, and a reader weighing the figure should know how
+    much of it is about the weather.
+
+    `nothing_to_check` means no judgment has ever been reconciled. That is the absence of a
+    score, not a score of zero — and `reconcile_evaluation` is what closes it."""
+    conn = store.connect()
+    try:
+        return core.calibration(conn)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
 def save_reconciliation(evaluation_id: str, comparison: str, actual: Optional[str] = None,
                         basis: Optional[ReconciliationBasis] = None) -> dict:
     """Persist your prediction-vs-actual comparison and the lesson learned, so future
@@ -1911,11 +1981,15 @@ def save_reconciliation(evaluation_id: str, comparison: str, actual: Optional[st
                                  said the structure would come back, and v2 shows whether it
                                  did. Real evidence about the judgment, and not an outcome.
     Without it, "v2 shows the structure came back" sits in the same column as a CTR figure and
-    anything computing calibration later reads both as measured results."""
+    anything computing calibration later reads both as measured results.
+
+    The server's own tally — how many numeric predictions landed — is recomputed and stored
+    beside your lesson (§9.9). Do not restate it in `comparison`: that half is arithmetic and
+    already on the record. What belongs here is what it MEANT, which is the only half that
+    improves the next judgment."""
     conn = store.connect()
     try:
-        rid = store.insert_reconciliation(conn, evaluation_id=evaluation_id,
-                                          comparison=comparison, actual=actual, basis=basis)
-        return {"reconciliation_id": rid, "status": "saved"}
+        return core.save_reconciliation(conn, evaluation_id=evaluation_id,
+                                        comparison=comparison, actual=actual, basis=basis)
     finally:
         conn.close()

@@ -104,7 +104,7 @@ def test_evaluation_and_reconciliation_roundtrip(conn):
     assert ev["subject_title"] == "X proposal"
     assert ev["reconciliations"] == []
 
-    rid = store.insert_reconciliation(conn, evaluation_id=eid, comparison="beat prediction",
+    rid = store.insert_reconciliation(conn, evaluation_id=eid, comparison="It beat the prediction because the launch window moved.",
                                       actual="roi 1.8")
     ev2 = store.get_evaluation(conn, eid)
     assert len(ev2["reconciliations"]) == 1
