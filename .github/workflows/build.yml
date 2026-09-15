@@ -31,6 +31,22 @@ jobs:
         with:
           python-version: '3.12'
 
+      # A tag is the only place the version is stated twice, and the two have already
+      # disagreed once (the Windows installer said 0.2.7 while version.py said 0.3.0). Fail
+      # the build rather than publish a release whose assets contradict its own tag.
+      - name: Tag must match version.py
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          declared=$(python -c 'import version; print(version.VERSION)')
+          tagged="${GITHUB_REF_NAME#v}"
+          if [ "$declared" != "$tagged" ]; then
+            echo "tag $GITHUB_REF_NAME does not match version.py ($declared)" >&2
+            echo "Bump VERSION in version.py, or retag." >&2
+            exit 1
+          fi
+          echo "version $declared matches tag $GITHUB_REF_NAME"
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -47,13 +63,62 @@ jobs:
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt pyinstaller typer
 
+      # The weights ship IN the payload: the product must work on a clean, air-gapped
+      # machine with nothing configured. Fetched BEFORE the build so an upstream outage
+      # fails in seconds rather than after a full PyInstaller run. Not cached: this
+      # workflow runs on tags, and cache entries are ref-scoped and evicted after 7 days
+      # idle, so a 303MB save/restore would almost always miss and cost more than the
+      # ~20s fetch it replaces.
+      # A release must ship a KNOWN artifact. Without this, deleting the mirror release
+      # would silently fall back to upstream and ship a different (fp32, 300MB larger)
+      # model with different vectors, and nothing would go red. Local dev keeps the
+      # fallback; a tag build does not.
+      - name: Fetch and verify CLIP weights
+        env:
+          CAMPAIGN_WEIGHTS_REQUIRE_MIRROR: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '0' }}
+        run: python scripts/fetch_weights.py .weights-cache
+
+      # Stamped before PyInstaller so the bundled copy carries it. Two builds of the same
+      # version from different commits are not the same thing to anybody debugging one
+      # (§3.2, defect 10) — and the reviewer's session was against a server that had been
+      # rebuilt mid-session with nothing to say so.
+      - name: Stamp the build
+        shell: bash
+        run: echo "${{ github.sha }} $(date -u +%Y-%m-%dT%H:%M:%SZ)" > build_info.txt
+
       - name: Build bundle
         run: pyinstaller --clean --noconfirm campaign-poc.spec
 
+      # Staged after PyInstaller, which wipes dist/ on every run.
+      - name: Stage weights into the bundle
+        shell: bash
+        run: |
+          mkdir -p dist/campaign-intelligence/models
+          cp .weights-cache/open_clip_model.safetensors* dist/campaign-intelligence/models/
+          python scripts/fetch_weights.py dist/campaign-intelligence/models
+          # Assert WHICH checkpoint got staged, not merely that one did.
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "scripts")
+          from pathlib import Path
+          import fetch_weights as fw
+          staged = Path("dist/campaign-intelligence/models") / fw.CHECKPOINT_NAME
+          actual = fw.sha256_of(staged)
+          known = {s.sha256: s.note for s in fw.SOURCES}
+          assert actual in known, f"staged an unrecognised checkpoint: {actual}"
+          print(f"staged checkpoint: {known[actual]} ({actual[:12]}...)")
+          PY
+
+      # Per-OS, which it was not: the macOS archive shipped the LINUX installer, so a Mac
+      # user got systemd units and ~/.local/share paths (item 4.1 — macOS had no installer
+      # of its own at all).
       - name: Package (Linux/macOS) — bundle + install scripts
         if: runner.os != 'Windows'
         run: |
-          cp installer/linux/install.sh installer/linux/uninstall.sh dist/campaign-intelligence/
+          platform=linux
+          [ "${{ runner.os }}" = "macOS" ] && platform=macos
+          cp "installer/$platform/install.sh" "installer/$platform/uninstall.sh" \
+             dist/campaign-intelligence/
           chmod +x dist/campaign-intelligence/install.sh dist/campaign-intelligence/uninstall.sh
           tar -C dist -czf "${{ matrix.asset }}" campaign-intelligence
 
@@ -62,13 +127,109 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path dist/campaign-intelligence/* -DestinationPath "${{ matrix.asset }}"
 
+      # Proves the SHIPPED archive works, not the source tree: unpack what customers get,
+      # run the frozen binary out of it, and require that it resolves its own bundled
+      # weights. This exercises app_dir() under PyInstaller and the archive's fidelity —
+      # a packaging mistake now fails the build instead of shipping a product whose vision
+      # half is dead on arrival, which is exactly how the original defect escaped.
+      - name: Verify the packaged product finds its weights (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p _verify && tar -xzf "${{ matrix.asset }}" -C _verify
+          _verify/campaign-intelligence/campaign-intelligence check-weights | tee out.txt
+          grep -q "source: bundled" out.txt
+
+      # Item 4.2: zero egress, tested rather than asserted. The customer's network blocks
+      # huggingface.co, which is how all three P0s surfaced at once — so the install-time
+      # gate must complete with no network at all, against the PACKAGED binary, since that
+      # is what a customer has.
+      #
+      # A socket guard injected through sitecustomize would NOT work here: PyInstaller
+      # controls sys.path in a frozen app, so PYTHONPATH is ignored and the guard would
+      # silently never load — a test that passes because it did nothing. These are real
+      # blocks instead.
+      - name: Verify the packaged product needs no network (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # `sudo unshare -n`, not `unshare -rn`: Ubuntu 24.04 restricts unprivileged user
+          # namespaces via AppArmor (kernel.apparmor_restrict_unprivileged_userns=1) and the
+          # runner images do not relax it, so the -r form fails with "write failed
+          # /proc/self/uid_map: Operation not permitted". Root needs no user namespace.
+          #
+          # And health-check, not check-weights: the weaker command only stats a path, which
+          # would pass without a network whether or not the product could actually work
+          # offline. This LOADS the vision model, which is where open_clip reaches for the
+          # Hub. Exit code is not the assertion - a runner has no Ollama, so text_search is
+          # legitimately down; visual_search is what this step is about.
+          sudo unshare -n _verify/campaign-intelligence/campaign-intelligence \
+            health-check --json | tee offline.json > /dev/null || true
+          python - <<'PY'
+          import json
+          report = json.load(open("offline.json"))
+          vision = report["components"]["visual_search"]
+          assert vision["ok"], f"the packaged product cannot load its vision model offline: {vision}"
+          print("visual_search ok with no network:", vision["detail"])
+          PY
+
+      - name: Verify the packaged product needs no network (macOS)
+        if: runner.os == 'macOS'
+        env:
+          # No user namespaces on macOS runners, so block at the layer the Hub client uses:
+          # every HTTP(S) request routed to a closed port on loopback. Deliberately WITHOUT
+          # HF_HUB_OFFLINE - setting it tells the client not to try, which would make the
+          # proxy block prove nothing at all.
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
+        run: |
+          _verify/campaign-intelligence/campaign-intelligence health-check --json \
+            > offline.json || true
+          python - <<'PY'
+          import json
+          report = json.load(open("offline.json"))
+          vision = report["components"]["visual_search"]
+          assert vision["ok"], f"the packaged product cannot load its vision model offline: {vision}"
+          print("visual_search ok with every request proxied to a closed port:", vision["detail"])
+          PY
+
+      - name: Verify the packaged product finds its weights (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Expand-Archive -Path "${{ matrix.asset }}" -DestinationPath _verify -Force
+          $out = & _verify\campaign-intelligence.exe check-weights
+          $out
+          if ($LASTEXITCODE -ne 0) { throw "packaged product cannot resolve its weights" }
+          if ($out -notcontains "source: bundled") { throw "packaged product did not use the bundled weights" }
+
       - name: Build Windows installer (Inno Setup)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install innosetup --no-progress -y
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\windows\campaign-intelligence.iss
+          # From version.py, the single source. Hard-coding it here is how the installer
+          # came to claim 0.2.7 while the binary inside it said 0.3.0.
+          $v = python -c "import version; print(version.VERSION)"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" installer\windows\campaign-intelligence.iss
           Copy-Item installer\windows\Output\CampaignIntelligence-Setup.exe .
+
+      - name: Verify the packaged product needs no network (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
+        run: |
+          # Windows had no offline check at all, while being the platform the product review
+          # was written against - on a network that blocks huggingface.co.
+          & _verify\campaign-intelligence\campaign-intelligence.exe health-check --json `
+            > offline.json
+          $report = Get-Content offline.json | ConvertFrom-Json
+          if (-not $report.components.visual_search.ok) {
+            throw "the packaged product cannot load its vision model offline: $($report.components.visual_search.detail)"
+          }
+          Write-Host "visual_search ok with every request proxied to a closed port"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

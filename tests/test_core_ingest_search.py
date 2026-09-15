@@ -17,7 +17,7 @@ def test_ingest_empty_campaign_embeds_nothing(conn):
     assert r["chunks_total"] == 0
     assert r["chunks_embedded"] == 0
     assert r["embedded"] is False
-    assert "nothing to embed" in r["warnings"][0]
+    assert r["warnings"][0]["code"] == "nothing_to_embed"
 
 
 def test_ingest_long_flat_deck_text_splits_into_multiple_chunks(conn):
@@ -36,7 +36,7 @@ def test_partial_embedding_failure_is_reported_per_chunk_not_swallowed(conn, mon
     real_embed = embedding.embed
     calls = {"n": 0}
 
-    def flaky_embed(text):
+    def flaky_embed(text, timeout=None):
         calls["n"] += 1
         if calls["n"] == 2:
             raise RuntimeError("provider rejected input")
@@ -50,8 +50,14 @@ def test_partial_embedding_failure_is_reported_per_chunk_not_swallowed(conn, mon
 
     assert r["chunks_total"] > 1
     assert r["chunks_embedded"] == r["chunks_total"] - 1
-    assert r["embedded"] is True  # at least one chunk embedded -> still searchable
-    assert any("not embedded" in w for w in r["warnings"])
+    # `embedded` means FULLY searchable. This assertion used to read "at least one chunk
+    # embedded -> still searchable", which made sense while partial embedding was an
+    # accident; item 2.1 made it a designed outcome (a time budget stops mid-deck on
+    # purpose), so a flag that says True at 1-of-12 is the stored-versus-searchable
+    # conflation defect 05 complained about. The partial story is told by the counts.
+    assert r["embedded"] is False
+    assert 0 < r["chunks_embedded"] < r["chunks_total"]
+    assert any(w["code"] == "chunk_not_embedded" for w in r["warnings"])
 
     c = store.get_campaign(conn, r["campaign_id"])
     assert c["chunks_embedded"] == r["chunks_embedded"]

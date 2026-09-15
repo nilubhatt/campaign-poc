@@ -22,7 +22,9 @@ from starlette.routing import Route
 
 import auth
 import clip_embed
+import embedding
 import config
+import core
 import extract
 import store
 import vectorstore
@@ -66,13 +68,20 @@ async def upload(request: Request):
 async def healthz(request: Request):
     conn = store.connect()
     try:
-        return JSONResponse({
-            "status": "ok",
-            "vector_backend": vectorstore.backend_name(conn),
+        # Whether the vision weights actually resolved is the thing that was invisible in
+        # the field — the only way to discover visual search was off was a 60s timeout and
+        # a read of the server's source. Reported as a value, not by crashing at boot.
+        # The same report the health_check tool and the CLI give, so three surfaces cannot
+        # disagree about one machine. probe=False keeps this cheap: /healthz gets polled,
+        # and hitting the embedder on every poll would be its own problem.
+        report = core.health_check(conn, probe=False)
+        report.update({
+            "status": "ok" if report["ok"] else "degraded",
             "embed_provider": config.EMBED_PROVIDER,
             "clip_provider": config.CLIP_PROVIDER,
             "auth_provider": config.AUTH_PROVIDER,
         })
+        return JSONResponse(report)
     finally:
         conn.close()
 
@@ -86,9 +95,10 @@ def main():
     config.ensure_dirs()
     store.init_db()
     # Load the CLIP model now, not on the first tool call — a live MCP request over a
-    # tunnel is the wrong place for a ~350MB first-time download (risks the client's
+    # tunnel is the wrong place for a first-time model load (risks the client's
     # tool-call timeout; review flagged this).
     clip_embed.warm_up()
+    embedding.warm_up()
     uvicorn.run(app, host=config.HTTP_HOST, port=config.HTTP_PORT)
 
 

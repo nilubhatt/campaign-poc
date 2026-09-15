@@ -29,8 +29,11 @@ def test_insert_campaign_rejects_non_string_tags(conn):
 
 
 def test_insert_campaign_rejects_tags_that_is_not_a_list(conn):
+    """A bare string is now accepted as one tag — "a bare string where a list was required"
+    was one of the three rejections §5.1 was written about. What is still rejected is a type
+    that is not a tag at all."""
     with pytest.raises(ValueError, match="tags"):
-        store.insert_campaign(conn, title="X", tags="not-a-list")
+        store.insert_campaign(conn, title="X", tags=42)
 
 
 def test_update_campaign_rejects_invalid_record_type(conn):

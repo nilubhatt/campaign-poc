@@ -1,3 +1,4 @@
+import os
 # PyInstaller spec — one-folder bundle for the campaign-intelligence lean product.
 # Build (on the TARGET OS): pyinstaller campaign-poc.spec
 # Produces dist/campaign-intelligence/  (a self-contained folder; zip/tar it to distribute).
@@ -7,7 +8,8 @@
 #     resolvable at runtime, or semantic search silently drops to the pure-Python fallback.
 #   * uvicorn / mcp / starlette / anyio pull in submodules PyInstaller's static analysis misses.
 #   * torch/open_clip (§6.6 CLIP layer) — a deliberate, confirmed size tradeoff (~150-250MB
-#     of deps + a ~350MB model download on first use, see docs/PRODUCTION-ROADMAP.md §6.6).
+#     of deps + a 303MB fp16 checkpoint shipped in the installer payload, see
+#     docs/PRODUCTION-ROADMAP.md §6.6 and docs/PRODUCT-REVIEW-PLAN.md item 1.2).
 #     NOT excluded: an earlier version of this spec excluded torch to keep the bundle small,
 #     predating CLIP being an actual dependency — that would have silently broken
 #     find_similar_images/upload_image_asset's CLIP path in every packaged build (review
@@ -35,6 +37,11 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 datas, binaries, hiddenimports = [], [], []
+
+# The build stamp, when CI wrote one. Optional on purpose: a local build has no stamp and
+# reports itself as a source checkout, which is the honest answer (§3.2).
+if os.path.exists("build_info.txt"):
+    datas += [("build_info.txt", ".")]
 
 # Bundle sqlite-vec fully (its compiled extension is a binary + package data).
 for pkg in ("sqlite_vec",):
