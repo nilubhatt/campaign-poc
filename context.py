@@ -72,7 +72,8 @@ def record(conn, *, starts_on: str, scope: str, kind: str, description: str,
            scope_value: Optional[str] = None, source: Optional[str] = None,
            delay_days: Optional[int] = None, budget_change_pct: Optional[float] = None,
            channels_disrupted: Optional[list] = None, seeded: bool = False,
-           seed_key: Optional[str] = None, certainty: Optional[str] = None) -> dict:
+           seed_key: Optional[str] = None, certainty: Optional[str] = None,
+           recurs_annually: bool = False) -> dict:
     """Put an event on the record (§9.6).
 
     `basis` is `stated` and never anything else. The server did not measure a three-day delay
@@ -149,7 +150,7 @@ def record(conn, *, starts_on: str, scope: str, kind: str, description: str,
         delay_days=delay_days, budget_change_pct=budget_change_pct,
         channels_disrupted=_tidy_channels(channels_disrupted),
         recorded_by=recorded_by.strip(), seeded=seeded, seed_key=seed_key,
-        certainty=certainty)
+        certainty=certainty, recurs_annually=recurs_annually)
     saved = _public(store.get_context_event(conn, eid))
     if warnings:
         saved = {**saved, "warnings": warnings}
@@ -808,7 +809,7 @@ def seed(conn) -> int:
             conn, starts_on=row["starts_on"], ends_on=row["ends_on"], scope=row["scope"],
             scope_value=row["scope_value"], kind=row["kind"], description=row["description"],
             recorded_by="shipped with this product", seeded=True, seed_key=row["seed_key"],
-            certainty=row["certainty"])
+            certainty=row["certainty"], recurs_annually=row["recurs_annually"])
     return len(calendar_seed.rows())
 
 
@@ -1036,3 +1037,384 @@ def _clash_fact(status: str, window: dict, events: list, unaddressed: list,
         "not_checked_for_silence": unchecked,
         "what_it_means": said,
     }
+
+
+# ── §9.8: record the overlap, never the cause ────────────────────────────────
+
+# Which kinds confound an outcome on their own. The thing that was NOT supposed to happen: an
+# earthquake, a port closure, a regulatory change, a platform going down, a macro shock.
+#
+# `competitor_launch` is deliberately absent. Competitor launches are continuous background in
+# any real market, so a diligent customer recording them would turn every outcome confounded —
+# which is the wallpaper this rule exists to avoid, arriving through the customer's own
+# diligence. It confounds when somebody says it mattered.
+#
+# `fixed_calendar` is absent too, but the axis that actually decides it is RECURRENCE, not
+# kind: every row in the shipped calendar is `fixed_calendar`, so keying on kind put a
+# once-in-a-generation home World Cup in the same bucket as Black Friday — and the product then
+# raised a finding that a window ran into the tournament and, once the numbers arrived, called
+# the result clean. A date that comes round every year is the BASELINE a year-on-year
+# comparison is made against; anything that does not is a thing that happened.
+#
+# A recurring date can still confound — when a person says it did (`attribute`), or when
+# whoever recorded it stated an impact, which is already somebody saying it changed what
+# happened. "Never quoted as clean evidence" only means anything while most evidence still is.
+CONFOUNDING_KINDS = ("conflict", "natural_disaster", "regulatory_change", "supply_chain",
+                     "platform_outage", "macro_shock")
+
+
+def attribute(conn, *, campaign_id: str, event_id: str, note: str, stated_by: str) -> dict:
+    """Somebody's account of what an event did to a campaign's numbers (§9.8).
+
+    `stated`, always. "Sell-through was down and there was an earthquake" is not evidence the
+    earthquake caused it, and a model asked to explain a disappointing number will reach for
+    whatever is nearby — so the server records that the two overlapped and a PERSON records
+    what they made of it, with their name on it.
+    """
+    import store
+
+    record = store.get_campaign(conn, campaign_id)
+    if record is None:
+        raise ValueError(f"{campaign_id!r} is not a record in this library.")
+    if record.get("record_type") == "reference":
+        # The rulebook is not precedent, and `campaigns_overlapping` already excludes it —
+        # accepting one here made the two directions disagree about the same record.
+        raise ValueError(
+            f"{campaign_id!r} is a reference record, not a campaign. Reference material has no "
+            f"outcome for an event to bear on.")
+    event = store.get_context_event(conn, event_id)
+    if event is None:
+        raise ValueError(f"{event_id!r} is not an event on this record.")
+    if not (note or "").strip():
+        raise ValueError(
+            "`note` is required: this is the whole content of the attribution — what you "
+            "think the event did to these numbers, in your words. Without it the row says "
+            "only that somebody thought something.")
+    if not (stated_by or "").strip():
+        raise ValueError(
+            "`stated_by` is required: whether an event moved a number is a judgment a PERSON "
+            "makes, and one nobody's name is against is one nobody can question later.")
+    if _reads_as_the_product(stated_by):
+        # In the one item whose premise is that a model asked to explain a disappointing
+        # number will reach for whatever is nearby, a name that reads as the library itself is
+        # the model laundering its own guess into the record.
+        raise ValueError(
+            f"{stated_by!r} is not a PERSON. This records what somebody thinks an event did to "
+            f"these numbers — the library does not work that out and must not appear to have. "
+            f"If nobody has said it, there is nothing to record here.")
+    window = window_of(conn, campaign_id)
+    if not window["starts_on"]:
+        raise ValueError(
+            f"this campaign has no window, so nothing can be said to overlap it. Give it one "
+            f"with `update_campaign` (starts_on / ends_on) and the events that ran through it "
+            f"follow automatically.")
+    # Against EVERY overlap, never `for_campaign`'s list — that one is capped at
+    # `MAX_EVENTS_SHOWN` by salience, which sorts seeded rows LAST. So the only events it can
+    # cut are precisely the recurring ones that need an attribution to confound, and this
+    # feature's entire escape hatch closed as soon as a library got rich. The same bug shape
+    # cost §9.6 and §9.7 a review round each.
+    overlapping = overlapping_window(conn, starts_on=window["starts_on"],
+                                     ends_on=window["ends_on"],
+                                     markets=sorted(_market_names(record)))
+    if event_id not in {e["id"] for e in overlapping}:
+        # A note explaining a number by an event that ran in another market or another year is
+        # invented evidence arriving through the one field that accepts free text.
+        raise ValueError(
+            f"{event_id!r} does not overlap this campaign — it did not run in its market, or "
+            f"not in its window, so it cannot be what moved its numbers. `campaign_context` "
+            f"lists the events that did overlap.")
+    # §9.4's stamp: what the person could see when they said it. An account given before the
+    # numbers arrived and one given after are two judgments, and which was which is the thing
+    # a later reader most needs.
+    outcome_known = bool(record.get("has_actual_metrics"))
+    store.insert_attribution(conn, campaign_id=campaign_id, event_id=event_id,
+                             note=note.strip(), stated_by=stated_by.strip(),
+                             outcome_known=outcome_known)
+    return {"campaign_id": campaign_id, "event_id": event_id, "basis": "stated",
+            "note": note.strip(), "stated_by": stated_by.strip(),
+            "outcome_known": outcome_known,
+            "what_it_means": (
+                f"{stated_by.strip()} states that this event bears on the campaign's results: "
+                f"\u201c{note.strip()}\u201d. That is their account, not a measurement — the "
+                f"library records that the two overlapped and does not work out what caused "
+                f"what. Its outcomes now read as confounded, which means they are still "
+                f"evidence and are no longer clean evidence.")}
+
+
+def attribution_history(conn, *, campaign_id: str, event_id: str) -> list:
+    """Every account given about one event on one campaign, oldest first (§9.8).
+
+    Nothing is overwritten. "This looked like the earthquake before the numbers and like our
+    own pricing after" is the most interesting thing this table holds, and an update in place
+    destroys it — §9.4's rule, four items over.
+    """
+    import store
+    return store.attributions(conn, campaign_id, event_id=event_id)
+
+
+def widest_window(record: dict) -> dict:
+    """The outer bound of everything this record's outcomes could overlap (§9.8).
+
+    A metric's own period always sits inside the campaign's window where both exist, so one
+    fetch over the campaign window covers every row — and where a row's period falls outside
+    it, the union keeps it. One query per read rather than one per month of a workbook.
+    """
+    starts = [record["starts_on"]] if record.get("starts_on") else []
+    ends = [record.get("ends_on")] if record.get("starts_on") else []
+    for metric in record.get("metrics") or []:
+        if metric.get("period_start"):
+            starts.append(metric["period_start"])
+            ends.append(metric.get("period_end"))
+    if not starts:
+        read = _window_from_the_brief(record)
+        return {"starts_on": read["starts_on"], "ends_on": read["ends_on"]}
+    return {"starts_on": min(starts),
+            "ends_on": None if any(e is None for e in ends) else max(e for e in ends)}
+
+
+def confounders_for(conn, record: dict, *, metric: Optional[dict] = None,
+                    events: Optional[list] = None) -> dict:
+    """What ran through this campaign, and which of it confounds its outcomes (§9.8).
+
+    Takes the RECORD rather than an id, and reads nothing back: it is called from inside
+    `store.get_campaign`, which is the one place metrics load and therefore the only place a
+    caveat can be attached once and reach every reader. Going back through `get_campaign` for
+    the window recursed forever.
+
+    Computed on every read, like every other link in §9.6: both halves keep arriving, and the
+    ordinary order is results in October and the September earthquake recorded in November.
+    """
+    import store
+
+    campaign_id = record["id"]
+    # The METRIC's own period where it has one, and the campaign window where it does not —
+    # carried visibly, so a reader can tell which they got. A workbook row for January is not
+    # confounded by a September earthquake, and a single wrap-up figure for the whole campaign
+    # genuinely is.
+    period = _period_of(record, metric)
+    window = period
+    # FOUR states, not one boolean. `confounded: false` collapsed "we looked and nothing was
+    # going on" into the same word as "this cannot be checked at all" — the exact collapse
+    # `_execution_note` and `_context_note`, its two neighbours on every evidence row, were
+    # each written to prevent.
+    if not window["starts_on"]:
+        return _nothing_to_check(
+            window, "this campaign has no window, so nothing could be matched to it. That is "
+                    "not the same as nothing having been going on.")
+    if events is None:
+        events = overlapping_window(conn, starts_on=window["starts_on"],
+                                    ends_on=window["ends_on"],
+                                    markets=sorted(_market_names(record)))
+    else:
+        # Narrowed in memory from the record-wide fetch: a January row is not confounded by a
+        # September earthquake, and re-querying per row is what made a twelve-month workbook
+        # twelve overlap queries.
+        last = window["ends_on"] or str(datetime.date.max)
+        events = [e for e in events
+                  if e["starts_on"] <= last
+                  and (e["ends_on"] is None or e["ends_on"] >= window["starts_on"])]
+    # No early return on a missing market. `_scopes_of` always includes `("global", None)`, so
+    # a global macro shock — the paradigm confounder — reaches a record that names no market,
+    # and dropping it here made this surface disagree with `campaign_context` about the same
+    # campaign.
+    if not events and not _market_names(record):
+        return _nothing_to_check(
+            window, "this campaign names no market, region or markets, so only global events "
+                    "could reach it — nothing market-scoped was searched at all.")
+    stated = store.attributions_for(conn, campaign_id)
+    confounding, alongside = [], []
+    for event in events:
+        attribution = stated.get(event["id"])
+        if attribution or _confounds_by_itself(event):
+            confounding.append({**_slim(event), "attribution": attribution,
+                                "why": ("somebody stated that it bears on these results"
+                                        if attribution else
+                                        "a stated impact was recorded against it"
+                                        if _has_stated_impact(event)
+                                        else f"a {event['kind'].replace('_', ' ')} is not "
+                                             f"part of a normal year")})
+        else:
+            alongside.append(_slim(event))
+    # Ordered before it is cut, so which five survive is not an accident of insertion: what
+    # somebody attributed first, then what a person recorded, then by date.
+    confounding.sort(key=lambda e: (e["attribution"] is None, e.get("seeded", False),
+                                    e["starts_on"], e["id"]))
+    shown = confounding[:MAX_CONFOUNDERS_SHOWN]
+    return {
+        "status": "confounded" if confounding else "checked_clean",
+        "confounded": bool(confounding),
+        "confounded_by": shown,
+        "confounded_by_total": len(confounding),
+        **({"confounded_by_truncated": True} if len(confounding) > len(shown) else {}),
+        # A COUNT, not the events. "It ran through Black Friday" is worth knowing and is not a
+        # reason to doubt the number, so it does not need to carry a paragraph on every row of
+        # a twelve-month workbook.
+        "ran_during": len(alongside),
+        "period": window,
+        # Attached either way. Carried only when confounded, an outcome that ran through three
+        # recurring dates arrived with an empty `confounded_by` and no words at all — which
+        # reads as "nothing was going on", the claim §9.6 spent a round refusing to make.
+        "what_it_means": say_the_outcome(
+            {"status": "confounded" if confounding else "checked_clean",
+             "confounded": bool(confounding), "confounded_by": shown,
+             "confounded_by_total": len(confounding), "ran_during": len(alongside)}),
+        # `confounded_basis`, not `basis`: at the metric level a bare `basis: computed` reads
+        # as "this measurement is computed", which is false — it is the OVERLAP that was
+        # worked out, and each event inside keeps its own `stated`.
+        "confounded_basis": "computed",
+    }
+
+
+def _period_of(record: dict, metric: Optional[dict]) -> dict:
+    if metric and metric.get("period_start"):
+        return {"starts_on": metric["period_start"], "ends_on": metric.get("period_end"),
+                "basis": "metric"}
+    if record.get("starts_on"):
+        return {"starts_on": record["starts_on"], "ends_on": record.get("ends_on"),
+                "basis": "campaign_window"}
+    read = _window_from_the_brief(record)
+    return {**read, "basis": "campaign_window" if read["starts_on"] else None}
+
+
+def _nothing_to_check(window: dict, why: str) -> dict:
+    return {"status": "nothing_to_check", "confounded": False, "confounded_by": [],
+            "ran_during": 0, "period": window, "confounded_basis": "computed",
+            "what_it_means": (
+                f"Whether anything else was going on around this outcome could not be "
+                f"checked: {why}")}
+
+
+def _why_it_confounds(event: dict, attribution) -> str:
+    if attribution:
+        return f"{attribution['stated_by']} stated that it bears on these results"
+    if _has_stated_impact(event):
+        return "whoever recorded it stated an impact, which is somebody saying it changed things"
+    if event["kind"] == "fixed_calendar":
+        return "it is a one-off rather than a date that comes round every year"
+    return f"a {event['kind'].replace('_', ' ')} is not part of a normal year"
+
+
+def _confounds_by_itself(event: dict) -> bool:
+    """Does this overlap cast doubt on a number all by itself? (§9.8)
+
+    Recurrence is the axis, but only where recurrence MEANS anything — which is inside
+    `fixed_calendar`, the kind that holds both Black Friday and a once-in-a-generation home
+    World Cup. A calendar entry confounds when it is a one-off: a customer typing "our
+    flagship was shut for a refit" means a thing that happened, not a thing that happens every
+    year. Everything else is decided by its kind, because "a competitor launched" does not
+    become more or less doubt-casting for happening annually.
+    """
+    if _has_stated_impact(event):
+        return True
+    if event["kind"] == "fixed_calendar":
+        return not event.get("recurs_annually", False)
+    return event["kind"] in CONFOUNDING_KINDS
+
+
+def _has_stated_impact(event: dict) -> bool:
+    """Whoever recorded it said it changed something, which is already a person saying so.
+
+    A ZERO is not that. `_impact_sentence` in this same module renders `delay_days=0` as "no
+    delay" — somebody looked and found none — so reading it here as "somebody said it changed
+    things" made the two functions contradict each other, in the direction that adds a caveat
+    to a number a person had just cleared.
+    """
+    return bool(event.get("delay_days") or event.get("budget_change_pct")
+                or event.get("channels_disrupted"))
+
+
+# How many confounders one outcome lists. The COUNT stays complete — "this ran through
+# twenty-five recorded events" is the finding — but the rows behind it are trimmed like every
+# other list here. An always-on record in a busy market genuinely overlaps dozens, and carrying
+# each one in full on every metric row is how a twelve-month workbook became a 742 KB response.
+MAX_CONFOUNDERS_SHOWN = 5
+
+
+def _slim(event: dict) -> dict:
+    """The confounder as a metric row carries it.
+
+    `what_it_means` is deliberately absent: it is §9.6's full sentence about the event, it
+    repeats the description, and it was the bulk of the payload — the `description` says what
+    happened and `campaign_context` has the rest. `basis` stays, because every field on a
+    context event is somebody's account (§9.6's `_public` sets `stated` on purpose) and
+    stripping it put an entirely-stated event inside a block labelled `computed`.
+    """
+    return {k: event[k] for k in ("id", "starts_on", "ends_on", "kind", "description",
+                                  "seeded", "certainty", "basis")}
+
+
+def _short(text: str, limit: int = 90) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit - 1].rstrip(" ,;") + "\u2026"
+
+
+def say_the_outcome(confounders: dict) -> str:
+    """What a reader is told about a number that ran through something (§9.8)."""
+    if confounders["status"] == "nothing_to_check":
+        return confounders["what_it_means"]
+    if not confounders["confounded"]:
+        if confounders["ran_during"]:
+            # NOT "read it as a clean result". A campaign with no overlaps was silent while one
+            # with two was actively certified clean — so the more the library knew was going
+            # on, the more confidently it said nothing was. That is the false clean bill,
+            # inverted, and §9.6 spent a round removing exactly this shape.
+            return (f"Ran through {confounders['ran_during']} recorded event(s), all dates "
+                    f"that come round every year, and nobody has said any of them bears on "
+                    f"this result. On the record either way.")
+        return ""
+    # NOT `split(".")`: "Magnitude 7.1 earthquake; …" became "Magnitude 7" and "U.S. tariffs
+    # of 25% took effect" became "U". A decimal point and an abbreviation are not sentence ends.
+    named = "; ".join(_short(e["description"]).rstrip(".")
+                      for e in confounders["confounded_by"])
+    total = confounders.get("confounded_by_total", len(confounders["confounded_by"]))
+    if total > len(confounders["confounded_by"]):
+        named += f" (and {total - len(confounders['confounded_by'])} more)"
+    # SHORT, because it rides on every measured row. The full argument — still counts, never a
+    # cause, do not quote it as clean — is `core._say_the_confounded`, said once per package;
+    # repeating it on each of a workbook's twelve rows was most of a 742 KB response and told
+    # a reader nothing the twelfth time it appeared.
+    return (f"CONFOUNDED: ran through {named}. Still counts as a measured result, but not as "
+            f"CLEAN evidence — and nothing here says the event moved the number.")
+
+
+_NOT_A_PERSON = ("server", "system", "computed", "campaign-poc", "library", "automatic",
+                 "auto", "claude", "the model", "assistant", "n/a", "unknown")
+
+
+def _reads_as_the_product(name: str) -> bool:
+    folded = _plain(name)
+    return any(word in folded for word in _NOT_A_PERSON)
+
+
+def withdraw_attribution(conn, *, campaign_id: str, event_id: str, why: str,
+                         withdrawn_by: str) -> dict:
+    """Take back an account of what an event did (§9.8, §8.5's shape).
+
+    Kept, not deleted: a judgment saved while the attribution stood rested on it, and "we used
+    to think this" is an answer. Withdrawing may also un-confound the outcome, where the
+    attribution was the only reason it was marked — which is as consequential as adding one.
+    """
+    import store
+
+    standing = store.attributions_for(conn, campaign_id).get(event_id)
+    if standing is None:
+        raise ValueError(
+            f"there is no standing account of {event_id!r} on this campaign to withdraw. "
+            f"`get_campaign` lists what is on each outcome.")
+    if not (why or "").strip():
+        raise ValueError(
+            "`why` is required: this may be the only reason an outcome is marked confounded, "
+            "and removing it without saying why leaves nobody able to tell a correction from "
+            "a mistake.")
+    if not (withdrawn_by or "").strip() or _reads_as_the_product(withdrawn_by):
+        raise ValueError(
+            "`withdrawn_by` is required and must be a PERSON: taking something off the record "
+            "is somebody's decision.")
+    store.withdraw_attribution(conn, campaign_id=campaign_id, event_id=event_id,
+                               why=why.strip(), withdrawn_by=withdrawn_by.strip())
+    return {"campaign_id": campaign_id, "event_id": event_id, "status": "withdrawn",
+            "basis": "stated",
+            "what_it_means": (
+                f"{withdrawn_by.strip()} withdrew the account given by "
+                f"{standing['stated_by']}: {why.strip()} It is kept on the record rather than "
+                f"deleted, because anything judged while it stood rested on it.")}

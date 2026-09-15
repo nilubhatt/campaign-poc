@@ -66,7 +66,14 @@ _CERTAINTY_NOTE = {
 # names for one place and a calendar that knows only the first gives the other two a clean bill.
 # `None` means commercially global, and is used sparingly for the same reason.
 #
-# (seed_key, markets, kind, starts_on, ends_on, certainty, subject, description)
+# `recurs_annually` is the axis §9.8 confounds on, and it is not the same axis as `kind`:
+# every row here is `fixed_calendar`, so keying on kind put a once-in-a-generation home World
+# Cup in the same bucket as Black Friday — §9.7 raised a finding that a window ran into the
+# tournament and §9.8 then called the result clean, on the review's own headline example.
+# Twelve of these thirteen come round every year and are the BASELINE a year-on-year
+# comparison is made against. The World Cup is not.
+#
+# (seed_key, markets, kind, starts_on, ends_on, certainty, subject, description, recurs)
 EVENTS = (
     # ── observed: lunar, and a day apart between neighbours ──────────────────
     ("ramadan.2026",
@@ -75,45 +82,45 @@ EVENTS = (
       "Bangladesh", "MENA", "GCC"),
      "fixed_calendar", "2026-02-18", "2026-03-19", "observed", "Ramadan",
      "Ramadan (approximate). Daytime trading, out-of-home and food and beverage patterns "
-     "shift substantially; working hours are often shortened."),
+     "shift substantially; working hours are often shortened.", True),
     ("eid-al-fitr.2026",
      ("UAE", "United Arab Emirates", "Saudi Arabia", "KSA", "Qatar", "Kuwait", "Bahrain",
       "Oman", "Egypt", "Jordan", "Morocco", "Turkey", "Indonesia", "Malaysia", "Pakistan",
       "Bangladesh", "MENA", "GCC"),
      "fixed_calendar", "2026-03-20", "2026-03-22", "observed", "Eid",
-     "Eid al-Fitr (approximate). A major gifting and travel period; many businesses close."),
+     "Eid al-Fitr (approximate). A major gifting and travel period; many businesses close.", True),
     ("chinese-new-year.2026", ("China", "Hong Kong", "Taiwan", "Singapore", "PRC"),
      "fixed_calendar", "2026-02-15", "2026-02-23", "announced", "Chinese New Year",
      "Chinese New Year (Year of the Horse), across the published State Council holiday from "
      "New Year's Eve. Factories and logistics stop for roughly a fortnight around it, and the "
-     "dates are announced each year."),
+     "dates are announced each year.", True),
     ("diwali.2026", ("India", "Singapore", "Malaysia"),
      "fixed_calendar", "2026-10-25", "2026-11-10", "observed", "Diwali",
      "Diwali (approximate; the day itself is around 8 November 2026). The range given is the "
      "RETAIL window rather than the festival — the largest gifting period of the Indian year, "
      "with buying starting weeks before and the date itself set by local observance. A "
-     "one-day row told a campaign running through late October that nothing was on."),
+     "one-day row told a campaign running through late October that nothing was on.", True),
 
     # ── announced: published, and moved from year to year ────────────────────
     ("golden-week-cn.2026", ("China", "PRC"),
      "fixed_calendar", "2026-10-01", "2026-10-07", "announced", "Golden Week",
      "Golden Week (China, National Day). Travel peaks and the surrounding working days are "
-     "rearranged by announcement."),
+     "rearranged by announcement.", True),
     ("golden-week-jp.2026", ("Japan",),
      "fixed_calendar", "2026-04-29", "2026-05-06", "announced", "Golden Week",
      "Golden Week (Japan). A run of national holidays; domestic travel peaks. Constitution "
-     "Memorial Day falls on a Sunday in 2026, so 6 May is a substitute holiday."),
+     "Memorial Day falls on a Sunday in 2026, so 6 May is a substitute holiday.", True),
     ("fifa-world-cup.2026", None,
      "fixed_calendar", "2026-06-11", "2026-07-19", "announced", "World Cup",
      "FIFA World Cup, hosted across the United States, Mexico and Canada. Attention, media "
-     "inventory and pricing move sharply in the host markets and in every competing one."),
+     "inventory and pricing move sharply in the host markets and in every competing one.", False),
 
     # ── fixed: a Gregorian date, or defined relative to one ──────────────────
     ("black-friday.2026",
      ("United States", "USA", "US", "U.S.", "Canada", "United Kingdom", "UK", "Germany"),
      "fixed_calendar", "2026-11-27", "2026-11-30", "fixed", "Black Friday",
      "Black Friday through Cyber Monday. Paid media pricing rises steeply for weeks either "
-     "side, well beyond the dates themselves. Adoption is wider than the markets listed here."),
+     "side, well beyond the dates themselves. Adoption is wider than the markets listed here.", True),
     ("singles-day.2026",
      ("China", "PRC", "Hong Kong", "Taiwan", "Singapore", "Malaysia", "Indonesia", "Thailand",
       "Vietnam", "Philippines", "SEA"),
@@ -121,21 +128,21 @@ EVENTS = (
      "Singles' Day (11.11). The largest single e-commerce day in China and across South-East "
      "Asia, with a build-up running through late October. Scoped to those markets rather than "
      "globally: a Norwegian retail plan being told it fails to mention 11.11 is the nuisance "
-     "that teaches a reader to skip this check."),
+     "that teaches a reader to skip this check.", True),
     ("buen-fin.2026", ("Mexico", "MX"),
      "fixed_calendar", "2026-11-13", "2026-11-17", "announced", "Buen Fin",
      "El Buen Fin. Mexico's national discount period, announced each year; the 2026 edition "
-     "runs five days."),
+     "runs five days.", True),
     ("dia-de-muertos.2026", ("Mexico", "MX"),
      "fixed_calendar", "2026-11-01", "2026-11-02", "fixed", "Día de Muertos",
      "Día de Muertos. A major cultural period in Mexico with strong expectations about how "
-     "brands participate."),
+     "brands participate.", True),
 
     # ── seasonal: an onset, not a date ───────────────────────────────────────
     ("monsoon-in.2026", ("India",),
      "fixed_calendar", "2026-06-01", "2026-09-30", "seasonal", "monsoon",
      "South-west monsoon (indicative). Outdoor activation, footfall and out-of-home "
-     "visibility are all affected, and the onset moves by weeks and by region."),
+     "visibility are all affected, and the onset moves by weeks and by region.", True),
     # TWO rows, because South-East Asia has two opposite rainy seasons and shipping one of
     # them was wrong for most of the region: mainland SEA is wet from roughly May to October
     # and DRY from November to March, which is exactly when the single row used to fire. A
@@ -145,12 +152,12 @@ EVENTS = (
      ("Thailand", "Vietnam", "Cambodia", "Laos", "Myanmar", "Philippines"),
      "fixed_calendar", "2026-05-15", "2026-10-31", "seasonal", "rainy season",
      "Rainy season across mainland South-East Asia (indicative). Outdoor activations and "
-     "footfall are affected; onset and withdrawal move by weeks and differ by country."),
+     "footfall are affected; onset and withdrawal move by weeks and differ by country.", True),
     ("rainy-season-maritime-sea.2026",
      ("Indonesia", "Singapore", "Malaysia", "SEA"),
      "fixed_calendar", "2026-11-01", "2027-03-31", "seasonal", "rainy season",
      "Rainy season across maritime South-East Asia — Indonesia, Singapore and Malaysia's east "
-     "coast (indicative). The opposite half of the year from mainland South-East Asia."),
+     "coast (indicative). The opposite half of the year from mainland South-East Asia.", True),
 )
 
 # What a plan would actually call each of these, plus the other names it might use. The silence
@@ -186,14 +193,14 @@ def rows() -> list:
     correctable on upgrade.
     """
     out = []
-    for key, markets, kind, starts, ends, certainty, subject, description in EVENTS:
+    for key, markets, kind, starts, ends, certainty, subject, description, recurs in EVENTS:
         for scope, value in ([("global", None)] if markets is None
                              else [("market", m) for m in markets]):
             out.append({
                 "seed_key": f"{key}@{value or 'global'}",
                 "scope": scope, "scope_value": value, "kind": kind,
                 "starts_on": starts, "ends_on": ends, "certainty": certainty,
-                "subject": subject, "description": description,
+                "subject": subject, "description": description, "recurs_annually": recurs,
             })
     return out
 
@@ -217,7 +224,7 @@ def note_for(certainty: str) -> str:
 def subject_for(seed_key: str) -> str:
     """The handle a plan would use, from a row's key. Keys carry the market suffix."""
     base = (seed_key or "").split("@")[0]
-    for key, _markets, _kind, _starts, _ends, _certainty, subject, _description in EVENTS:
+    for key, *_rest, subject, _description, _recurs in EVENTS:
         if key == base:
             return subject
     return ""

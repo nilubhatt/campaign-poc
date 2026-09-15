@@ -1492,6 +1492,106 @@ def _window_check(conn, retrieval: Optional[str], cited_ids: Optional[list], *,
     }
 
 
+# The words a verdict would use to say a number is not clean. Matched on word boundaries by
+# §9.7's `_mentions` machinery, so "unconfounded" does not count as saying "confounded".
+_SAID_IT_WAS_CONFOUNDED = ("confounded", "confounding", "not clean evidence",
+                           "not a clean result", "ran through", "coincided", "overlapped",
+                           "context event", "caveat")
+
+
+def _confounded_silence(conn, cited_ids, written: str) -> dict:
+    """Which cited campaigns' confounded outcomes the verdict never mentions (§9.8).
+
+    A phrase match, and it degrades the safe way round: a false positive lands as one extra
+    `should_fix` on a judgment that did hedge in words the matcher missed, and a false
+    negative just means no finding — which is where this was before. §9.7 accepted the same
+    trade on the same machinery.
+    """
+    said = context._plain(written)
+    if any(context._plain(phrase) in said for phrase in _SAID_IT_WAS_CONFOUNDED):
+        return {"status": "absent", "basis": "computed", "unaddressed": [],
+                "what_it_means": "The verdict says the evidence it rests on is not clean."}
+    unaddressed = []
+    for cid in list(dict.fromkeys(cited_ids or [])):
+        record = store.get_campaign(conn, cid)
+        if not record:
+            continue
+        actual = [m for m in record.get("metrics") or [] if m["metric_type"] == "actual"]
+        if any(m.get("confounded") for m in actual):
+            unaddressed.append(record["title"])
+    if not unaddressed:
+        return {"status": "absent", "basis": "computed", "unaddressed": [],
+                "what_it_means": "Nothing this verdict cites carries a confounded outcome."}
+    return {
+        "status": "present", "basis": "computed", "unaddressed": unaddressed,
+        "what_it_means": (
+            f"This verdict rests on {', '.join(unaddressed)}, whose measured outcome ran "
+            f"through something else that was going on — and says nothing about it. The "
+            f"outcome still counts; quoting it as though nothing else was happening "
+            f"overstates it. Say what it ran through, or say why it does not matter here."),
+    }
+
+
+def _reconciliation_context(conn, evaluation: dict, actual_metrics: list) -> dict:
+    """What else was going on, for the record §9.9 is built around (§9.8).
+
+    The SUBJECT's confounders, not the evidence's — `_confounded_at_save` stamps what the
+    cited precedent was confounded by, which is a useful provenance record and the wrong
+    subject here. And computed at reconcile time rather than read from that stamp, because the
+    subject's actuals arrive AFTER the verdict: a save-time figure is by construction the wrong
+    moment for it.
+    """
+    confounded = [m for m in actual_metrics if m.get("confounded")]
+    clash = ((evaluation.get("evidence") or {}).get("calendar_clash") or {})
+    return {
+        "basis": "computed",
+        "confounded": bool(confounded),
+        "confounded_by": [{"id": e["id"], "description": e["description"],
+                           "why": e["why"], "attribution": e["attribution"]}
+                          for m in confounded for e in m["confounded_by"]],
+        # §9.7's stored check is the other half: what the calendar said WHEN the prediction
+        # was made. The interesting record is the delta between the two.
+        **({"known_when_predicted": {"calendar_clash": clash["status"],
+                                     "what_it_means": clash.get("what_it_means", "")}}
+           if clash else {}),
+    }
+
+
+def _say_the_reconciliation_context(conn, evaluation: dict, actual_metrics: list) -> str:
+    confounded = [m for m in actual_metrics if m.get("confounded")]
+    if not confounded:
+        return ""
+    return (" `context` says something else was going on while this ran, so the actual figures "
+            "are not clean evidence of whether the judgment was right. Say so in the lesson: "
+            "a prediction that missed because a port was shut is a different lesson from one "
+            "that missed because the reasoning was wrong, and recording them the same way is "
+            "how a calibration figure stops meaning anything. It is an overlap in time and "
+            "never a cause.")
+
+
+def _confounded_at_save(conn, cited_ids: Optional[list]) -> list:
+    """Which cited outcomes were confounded when the verdict was written (§9.8).
+
+    §9.9 lines up predicted against delivered against actual against CONTEXT, and it cannot do
+    that against a caveat nobody stored. Same reasoning as §9.5's `execution_at_save`: the
+    overlap is recomputed on every read, so a judgment written before an earthquake was
+    recorded has to say that it was.
+    """
+    marked = []
+    for cid in list(dict.fromkeys(cited_ids or [])):
+        record = store.get_campaign(conn, cid)
+        if not record:
+            continue
+        actual = [m for m in record.get("metrics") or [] if m["metric_type"] == "actual"]
+        if actual and actual[0].get("confounded"):
+            marked.append({"campaign_id": cid,
+                           "events": [{"id": e["id"], "description": e["description"],
+                                       "starts_on": e["starts_on"], "kind": e["kind"],
+                                       "attribution": e["attribution"]}
+                                      for e in actual[0]["confounded_by"]]})
+    return marked
+
+
 def _execution_at_save(conn, cited_ids: Optional[list]) -> dict:
     """How faithfully each cited campaign had been shown to run, at the moment of the verdict.
 
@@ -2025,6 +2125,11 @@ def _both_poles(conn, *, evidence: list, text: Optional[str],
                         # have been it — reaching a reader here as a bare endorsement of the
                         # brief is the misreading §9.5 exists to prevent.
                         "execution": _execution_note(conn, m["campaign_id"]),
+                        # §9.8, on the same pole and for the same reason §9.5 found its own
+                        # caveat missing here: "this one worked" is the line a reasoner leans
+                        # on hardest, and a result that ran through an earthquake is not a
+                        # clean one.
+                        **_confounded_note(conn, m["campaign_id"]),
                         # Whether the reasoner would have seen it anyway. A pole entry that is
                         # NOT in the ranked evidence is the one this search exists for.
                         "in_evidence": m["campaign_id"] in ranked}
@@ -2361,6 +2466,17 @@ _COMPUTED_FINDINGS = {
     # rule it gives the model — overlapping a fixed date is the point of some campaigns.
     "calendar_clash": ("unaddressed", "should_fix",
                        "The launch window overlaps a fixed date the plan never names"),
+    # §9.8, on §9.7's pattern and for the same reason. Every §9.8 signal was an INPUT — the
+    # evidence row, the pole, the standing note — and none was an output the model had to
+    # carry, so an `approve` leaning on a confounded number and never mentioning it was
+    # accepted and left no trace. "Never quoted as clean evidence" was hoped for rather than
+    # true.
+    #
+    # The finding is the SILENCE, exactly as §9.7 framed it: a verdict that says the number is
+    # confounded has said what there was to say, and raising one anyway is the wallpaper this
+    # item's whole confounding rule exists to avoid.
+    "confounded_evidence": ("unaddressed", "should_fix",
+                            "The verdict rests on an outcome that is not clean evidence"),
 }
 
 
@@ -2391,7 +2507,12 @@ def _computed_findings(subject_text: Optional[str], computed: Optional[dict]) ->
     raised = []
     for code, (status, severity, headline) in _COMPUTED_FINDINGS.items():
         fact = computed.get(code) or {}
-        if code == "calendar_clash":
+        if code == "confounded_evidence":
+            if fact.get("status") != "present" or not fact.get("unaddressed"):
+                continue
+            headline = (f"The verdict rests on {', '.join(fact['unaddressed'])}, whose result "
+                        f"is confounded, without saying so")
+        elif code == "calendar_clash":
             # A clash is not a finding; the SILENCE is. "Mexico's own deck flagged that it
             # clashed with the World Cup and then never addressed it" — a plan that names what
             # it runs into has said what there was to say, and raising one anyway is the
@@ -2689,6 +2810,13 @@ def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
     clash = _calendar_clash(conn, campaign_id=campaign_id, proposal_text=subject_text,
                             starts_on=None, ends_on=None, markets=list(markets or []))
     established["calendar_clash"] = clash
+    # §9.8's half of the same machinery: does the verdict lean on a confounded outcome and
+    # never mention it? Computed over what the model actually WROTE, which is the only place
+    # the silence can be seen.
+    established["confounded_evidence"] = _confounded_silence(
+        conn, cited_ids, " ".join(filter(None, [summary, approve_if] + [
+            " ".join(str(f.get(k) or "") for k in ("finding", "detail", "fix"))
+            for f in (findings or [])])))
     cleaned += _computed_findings(subject_text, established or None)
     # Counted AFTER the server's own findings join the list — counting before it meant the
     # one figure that says which half of the output is the model's did not include the other
@@ -2769,6 +2897,9 @@ def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
                              "from": "retrieval_window"}
     else:
         closest_precedent = _clean_closest_precedent(conn, closest_precedent)
+    # Once. It was called twice — one to test the truthiness and one to use it — and each
+    # call walks every cited campaign.
+    confounded_now = _confounded_at_save(conn, cited_ids)
     evidence = {
         **_evidence_strength(conn, cited_ids=cited_ids,
                              text="\n".join([subject_title, summary])),
@@ -2777,6 +2908,7 @@ def _save_evaluation(conn, *, subject_title: str, verdict: str, summary: str,
         # §9.7: what the calendar said at the moment of the verdict. §9.9 reconciles predicted
         # against actual against CONTEXT, and it cannot do that against a check nobody stored —
         # the same reasoning as §9.5's `execution_at_save`.
+        **({"confounded": confounded_now} if confounded_now else {}),
         **({"calendar_clash": {k: clash[k] for k in
                                ("status", "window", "unaddressed", "searched",
                                 "markets_not_covered", "what_it_means")}}
@@ -4857,7 +4989,18 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
         # browsing scan while stale predictions survived.)
         sorted_metrics = sorted(c["metrics"], key=lambda m: (m["metric_type"] != "actual", -m["created_at"]))
         all_metrics = [{"metric_type": m["metric_type"], "detail": m["detail"],
-                        "structured": m["structured"]} for m in sorted_metrics]
+                        "structured": m["structured"],
+                        # §9.8: the caveat travels WITH the metric. A projection that drops it
+                        # here would mean the one surface a judgment is actually written from
+                        # is the one surface that never carries it.
+                        "confounded": m.get("confounded", False),
+                        **({"confounded_by": [
+                                {"id": e["id"], "description": e["description"],
+                                 "why": e["why"], "attribution": e["attribution"]}
+                                for e in m["confounded_by"]],
+                            "what_it_means": m.get("what_it_means", "")}
+                           if m.get("confounded") else {})}
+                       for m in sorted_metrics]
         # §6.8 (extended): a match with many metrics rows (e.g. bulk-imported) was returning
         # all of them unconditionally even in a light similarity scan — heavy at top_k=5.
         # Same knob as detail: full_detail=True (prepare_evaluation's default) keeps every
@@ -5008,6 +5151,37 @@ def _say_the_calendar(clash: dict) -> str:
                  f"{', '.join(clash['markets_not_covered'])}, so anything found there came "
                  f"from this customer's own records. ")
     return said
+
+
+def _confounded_note(conn, campaign_id: str) -> dict:
+    """Whether this campaign's measured outcomes ran through anything (§9.8)."""
+    record = store.get_campaign(conn, campaign_id) or {}
+    actual = [m for m in record.get("metrics") or [] if m["metric_type"] == "actual"]
+    if not actual or not actual[0].get("confounded"):
+        return {"confounded": False}
+    return {"confounded": True,
+            "confounded_by": [{"id": e["id"], "description": e["description"],
+                               "attribution": e["attribution"]}
+                              for e in actual[0]["confounded_by"]]}
+
+
+def _say_the_confounded(evidence: list) -> str:
+    """What the model is told about outcomes that ran through something (§9.8).
+
+    Silent when none are, for §9.5's reason three items over: a standing paragraph about
+    confounding on a library with none is the note that fires on everything.
+    """
+    marked = [e for e in evidence
+              if any(m.get("confounded") for m in e.get("metrics") or [])]
+    if not marked:
+        return ""
+    return (f"{len(marked)} of these campaigns carry outcomes marked CONFOUNDED: something "
+            f"was going on in that market at the same time. They STILL COUNT — they are real "
+            f"measured results and nothing here down-weights them — but they are not CLEAN "
+            f"evidence, so do not quote one as though nothing else was happening. It is an "
+            f"overlap in time and NEVER a cause: \u201csell-through was down and there was an "
+            f"earthquake\u201d is not evidence the earthquake did it. If a person has "
+            f"attributed it, their note is on the row and is theirs, not a measurement. ")
 
 
 def _context_note(conn, campaign_id: str) -> dict:
@@ -5466,7 +5640,8 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
             + _say_the_standing_corrections(standing_now)
             + _say_the_execution_drift(evidence)
             + _say_the_context(evidence)
-            + _say_the_calendar(computed.get("calendar_clash")) +
+            + _say_the_calendar(computed.get("calendar_clash"))
+            + _say_the_confounded(evidence) +
             "`outcomes` splits this evidence into what WORKED and what did NOT, by measured "
             "result rather than by impression. Read both before deciding: resemblance to a "
             "strong performer is not evidence, and a brief that looks like something that "
@@ -5557,6 +5732,10 @@ def reconcile_evaluation(conn, *, evaluation_id: str, actual: Optional[str] = No
     if not ev:
         return {"error": f"evaluation {evaluation_id} not found"}
 
+    # Bound on BOTH branches. §9.8 reads it below for the context half, and it was set only
+    # when `actual` was pulled from file — so passing the numbers in by hand raised a
+    # NameError on the surface §9.9 is named after.
+    actual_metrics: list = []
     if actual is None:
         campaign = store.get_campaign(conn, ev["campaign_id"]) if ev["campaign_id"] else None
         actual_metrics = [m for m in (campaign["metrics"] if campaign else [])
@@ -5595,12 +5774,22 @@ def reconcile_evaluation(conn, *, evaluation_id: str, actual: Optional[str] = No
         "predictions": ev["predictions"],
         "cited_ids": ev["cited_ids"],
         "actual": actual,
+        # §9.8: the one surface the review names — "line up predicted against delivered
+        # against actual against CONTEXT" — was the one surface that cited the number with no
+        # caveat, because this function reads `detail` and `structured` off the metric rows
+        # and drops everything else on them.
+        "context": _reconciliation_context(
+            conn, ev,
+            actual_metrics or [m for m in ((store.get_campaign(conn, ev["campaign_id"]) or {})
+                                           .get("metrics") or []) if m["metric_type"] == "actual"]
+            if ev.get("campaign_id") else actual_metrics),
         "note": ("This judgment predates the structured schema, so there is no verdict or "
                  "findings to compare against — only `original_analysis`, the free text as "
                  "it was written. Read it before comparing."
                  if legacy else
                  "Compare the original findings and predictions to actual, then call "
-                 "save_reconciliation with the lesson."),
+                 "save_reconciliation with the lesson.")
+        + _say_the_reconciliation_context(conn, ev, actual_metrics),
     }
 
 

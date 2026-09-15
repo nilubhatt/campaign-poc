@@ -121,6 +121,13 @@ CREATE TABLE IF NOT EXISTS metrics (
                                    -- would make every calibration figure meaningless (§8.1)
     detail        TEXT,            -- freeform metrics / learnings, as given
     structured    TEXT,            -- optional JSON {ctr, roi, conversions, ...}
+    -- §9.8: WHEN this was measured. A KPI workbook is one row per month, and without this the
+    -- campaign's whole window was used — so January's sell-through was confounded by a
+    -- September earthquake, on a row that literally carries `month: 2026-01`. It fails hardest
+    -- for the customers with the most data. Read from the same date columns §9.6/D119 already
+    -- parses; NULL falls back to the campaign window, and the fallback says so.
+    period_start  TEXT,
+    period_end    TEXT,
     created_at    REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS metric_registry (
@@ -189,6 +196,14 @@ CREATE TABLE IF NOT EXISTS context_events (
     recorded_by   TEXT NOT NULL,   -- whose account of it this is
     seeded        INTEGER NOT NULL DEFAULT 0,   -- §9.7: shipped with the product rather than
                                    -- entered by this customer
+    recurs_annually INTEGER,       -- §9.8: does this come round every year? NULL/0 means no.
+                                   -- The axis §9.8 confounds on, and NOT the same as `kind`:
+                                   -- every shipped calendar row is `fixed_calendar`, so keying
+                                   -- on kind put a once-in-a-generation home World Cup in the
+                                   -- same bucket as Black Friday, and the product raised a
+                                   -- finding that a window ran into the tournament and then
+                                   -- called the result clean. A yearly date is the BASELINE a
+                                   -- year-on-year comparison is made against; a one-off is not
     certainty     TEXT,            -- §9.7, on a SEEDED row: fixed | announced | observed |
                                    -- seasonal. A shipped calendar is a claim about the world
                                    -- and most of these claims are approximate — Ramadan begins
@@ -206,6 +221,36 @@ CREATE TABLE IF NOT EXISTS context_events (
     -- a correction path an event typed with the wrong year attaches itself to every
     -- overlapping campaign forever, which is strictly worse than the hand-maintained join
     -- this replaces: a join table at least lets you unlink.
+    withdrawn_at  REAL,
+    withdrawn_by  TEXT,
+    withdrawn_why TEXT,
+    created_at    REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS context_attributions (
+    -- §9.8: "A human can add an attribution note, stored as `stated`." The server records that
+    -- a metric and an event overlapped; whether the event MOVED the number is exactly the
+    -- judgment the review says a model will reach for, so it is a person's, it carries their
+    -- name, and there is no path by which the server produces one.
+    --
+    -- It is also what lets a recurring holiday confound. Every November campaign in the United
+    -- States overlaps Black Friday, so a fixed date confounds nothing by itself — a caveat that
+    -- travels with every metric in the library is one nobody reads. A row here is somebody
+    -- saying this one mattered.
+    -- APPENDED, never updated — §9.4's rule, four items earlier, for the same reason: an
+    -- account given before the numbers came in and one given after are two judgments about the
+    -- same thing, and the pair is worth more than either. "This looked like the earthquake
+    -- before the numbers and like our own pricing after" is the highest-value row this table
+    -- can hold, and §9.9 is the item that would read it. `outcome_known` is stamped at the
+    -- moment of the statement, because the point is to record what the person could see.
+    id            TEXT PRIMARY KEY,
+    campaign_id   TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    event_id      TEXT NOT NULL REFERENCES context_events(id) ON DELETE CASCADE,
+    note          TEXT NOT NULL,
+    stated_by     TEXT NOT NULL,
+    outcome_known INTEGER NOT NULL DEFAULT 0,
+    -- §8.5's shape again: an account can be taken back, and is kept when it is. Without this
+    -- a wrong attribution could only be replaced by writing another claim — there was no way
+    -- to say "I was wrong to say that".
     withdrawn_at  REAL,
     withdrawn_by  TEXT,
     withdrawn_why TEXT,
@@ -419,6 +464,7 @@ CREATE INDEX IF NOT EXISTS context_scope_idx     ON context_events(scope, scope_
 -- migration.
 CREATE UNIQUE INDEX IF NOT EXISTS context_seed_key_idx ON context_events(seed_key)
     WHERE seed_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS attributions_campaign_idx ON context_attributions(campaign_id);
 """
 
 
@@ -940,6 +986,24 @@ def mark_embedded(conn, campaign_id: str, flag: bool) -> None:
     conn.commit()
 
 
+def _overlapping_once(conn, record: dict) -> list:
+    """Every event that could touch this record, fetched once per `get_campaign`.
+
+    Memoised on the record dict itself rather than on the connection: it lives exactly as long
+    as this one read, so an event recorded a moment later is picked up by the next call. A
+    cache that outlived the call would be the stale-link failure §9.6 refused a join table to
+    avoid.
+    """
+    import context
+
+    if "_overlapping" not in record:
+        widest = context.widest_window(record)
+        record["_overlapping"] = ([] if not widest["starts_on"] else context.overlapping_window(
+            conn, starts_on=widest["starts_on"], ends_on=widest["ends_on"],
+            markets=sorted(context._market_names(record))))
+    return record["_overlapping"]
+
+
 def get_campaign(conn, campaign_id: str) -> Optional[dict]:
     row = conn.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
     if not row:
@@ -950,12 +1014,39 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
     d["metrics"] = [dict(m) for m in conn.execute(
         "SELECT * FROM metrics WHERE campaign_id = ? ORDER BY created_at", (campaign_id,)
     ).fetchall()]
+    # §9.8: "the caveat travels with the metric EVERYWHERE it is cited". Attached here, in the
+    # one function that loads metrics, rather than at each of the places that display them — a
+    # hand-maintained list of call sites is a copy of the codebase, and this project has been
+    # bitten by that shape four times. Every reader gets it, including readers nobody has
+    # written yet.
+    #
+    # Guarded on both halves so the ordinary call costs nothing: a campaign with no window
+    # cannot overlap anything, and a campaign with no metrics has no outcome to qualify.
+    # ACTUAL rows only. A target is what somebody aimed at before anything happened and a
+    # prediction is this library's own forecast; neither can be confounded by an event, and
+    # calling a target "an outcome that ran through" something is the category error the
+    # `metric_type` comment above guards — it would also corrupt §9.9, which scores
+    # predictions against actuals.
+    measured = [m for m in d["metrics"] if m["metric_type"] == "actual"]
+    for metric in d["metrics"]:
+        metric.update({"status": "not_an_outcome", "confounded": False, "confounded_by": [],
+                       "ran_during": 0, "confounded_basis": "computed"})
+    if measured:
+        import context
+
+        # Once per RECORD, then narrowed per row in memory. Computed per row it ran the
+        # overlap query once per month of a workbook — and `context.record` already fans out
+        # across the whole library, so §9.8 was adding two queries per campaign to it.
+        for metric in measured:
+            metric.update(context.confounders_for(conn, d, metric=metric,
+                                                  events=_overlapping_once(conn, d)))
     d["has_metrics"] = len(d["metrics"]) > 0
     # Separately, because they answer different questions and §8.8 made the difference
     # reachable. `has_metrics` counts any row — a forecast, and now a TARGET. "Has this
     # campaign been measured" is what decides whether to go and ask for its numbers, and a
     # campaign carrying only the figure somebody was aiming at has not been measured at all.
     d["has_actual_metrics"] = any(m["metric_type"] == "actual" for m in d["metrics"])
+    d.pop("_overlapping", None)
     # §9.1: whether anything has come back. A concluded campaign whose assets are all
     # `proposed` has never been checked against what actually ran, which is the state the
     # review says the library cannot currently notice.
@@ -1717,11 +1808,19 @@ def add_metrics(conn, campaign_id: str, *, detail=None, structured=None,
                          "`structured` (the numbers), or both — an empty row records no "
                          "outcome but still counts as one")
     mid = _id("met")
+    # §9.8: the row's OWN measurement period, from the same date columns D119 already reads.
+    # A workbook is one row per month, and using the campaign's whole window instead confounded
+    # January's sell-through with a September earthquake.
+    import context
+
+    period = context.window_from_columns(structured or {})
     conn.execute(
-        """INSERT INTO metrics (id, campaign_id, metric_type, detail, structured, created_at)
-           VALUES (?,?,?,?,?,?)""",
+        """INSERT INTO metrics (id, campaign_id, metric_type, detail, structured,
+                                period_start, period_end, created_at)
+           VALUES (?,?,?,?,?,?,?,?)""",
         (mid, campaign_id, metric_type, detail,
-         json.dumps(structured) if structured is not None else None, _now()),
+         json.dumps(structured) if structured is not None else None,
+         (period or {}).get("starts_on"), (period or {}).get("ends_on"), _now()),
     )
     if commit:
         conn.commit()
@@ -2289,7 +2388,7 @@ def insert_context_event(conn, *, starts_on: str, ends_on, scope: str, scope_val
                          kind: str, description: str, recorded_by: str, source=None,
                          delay_days=None, budget_change_pct=None,
                          channels_disrupted=None, seeded: bool = False,
-                         seed_key=None, certainty=None) -> str:
+                         seed_key=None, certainty=None, recurs_annually=None) -> str:
     """Write one event, or REPLACE the seeded row with this key (§9.6/§9.7).
 
     Replacing rather than inserting only when a `seed_key` is given, which only the seeder
@@ -2313,11 +2412,12 @@ def insert_context_event(conn, *, starts_on: str, ends_on, scope: str, scope_val
     conn.execute(
         "INSERT OR REPLACE INTO context_events (id, starts_on, ends_on, scope, scope_value, "
         "scope_key, kind, description, source, delay_days, budget_change_pct, "
-        "channels_disrupted, recorded_by, seeded, seed_key, certainty, created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "channels_disrupted, recorded_by, seeded, seed_key, certainty, recurs_annually, "
+        "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (eid, starts_on, ends_on, scope, scope_value, fold(scope_value), kind, description,
          source, delay_days, budget_change_pct, json.dumps(list(channels_disrupted or [])),
-         recorded_by, int(seeded), seed_key, certainty, _now()))
+         recorded_by, int(seeded), seed_key, certainty,
+         None if recurs_annually is None else int(recurs_annually), _now()))
     conn.commit()
     return eid
 
@@ -2327,7 +2427,7 @@ def _same_event(row, values: dict) -> bool:
     return all(
         (row[column] or None) == (values.get(column) or None)
         for column in ("starts_on", "ends_on", "scope", "scope_value", "kind", "description",
-                       "source", "certainty")
+                       "source", "certainty", "recurs_annually")
     ) and json.loads(row["channels_disrupted"] or "[]") == list(
         values.get("channels_disrupted") or [])
 
@@ -2342,6 +2442,7 @@ def _context_row(row) -> dict:
     d = dict(row)
     d["channels_disrupted"] = json.loads(d.get("channels_disrupted") or "[]")
     d["seeded"] = bool(d.get("seeded"))
+    d["recurs_annually"] = bool(d.get("recurs_annually"))
     return d
 
 
@@ -2401,6 +2502,54 @@ def context_events(conn, *, scopes=None, starts_on=None, ends_on=None,
         sql += " WHERE " + " AND ".join(where)
     return [_context_row(r)
             for r in conn.execute(sql + " ORDER BY starts_on, id", params).fetchall()]
+
+
+def insert_attribution(conn, *, campaign_id: str, event_id: str, note: str,
+                       stated_by: str, outcome_known: bool = False) -> str:
+    aid = _id("attr")
+    conn.execute(
+        "INSERT INTO context_attributions (id, campaign_id, event_id, note, stated_by, "
+        "outcome_known, created_at) VALUES (?,?,?,?,?,?,?)",
+        (aid, campaign_id, event_id, note, stated_by, int(outcome_known), _now()))
+    conn.commit()
+    return aid
+
+
+def attributions(conn, campaign_id: str, *, event_id=None) -> list[dict]:
+    """Every account given about this campaign, oldest first (§9.8)."""
+    if not _columns(conn, "context_attributions"):
+        # NOT `{}`. An empty answer that means "could not look" reads as "nobody has said
+        # anything", which is the collapse `context_events` raises for two functions above.
+        raise RuntimeError(
+            "this database has no `context_attributions` table, so what anybody said about "
+            "these outcomes cannot be read. Run the server once to upgrade the schema.")
+    sql = "SELECT * FROM context_attributions WHERE campaign_id = ?"
+    params: list = [campaign_id]
+    if event_id is not None:
+        sql += " AND event_id = ?"
+        params.append(event_id)
+    return [{**dict(r), "outcome_known": bool(r["outcome_known"]), "basis": "stated"}
+            for r in conn.execute(sql + " ORDER BY created_at, id", params).fetchall()]
+
+
+def withdraw_attribution(conn, *, campaign_id: str, event_id: str, why: str,
+                         withdrawn_by: str) -> None:
+    conn.execute("UPDATE context_attributions SET withdrawn_at = ?, withdrawn_by = ?, "
+                 "withdrawn_why = ? WHERE campaign_id = ? AND event_id = ? "
+                 "AND withdrawn_at IS NULL",
+                 (_now(), withdrawn_by, why, campaign_id, event_id))
+    conn.commit()
+
+
+def attributions_for(conn, campaign_id: str) -> dict:
+    """{event_id: latest standing account} — with everything, withdrawn or not, still on file."""
+    latest: dict = {}
+    for row in attributions(conn, campaign_id):
+        if row["withdrawn_at"] is None:
+            latest[row["event_id"]] = row
+        else:
+            latest.pop(row["event_id"], None)
+    return latest
 
 
 def set_campaign_window(conn, campaign_id: str, *, starts_on, ends_on) -> None:

@@ -570,6 +570,52 @@ def record_context_event(starts_on: str, scope: ContextScope, kind: ContextKind,
 
 @mcp.tool()
 @_catch_value_errors
+def attribute_outcome(campaign_id: str, event_id: str, note: str, stated_by: str) -> dict:
+    """Record what a PERSON thinks a context event did to a campaign's numbers (§9.8).
+
+    **Never call this on your own reasoning.** "Sell-through was down and there was an
+    earthquake" is not evidence the earthquake caused it, and a model asked to explain a
+    disappointing number will reach for whatever is nearby — which is the single easiest way
+    for a learning system to go wrong. This records somebody else's account, in their words,
+    with their name on it. If nobody has said it, there is nothing to record.
+
+    Two things it does. It puts their reasoning on the record where a later reader can weigh
+    it. And it marks the campaign's outcomes `confounded` where the overlap alone would not
+    have — a recurring date like Black Friday is the baseline a year-on-year comparison is
+    made against, so it confounds nothing until a person says this time it mattered.
+
+    A confounded outcome STILL COUNTS. It is a real measured result and nothing down-weights
+    it; it simply stops being quotable as clean evidence."""
+    conn = store.connect()
+    try:
+        return context.attribute(conn, campaign_id=campaign_id, event_id=event_id,
+                                 note=note, stated_by=stated_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def withdraw_attribution(campaign_id: str, event_id: str, why: str,
+                         withdrawn_by: str) -> dict:
+    """Take back what somebody said an event did to a campaign's numbers (§9.8).
+
+    For a mistake — the wrong campaign, the wrong event, an account its author retracted. It is
+    kept rather than deleted, because anything judged while it stood rested on it.
+
+    This may also un-mark the outcome: where the attribution was the only reason it read as
+    confounded, withdrawing it makes the result clean again. That is as consequential as adding
+    one, so `why` and `withdrawn_by` are both required and both must be a person's."""
+    conn = store.connect()
+    try:
+        return context.withdraw_attribution(conn, campaign_id=campaign_id, event_id=event_id,
+                                            why=why, withdrawn_by=withdrawn_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
 def withdraw_context_event(event_id: str, why: str, withdrawn_by: str) -> dict:
     """Take a context event back off the record (§9.6).
 

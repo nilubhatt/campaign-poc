@@ -2518,8 +2518,61 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       **Re-seeding rewrote all thirteen rows on every start**, churning `created_at` and
       silently reverting any local edit; and `seed_key UNIQUE` did not survive the migration,
       so upgraded databases had none of the uniqueness the schema comment promised.
-- [ ] **9.8 Record overlap, never assert cause** — mark outcomes `confounded`; the caveat
+- [x] **9.8 Record overlap, never assert cause** — mark outcomes `confounded`; the caveat
       travels with the metric wherever it is cited.
+      **"Confounded outcomes still count" decides the design.** Dropping them would throw away
+      most of what a real library holds — every campaign that ran through a holiday, a port
+      closure or an election. So nothing filters, excludes, down-ranks or reweights; the number
+      is the number, and what changes is that a reader can no longer be told it was clean.
+      **"Everywhere it is cited" means one choke point, not a list of call sites.** Metrics load
+      in exactly one function, so the caveat attaches there and every reader gets it, including
+      readers nobody has written yet. A hand-maintained list of places to attach it is a copy of
+      the codebase, and this project has been bitten by that shape four times.
+      **Attribution is a person's, always.** The server records that a metric and an event
+      overlapped; whether the event moved the number is `stated`, needs a name against it, is
+      refused when the event never overlapped, and is refused when the name reads as the
+      product itself.
+      *Found by review, all reproduced:*
+      **The escape hatch the whole design rests on was unreachable.** A recurring date confounds
+      only when somebody says it did — and `attribute` validated against the DISPLAY list, which
+      caps at eight by a salience that sorts seeded rows LAST. So the only events it could cut
+      were exactly the ones needing an attribution, the server refused with "it did not run in
+      its market" about an event that plainly did, and the hatch closed as soon as a library got
+      rich. Third instance of this bug shape in three consecutive items.
+      **The product contradicted itself on the review's own example.** §9.7 raises a `should_fix`
+      that a window runs into the World Cup; §9.8 then told the reasoner to read the result as
+      clean. Every row in the shipped calendar is `fixed_calendar`, so keying on kind put a
+      once-in-a-generation home tournament in the same bucket as Black Friday. The axis is
+      RECURRENCE, and `competitor_launch` moved off the unconditional list — competitor launches
+      are continuous background, so a diligent customer would have turned every outcome
+      confounded through their own diligence.
+      **The caveat certified cleanliness.** A campaign with no overlaps was silent while one with
+      two was told to "read it as a clean result" — so the more the library knew was going on,
+      the more affirmatively it said nothing was. The false clean bill, inverted.
+      **January's sell-through was confounded by a September earthquake**, on a row that
+      literally carries `month: 2026-01` — a column the importer already parses and was
+      discarding. Metrics now carry their own measurement period, and the fallback to the
+      campaign window says it is one. It failed hardest for the customers with the most data.
+      **A 120-row workbook produced a 742 KB response**: the same event list and the same
+      858-character sentence copied onto every row. §6.8 exists in this codebase because a match
+      with many metric rows was already heavy; this re-created it by another route. The row now
+      carries the label and the count; the argument is said once per package.
+      **`reconcile_evaluation` — the surface §9.9 is named after — cited the number with no
+      caveat at all**, and had a latent `NameError` on the branch where the figures are passed
+      in by hand.
+      **"Never quoted as clean evidence" was hoped for rather than true.** Every signal was an
+      input the model could ignore: an `approve` leaning on a confounded number and never
+      mentioning it was accepted and left no trace. It now raises a server finding on §9.7's
+      pattern — the finding is the SILENCE, `should_fix` and never blocking.
+      **Targets and forecasts were marked "an outcome that ran through" something** — a category
+      error the metrics schema comment already guards, and one that would corrupt §9.9.
+      **`confounded: false` collapsed four states into one word**, including "this campaign has
+      no window" and "it names no market" — the exact collapse its two neighbours on every
+      evidence row were each written to prevent.
+      **An attribution overwrote the last one**, against §9.4's explicit precedent four items
+      earlier; a zero stated impact ("somebody looked and found no delay") was read as somebody
+      saying it changed things; and `stated_by="campaign-poc server (computed)"` was accepted
+      and rendered as though the library had worked it out.
 - [ ] **9.9 Make `reconcile_evaluation` do its job** — predicted vs delivered vs actual vs
       context, one record. It has never run.
 
