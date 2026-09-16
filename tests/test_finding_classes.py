@@ -37,16 +37,30 @@ import store
 
 
 @pytest.fixture
-def library(conn):
-    """A campaign to depart from and a rulebook to breach, both with real quotable text."""
+def library(conn, tmp_path, monkeypatch):
+    """A campaign to depart from and a rule to breach, both with real quotable text.
+
+    §12.1: the rule now lives in the RULEBOOK, not in a `reference` record. It used to be a
+    campaign row, and `rule_id` was its campaign id — which is exactly the arrangement §12.1
+    removed, because a rule that reaches a judgment only when it is retrieved is not a rule.
+    """
+    import rulebook
+
     peru = core.ingest_campaign(
         conn, title="Peru launch", status="concluded",
         detail="Seeded one colourway per creator, with a content angle and posting date "
                "per asset.")["campaign_id"]
-    rules = core.ingest_campaign(
-        conn, title="Brand guidelines", record_type="reference",
-        detail="No AI-generated imagery in any paid placement.")["campaign_id"]
-    return {"peru": peru, "rules": rules}
+    book = tmp_path / "rulebook.yaml"
+    book.write_text(
+        "version: 'test-1'\nrules:\n  - id: no-ai-imagery\n"
+        "    rule: No AI-generated imagery in any paid placement.\n"
+        "    severity: blocking\n    why: The client has asked in writing.\n")
+    monkeypatch.setattr(rulebook, "_bundled", lambda: book)
+    rulebook.load.cache_clear()
+    try:
+        yield {"peru": peru, "rules": "no-ai-imagery"}
+    finally:
+        rulebook.load.cache_clear()
 
 
 def _breach(**over):

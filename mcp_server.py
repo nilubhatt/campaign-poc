@@ -1236,6 +1236,15 @@ _PREPARE_EVALUATION_DESCRIPTION = """Evaluate a NEW campaign proposal against th
     never blur them: quoting a commentary row as though the deck itself claimed it is a
     false statement about that campaign.
 
+    `rulebook` says which rules were applied to THIS call: the version, how many rules, and
+    `basis: computed` — meaning the server put them in front of you itself rather than you
+    reporting that you considered them. Every rule is in the note in full, whatever this brief
+    is about; none of them was retrieved by similarity and none could be ranked out. A finding
+    that a rule was breached cites its `rule_id` and quotes it as written, and the server
+    refuses the finding if the rulebook has no such rule or the words are not the rule's own.
+    `rules_applied: 0` means nobody has written any rules down — then no rule was checked, and
+    saying one was is the false claim this field exists to make impossible.
+
     `expected_measures` is what briefs in this record's market usually report, built from what
     the library has actually seen and confirmed rather than from a rule anybody wrote. Its
     `missing` list is a gap in the brief, not a verdict on it — a measure can be meaningless
@@ -1367,8 +1376,9 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
     same register:
 
       • `guardrail_breach` — a rule the customer set was broken. Cite the rule: either
-        `precedent: {rule_id, quote}`, where `rule_id` is a record stored as reference
-        material, or `precedent: {correction_id, quote}` for one of the
+        `precedent: {rule_id, quote}`, where `rule_id` is the id of a rule in the RULEBOOK
+        (they are listed in full at the top of `prepare_evaluation`'s note), or
+        `precedent: {correction_id, quote}` for one of the
         `standing_corrections` — a rule the library learned from repeated client feedback and
         a person confirmed. Quote the rule's own words. **Not debatable**, so never a `note`. State it: "this breaks your own rule
         on AI imagery". There is no rationale that makes it not a breach; there is only a
@@ -1406,7 +1416,12 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
     brief in front of you, which is not in the library, so they need no citation — do not go
     looking for a campaign to quote at in order to satisfy the shape.
 
-    `rule_id` means your guidelines — a record stored as reference material. `correction_id`
+    `rule_id` means a rule in the rulebook, by its id — the versioned file whose rules are put
+    in front of you in full on every judgment (§12.1). It is NOT a record in the library: a
+    guidelines document uploaded as reference material is retrieved by similarity like
+    anything else, and a rule that arrives only when it happens to rank is not a rule. If the
+    rulebook has no rule for what you want to say, say it as a `precedent_departure` or a
+    `missing_information` finding — do not anchor it to a record. `correction_id`
     means a standing correction, which is a rule too: it recurred across markets and somebody
     confirmed it. Neither is interchangeable with `campaign_id`: doing it differently from a
     past campaign is a `precedent_departure`, however strongly you feel about it. A correction
@@ -1677,9 +1692,14 @@ def getting_started() -> dict:
     disclaimer.
 
     `shortest_path` is ORDERED and is the review's own prescription: one brief you liked, one
-    you did not, the rulebook. The contrast is the point — two briefs somebody liked teach
-    the library nothing about the axis it is being asked to judge on. Offer the first step;
-    do not read the list out.
+    you did not, your guidelines as reference material. The contrast is the point — two briefs
+    somebody liked teach the library nothing about the axis it is being asked to judge on.
+    Offer the first step; do not read the list out.
+
+    The third step is NOT "add the rulebook". §12.1 made the rulebook a file that ships with
+    the product and already applies; uploading a guidelines document makes it quotable when it
+    is retrieved, which is a weaker and different thing. `can`/`cannot` carries which of the
+    two the library has.
 
     There is deliberately no "you need N records" number. Usefulness depends on what is in
     the library, not how much: two contrasting briefs make the like/dislike comparison work

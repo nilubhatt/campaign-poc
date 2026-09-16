@@ -250,6 +250,29 @@ def test_an_elision_cannot_be_stretched_across_two_records(conn, peru):
                           "quote": "Budget is fixed … requirements per asset"}}))
 
 
+@pytest.fixture
+def a_rulebook(tmp_path, monkeypatch):
+    """A rulebook with one quotable rule in it (§12.1).
+
+    These tests used to build a `reference` CAMPAIGN and cite its id — the arrangement §12.1
+    removed, because a rule that reaches a judgment only when similarity retrieves it is not
+    a rule.
+    """
+    import rulebook
+
+    book = tmp_path / "rulebook.yaml"
+    book.write_text(
+        "version: 'test-1'\nrules:\n  - id: no-superlatives\n"
+        "    rule: Never use superlatives in paid social.\n"
+        "    severity: blocking\n    why: The client has asked in writing.\n")
+    monkeypatch.setattr(rulebook, "_bundled", lambda: book)
+    rulebook.load.cache_clear()
+    try:
+        yield book
+    finally:
+        rulebook.load.cache_clear()
+
+
 # ── rule_id is not a way round it ───────────────────────────────────────────
 
 def test_a_rule_id_that_resolves_to_nothing_is_refused(conn, peru):
@@ -263,27 +286,36 @@ def test_a_rule_id_that_resolves_to_nothing_is_refused(conn, peru):
     assert "rule_tone" in str(e.value)
 
 
-def test_a_rule_id_naming_a_reference_record_verifies_like_any_other(conn):
-    rules = core.ingest_campaign(conn, title="Brand guidelines", record_type="reference",
-                                 detail="Never use superlatives in paid social.")["campaign_id"]
+def test_a_rule_id_naming_a_rulebook_rule_is_verified_against_its_wording(conn, a_rulebook):
+    """§12.1 moved what `rule_id` MEANS. It used to name a `reference` record and be verified
+    against that record's text; it now names a rule in the versioned rulebook and is verified
+    against the rule's own words.
+
+    The guarantee is the same one and the reason is the same: a breach finding quoting a rule
+    that does not say that reads as established when it is not. What changed is that the rule
+    is no longer a library row somebody can edit or delete."""
     result = core.save_evaluation(conn, **_evaluation({
         "severity": "blocking", "kind": "guardrail_breach",
         "finding": "Breaches the tone rule",
-        "precedent": {"rule_id": rules, "quote": "Never use superlatives"}}))
+        "precedent": {"rule_id": "no-superlatives", "quote": "Never use superlatives"}}))
 
     stored = store.get_evaluation(conn, result["evaluation_id"])
-    assert stored["findings"][0]["precedent"]["checked"] == ["record", "layer"]
+    assert stored["findings"][0]["precedent"]["checked"] == ["rulebook", "wording"]
 
 
-def test_a_rule_id_pointing_at_an_ordinary_campaign_is_refused(conn, peru):
+def test_a_rule_id_pointing_at_a_campaign_is_refused(conn, peru, a_rulebook):
     """`rule_id` means the rulebook. Letting it name any record would make the two slots
-    interchangeable, and then "a rule was broken" could be anchored to somebody's Q3 deck."""
+    interchangeable, and then "a rule was broken" could be anchored to somebody's Q3 deck.
+
+    Since §12.1 this holds by construction rather than by a record-type check: a campaign id
+    is not a rule id, and the rulebook is the only place a rule id can come from."""
     with pytest.raises(ValueError) as e:
         core.save_evaluation(conn, **_evaluation({
             "severity": "blocking", "kind": "guardrail_breach",
             "finding": "Breaches the tone rule",
             "precedent": {"rule_id": peru, "quote": "posting date"}}))
-    assert "reference" in str(e.value).lower()
+    assert "rulebook" in str(e.value).lower()
+    assert "no-superlatives" in str(e.value), "and it says which rules there are"
 
 
 # ── a record with nothing to check against ──────────────────────────────────
@@ -381,16 +413,14 @@ def test_a_breach_cannot_be_anchored_to_a_campaign_through_the_other_slot(conn, 
     assert "rule_id" in str(e.value)
 
 
-def test_a_departure_cannot_be_anchored_to_a_rule(conn):
+def test_a_departure_cannot_be_anchored_to_a_rule(conn, a_rulebook):
     """The other direction: a rule is not debatable and a departure invites a rationale, so
     the slots are not interchangeable in either direction."""
-    rules = core.ingest_campaign(conn, title="Brand guidelines", record_type="reference",
-                                 detail="Never use superlatives in paid social.")["campaign_id"]
     with pytest.raises(ValueError) as e:
         core.save_evaluation(conn, **_evaluation({
             "severity": "blocking", "kind": "precedent_departure",
             "finding": "Done differently",
-            "precedent": {"rule_id": rules, "quote": "Never use superlatives"}}))
+            "precedent": {"rule_id": "no-superlatives", "quote": "Never use superlatives"}}))
     assert "campaign_id" in str(e.value)
 
 

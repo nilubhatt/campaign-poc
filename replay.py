@@ -60,11 +60,13 @@ def run(conn, *, market: Optional[str] = None) -> dict:
     # market.
     judgments = _judgments(conn, market=market)
     return {
-        "rulebook_version": core.RULEBOOK_VERSION,
+        "rulebook_version": core.rulebook_version(),
         "rulebook_note": (
-            "The version is the same on every judgment until a rulebook ships (§12.1), so "
-            "this report is built from WHEN each measure and rule was confirmed, not from the "
-            "stamp."),
+            "A judgment's stamp says which rulebook was in force, and it is the same on "
+            "every judgment made between two edits of that file — so this report is built "
+            "from WHEN each measure and rule was confirmed, not from the stamp. That does "
+            "not change when the rulebook does: the stamp tells two rulebooks apart, and "
+            "this report is about what was known on a given day."),
         "basis": "computed",
         "backlog": backlog,
         "judgments": judgments[:_MAX_JUDGMENTS],

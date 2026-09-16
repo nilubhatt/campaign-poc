@@ -12,3 +12,8 @@ Pillow>=10.0.0           # image loading for perceptual hashing
 imagehash>=4.3.0         # perceptual hashing (creative-reuse detection) - cheap, no ML
 torch>=2.0.0             # CLIP visual embeddings (aesthetic/regional similarity) - heavy, deliberate (see docs/PRODUCTION-ROADMAP.md §6.6)
 open_clip_torch>=3.0.0   # CLIP model loading
+PyYAML>=6.0              # the rulebook (§12.1) — DECLARED, not inherited: it arrives
+                         # transitively via uvicorn[standard]/torch today, and a
+                         # dependency the product relies on and does not name is one
+                         # an unrelated upgrade can remove. The rulebook is loaded at
+                         # startup and refuses to run without it.

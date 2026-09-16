@@ -137,7 +137,7 @@ def run(conn, briefs: list, *, judge: Callable, runs: int = 3) -> dict:
         # cannot be attributed to anything.
         "provenance": {
             "server_version": core.version.VERSION,
-            "rulebook_version": core.RULEBOOK_VERSION,
+            "rulebook_version": core.rulebook_version(),
             "embedding_model": core.embedding_model_id(),
         },
     }

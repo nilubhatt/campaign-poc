@@ -526,6 +526,69 @@ def _unchecked(code: str, language: dict) -> dict:
         f"NOT a finding that the brief lacks it — read the brief for this fact."))
 
 
+def _guardrails(text: str) -> dict:
+    """The sixth computed fact §7.1 asks for: does this brief contain the words a rule forbids?
+
+    D92, and it waited for §12.1 because it had nothing to check against. The "rulebook" was
+    any `reference` record retrieved by similarity, so this check would have been the
+    guardrail-that-might-not-be-retrieved the review already condemned, with a regex on top.
+
+    **`nothing_to_check` is not a pass, here most of all.** The product ships no `watch_for`
+    words — which words breach a rule is the customer's judgment, and inventing them would be
+    this product asserting a guardrail nobody wrote — so out of the box this reports that it
+    checked nothing. Reporting `checked_clean` there would tell a reader their brief breaches
+    no guardrails when none were ever looked for, which is the false pass §11.7 spent a whole
+    item removing from the language checks.
+
+    What it establishes is narrow and worth stating exactly: the brief CONTAINS a word the
+    rule watches for, in its body, with the sentence it was read from. Whether that is
+    actually a breach is a judgment, and the judgment is the model's — but it is now arguing
+    with a quotation rather than asserting one.
+    """
+    import rulebook
+
+    try:
+        rules = [rule for rule in rulebook.rules() if rule.get("watch_for")]
+    except ValueError:
+        # A broken rulebook is `health_check`'s finding. Here it means the same as no rules
+        # declared: nothing was checked, said plainly.
+        rules = []
+
+    if not rules:
+        return _fact("guardrails", "nothing_to_check",
+                     "No rule in the rulebook declares words to watch for, so no guardrail "
+                     "was checked against this brief. This is not a clean result — nothing "
+                     "was looked for. Declare `watch_for` on a rule to make it checkable.",
+                     hits=[], rules_checked=0)
+
+    hits = []
+    for rule in rules:
+        for word in rule["watch_for"]:
+            match = re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text, re.IGNORECASE)
+            if not match:
+                continue
+            hits.append({
+                "rule_id": rule["id"],
+                "rule": rule["rule"],
+                "severity": rule["severity"],
+                "matched": word,
+                "evidence": _evidence(text, match.start(), len(match.group(0))),
+            })
+            break
+
+    if not hits:
+        return _fact("guardrails", "checked_clean",
+                     f"None of the words watched for by {len(rules)} rule(s) appears in this "
+                     f"brief's body. That is what was checked — the words, not the intent.",
+                     hits=[], rules_checked=len(rules))
+    return _fact("guardrails", "contradicted",
+                 f"{len(hits)} rule(s) watch for a word this brief uses. The server READ the "
+                 f"word; whether it is a real breach is your judgment, and the sentence it "
+                 f"came from is attached so you can make it.",
+                 evidence=[hit["evidence"] for hit in hits],
+                 hits=hits, rules_checked=len(rules))
+
+
 def compute(text: Optional[str]) -> dict:
     """Every mechanical check, against BODY text only.
 
@@ -545,6 +608,9 @@ def compute(text: Optional[str]) -> dict:
         _budget(text),
         _engagement_rate(text),
         _channels(text),
+        # D92, the sixth. It reads the rulebook rather than a list in this file, because the
+        # words are the customer's.
+        _guardrails(text),
     )}
     # D94, and the asymmetry is the whole design: **finding something is trustworthy in any
     # language; finding nothing is only trustworthy if we could read it.**

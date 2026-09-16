@@ -37,6 +37,7 @@ import images
 import learning
 import metrics
 import notices
+import rulebook
 import store
 import vectorstore
 import version
@@ -973,6 +974,26 @@ def _quote_is_in(segments: list, texts: list) -> bool:
     return False
 
 
+def _verify_rule_quote(rule: dict, segments: list, where: str) -> None:
+    """The §6.1 guarantee, applied to a rule instead of a record (§12.1).
+
+    The same reason as everywhere else: a breach finding quoting a rule that does not say that
+    is worse than an uncited one, because a citation moves a reader from "this is an
+    assertion" to "this is established". And a rule is SHORT, so a paraphrase is not a
+    convenience here — it is somebody's rule rewritten into what the model thought it said.
+    """
+    # `_quote_is_in`, the same matcher the record path uses, rather than a comparison written
+    # here. A second implementation of "is this quote really in that text" would differ from
+    # the first on exactly the cases §6.1 spent three rounds getting right — folding,
+    # elisions, and how far apart two segments may be.
+    if _quote_is_in(segments, [rule["rule"]]):
+        return
+    raise ValueError(
+        f"{where}precedent quotes rule {rule['id']!r}, but that rule does not contain the "
+        f"quoted words. The rule reads: {rule['rule']!r}. Quote it as written — a breach "
+        f"finding citing a rule that does not say that reads as established when it is not.")
+
+
 def _verify_quote(conn, cited: str, segments: list, layer: str, where: str, *,
                   is_rule: bool, kind=None) -> None:
     """Refuse a citation the cited record does not support (§6.1).
@@ -982,6 +1003,29 @@ def _verify_quote(conn, cited: str, segments: list, layer: str, where: str, *,
     unverified quote beside verified ones is permanent drift, and nothing downstream would
     be able to tell them apart once a summary quoted either.
     """
+    # §12.1: a `rule_id` means THE RULEBOOK, and now there is one. This resolved every
+    # `rule_id` through `store.text_on_file` — a lookup in the CAMPAIGNS table — so the
+    # product told the model "a finding that a rule is breached cites its id", handed it six
+    # rule ids, and then refused every one of them as "not a record in this library", while
+    # accepting any `reference` row as a rule. The single most important thing this item
+    # claims was the one thing the code forbade.
+    if is_rule:
+        rule = rulebook.by_id(cited)
+        if rule is not None:
+            _verify_rule_quote(rule, segments, where)
+            return
+        known = [r["id"] for r in rulebook.rules()]
+        raise ValueError(
+            f"{where}precedent cites {cited!r} as a rule_id, and rulebook "
+            f"{rulebook.version()} contains no such rule. "
+            + (f"It contains: {', '.join(repr(r) for r in known[:8])}"
+               + (f" and {len(known) - 8} more" if len(known) > 8 else "") + ". "
+               if known else
+               "No rules are written in it at all, so this library cannot support a breach "
+               "finding — nobody has written the rule down. ")
+            + "A guardrail breach cites a rule somebody wrote, not a campaign that happened "
+              "to do it that way.")
+
     on_file = store.text_on_file(conn, cited)
     # What to say INSTEAD of quoting, which depends on the kind: a finding that is a claim
     # about another record cannot simply drop its citation, because `_CITING_KINDS` refuses
@@ -995,23 +1039,6 @@ def _verify_quote(conn, cited: str, segments: list, layer: str, where: str, *,
         raise ValueError(
             f"{where}precedent cites {cited!r}, which is not a record in this library. Cite "
             f"a campaign_id from the evidence you were given, {instead}.")
-    if is_rule:
-        row = conn.execute("SELECT record_type FROM campaigns WHERE id = ?",
-                           (cited,)).fetchone()
-        record_type = row["record_type"] if row else None
-        # `rule_id` means the rulebook. Left interchangeable with `campaign_id`, "a rule was
-        # broken" could be anchored to somebody's Q3 deck, and the one class of finding the
-        # product says is not debatable would rest on a campaign that merely did it that way.
-        # Deliberately NOT phrased as "so call it a precedent_departure instead": §2.4's
-        # lesson is that any easy exit offered inside a validation message gets taken, and
-        # that one is a downgrade from "not debatable" to "arguable".
-        if record_type != "reference":
-            raise ValueError(
-                f"{where}precedent cites {cited!r} as a rule_id, but that record is stored "
-                f"as {record_type!r}, not as reference material. A guardrail breach cites "
-                f"the guidelines. If no rulebook is on file, then this library cannot "
-                f"support a breach finding at all — say what you can support instead of "
-                f"anchoring a rule to a campaign.")
     if not on_file["brief"]:
         # Before the match, not after, so the message is the right one: telling a model to
         # reword a quote against a record that has nothing to quote is a loop with no exit.
@@ -1133,6 +1160,17 @@ def _clean_precedent(conn, value, where: str, *, kind=None) -> Optional[dict]:
         cleaned["campaign_id"] = campaign_id
     if rule_id:
         cleaned["rule_id"] = rule_id
+        # WHICH rulebook the rule came from, on the finding itself. `source` was carried on
+        # every rule from the first version of the loader and read by nothing — a field whose
+        # stated purpose ("so a judgment can say whether a breach was of the product's rule or
+        # the customer's") no caller could achieve. It matters most once §12.2's overlays
+        # exist: two judgments citing `no-ai-imagery` may be citing two different rules, and
+        # the provenance stamp is one scalar.
+        rule = rulebook.by_id(rule_id)
+        if rule:
+            cleaned["rule_source"] = rule["source"]
+            cleaned["rule_severity"] = rule["severity"]
+            cleaned["checked"] = ["rulebook", "wording"]
     if layer == "commentary":
         # Who said it and where, so the finding can be read back as "their reviewer said X"
         # rather than "the deck says X".
@@ -1466,12 +1504,12 @@ def _contract_for_this_brief(computed: dict) -> str:
     model is holding the evidence package and about to judge."
 
     What goes FIRST is what is specific to this brief, because a model reads a long field from
-    the top and the procedure is the half it has already been given. The rulebook version is
-    here even though there is no rulebook: a judgment made with none is a different judgment
-    from one made under a rulebook that happened to say nothing, and §7.6 stamps this onto the
-    record so the two can be told apart later.
+    the top and the procedure is the half it has already been given. §12.1 put the RULEBOOK
+    first of all, for the same reason at one more remove: the rules are the frame the rest is
+    judged inside, and a rule read after the evidence is a rule applied to a verdict that has
+    already formed.
     """
-    lines = [f"RULEBOOK IN FORCE: {RULEBOOK_VERSION}."]
+    lines = [rulebook.as_contract()]
     said = []
     for code, fact in computed.items():
         if fact["status"] in ("absent", "contradicted", "partial", "present"):
@@ -1530,7 +1568,7 @@ def _stamp(conn, *, receipt: Optional[dict], model_id: Optional[str]) -> dict:
                      for cid in receipt["campaign_ids"]]
     return {
         "server_version": version.VERSION,
-        "rulebook_version": RULEBOOK_VERSION,
+        "rulebook_version": rulebook_version(),
         "embedding_model": (receipt or {}).get("embedding_model") or embedding_model_id(),
         # None rather than [] without a receipt: an empty list reads as "the search returned
         # nothing", and "nobody recorded a search" is a different statement.
@@ -2056,9 +2094,16 @@ _SIMILARITY_SCAN = 200
 # confident and they are not reading the same thing.
 #
 # What it does NOT contain is as deliberate as what it does. The review asks for "the
-# scorecard's six criteria"; those belong to the customer's rulebook, which §12.1 has not
-# built, and hard-coding one customer's rubric into a product that ships generic is the thing
-# the product owner ruled out. It says so rather than omitting it silently.
+# scorecard's six criteria"; those belong to the customer's rulebook, and hard-coding one
+# customer's rubric into a product that ships generic is the thing the product owner ruled
+# out. §12.1 built the file they go in and deliberately shipped it empty — the scorecard is
+# §12.2's, and this says so rather than omitting it silently.
+#
+# It also does not restate the rules the RULEBOOK carries, and that is the same decision from
+# the other side. The first rulebook shipped six rules about judgment discipline, four of
+# which are written here word for word — two statements of one rule in one payload, which is
+# what §7.4 exists to prevent. The procedure keeps the product's own discipline; the rulebook
+# keeps the customer's rules about their briefs; neither repeats the other.
 EVALUATION_PROCEDURE = """\
 HOW TO JUDGE A BRIEF. Every user of this library gets this same procedure; following it is
 what makes two people's judgments of one brief comparable.
@@ -2102,17 +2147,26 @@ finding per problem with `severity`, `kind`, and a `fix` if above a note. A `rev
 `approve_if`: the change that would make it an approve. An `approve` and a `reject` may not.
 Say the verdict, the summary and what has to change; the reasoning is in `get_evaluation`.
 
-NOT YET IN THIS PROCEDURE: the customer's scorecard criteria and guardrail list. They belong
-in a versioned rulebook shipping with the product (§12.1). Until then, guidelines here are
-ordinary records retrieved by similarity — cite them when they are retrieved, and never claim
-a rule was checked when it simply was not returned."""
+THE RULEBOOK. Every rule written in it is at the top of the note, in full, whatever the brief
+is about — never retrieved by similarity, so a rule applies to a brief that resembles nothing.
+A `guardrail_breach` cites one by id and quotes it as written. It ships EMPTY: guidelines
+uploaded as records are not rules, and where none are written the honest answer is that no
+rule was checked. (The scorecard criteria are still outstanding — §12.2.)"""
 
 
-# The rulebook this judgment was made under. §12.1 has not built one, and saying which
-# version of nothing is in force beats omitting the line: a judgment made with no
-# rulebook is a different judgment from one made under a rulebook that said nothing,
-# and §7.6 stamps this onto the record so the two can be told apart later.
-RULEBOOK_VERSION = "none (no rulebook ships yet — §12.1)"
+# The rulebook this judgment was made under (§12.1). A function reading the file, not a
+# constant beside it: a constant and a file that can disagree is the hand-maintained-copy
+# failure this project has hit four times, and here it would make §7.6's stamp worthless — a
+# judgment labelled with a version it was not made under is worse than an unlabelled one.
+#
+# Called rather than resolved at import, because `rulebook.load()` RAISES on a broken file and
+# that has to reach whoever is starting the server. Swallowed at import time it would leave a
+# half-started process running with no rules in it, which is the silent failure the whole item
+# exists to remove.
+def rulebook_version() -> str:
+    import rulebook
+
+    return rulebook.version()
 
 
 # §7.2. The caller does not choose how much evidence a judgment rests on: "a caller who asks
@@ -3420,6 +3474,41 @@ def health_check(conn, *, probe: bool = True) -> dict:
             "remedy": "Reinstall to restore the shipped weights.",
         }
 
+    # D27: the rulebook is a shipped payload like the CLIP weights, and it fails the same
+    # way — the server answers, the database is fine, and every judgment it makes is missing
+    # its rules. Invisible here, an install broken in the one way §12.1 cares about passed the
+    # installers' own post-install gate.
+    #
+    # Inside a `try` for the reason the whole function is: a diagnostic that crashes on the
+    # thing it is diagnosing leaves the administrator where they started.
+    try:
+        loaded = rulebook.load()
+        components["rulebook"] = {
+            "ok": True,
+            "detail": f"{loaded['version']}: {len(loaded['rules'])} rule(s) from "
+                      f"{rulebook._bundled()}",
+        }
+        if not rulebook.is_the_editable_copy():
+            # Working, so not a failure — but the file in force is the one collected inside
+            # the bundle rather than the one beside the executable. A silent fallback is its
+            # own defect: an administrator editing the file they can SEE would change nothing
+            # and be told nothing, which looks like it worked and is worse than either half.
+            components["rulebook"]["degraded"] = (
+                f"This is the copy packaged inside the application, not the one beside the "
+                f"executable — so there is no {rulebook.BUNDLED_NAME} anybody can edit. "
+                f"Copy it to {config.app_dir()} to change the rules, or re-run the "
+                f"installer.")
+    except Exception as exc:
+        components["rulebook"] = {
+            "ok": False, "code": "rulebook_unreadable",
+            "detail": str(exc),
+            "affects": "Every judgment. The rules that are supposed to apply to each brief "
+                       "are not being applied, and nothing in a judgment says so.",
+            "remedy": f"Fix or restore {rulebook.BUNDLED_NAME} in the install directory and "
+                      f"restart the server. Re-running the installer restores the shipped "
+                      f"copy.",
+        }
+
     try:
         outstanding = store.count_unembedded(conn)
         assets = conn.execute("SELECT COUNT(*) AS n FROM assets").fetchone()["n"]
@@ -3599,6 +3688,68 @@ def _fields_never_recorded(conn, campaigns: list) -> list:
     return found
 
 
+def _expected_inputs_never_supplied(conn) -> list:
+    """Inputs the rulebook declares a brief must carry, that nothing on file carries (D50).
+
+    Reported per LIBRARY rather than per record, like the other field gaps beside it: "no
+    brief has ever carried a KPI workbook" is the finding, and firing it once per campaign
+    would bury every other gap under one fact repeated.
+
+    `looks_like` is what makes it closable. Without the words that would show the input HAD
+    arrived, the gap can only be reported forever — a gap nobody can close is one everybody
+    learns to ignore, which is §8.2's own lesson about re-asking a declined question.
+    """
+    import rulebook
+
+    try:
+        declared = rulebook.expects()
+    except ValueError:
+        # A broken rulebook is `health_check`'s finding, loudly. It is not this function's,
+        # and raising here would take out `gaps()` — a report about the library — over a
+        # configuration file.
+        return []
+    if not declared:
+        return []
+
+    superseded = store.get_superseded_campaign_ids(conn)
+    records = [c for c in store.list_campaigns(conn)
+               if c.get("record_type") != "reference" and c["id"] not in superseded]
+    if not records:
+        return []
+
+    found = []
+    for expected in declared:
+        if not expected["looks_like"]:
+            continue
+        carrying = 0
+        for record in records:
+            # The BODY only, never the commentary — §7.1's rule, and it is the same reason
+            # here as there: a reviewer's note asking "where is the KPI workbook?" is not the
+            # workbook, and counting it would close the gap with the complaint about it.
+            on_file = store.text_on_file(conn, record["id"]) or {}
+            text = " ".join(str(part) for part in (on_file.get("body") or [])).lower()
+            if any(word in text for word in expected["looks_like"]):
+                carrying += 1
+        if carrying:
+            continue
+        found.append({
+            "code": "expected_input_never_supplied",
+            "expectation": expected["id"],
+            "field": expected["input"],
+            "campaigns": len(records),
+            "what": f"Your rulebook says a brief should carry {expected['input']}, and no "
+                    f"record on file mentions one ({len(records)} checked).",
+            "what_it_means": f"{expected['input']} — {expected['why']} This is YOUR rule, "
+                             f"from rulebook {rulebook.version()}, reported back rather than "
+                             f"invented here.",
+            "why_it_matters": expected["why"],
+            "basis": "computed",
+            "evidence": f"searched every brief's body text for "
+                        f"{', '.join(repr(w) for w in expected['looks_like'])}",
+        })
+    return found
+
+
 def gaps(conn) -> dict:
     """What this library is missing, ranked, with what would close each one.
 
@@ -3623,6 +3774,12 @@ def gaps(conn) -> dict:
     # but a list where some rows have the key the list is ordered on and some do not is one
     # nobody can check the order of — and "appended last" is a position, so it should say so
     # in the same field as every other position rather than only by where it sits.
+    # D50: an input the RULEBOOK declares a brief must carry, which no brief on file carries.
+    # The review's third gap case, and it needed the rulebook to exist: an expectation nobody
+    # wrote down cannot be reported as missing without the product inventing a requirement on
+    # the customer's behalf. The product declares none, so this is empty until a customer
+    # declares one in their overlay — which is the point. It is their rule, reported back.
+    field_gaps += _expected_inputs_never_supplied(conn)
     last = max((g["order"] for g in ranked["gaps"]), default=0) + 1
     for gap in field_gaps:
         gap.update({"order": last, "rank": last, "affects": gap["campaigns"],
@@ -5411,16 +5568,20 @@ def readiness(conn) -> dict:
     """What this library can and cannot do yet, and the shortest path to more.
 
     The path is the review's own prescription, in its order, because it is a path and not a
-    menu: one brief you liked, one you did not, the rulebook. The contrast is the point —
-    two briefs somebody liked teach nothing about the axis they are asking the product to
-    judge on.
+    menu: one brief you liked, one you did not, your guidelines as reference material. The
+    contrast is the point — two briefs somebody liked teach nothing about the axis they are
+    asking the product to judge on.
+
+    D74: the third step used to say "as the rulebook", and ticked itself when ANY `reference`
+    record existed — so a competitor's deck filed as reference material told the customer they
+    had put their rules in force. The rulebook is a file now, and the two are separate facts.
     """
     facts_about_the_axis = _axis_facts(conn)
     records = facts_about_the_axis["records"]
     campaigns = facts_about_the_axis["campaigns"]
     measured = store.campaigns_with_actual_metrics(conn)
 
-    has_rulebook = facts_about_the_axis["has_rulebook"]
+    has_reference_material = facts_about_the_axis["has_reference_material"]
     liked_records = facts_about_the_axis["liked_records"]
     disliked_records = facts_about_the_axis["disliked_records"]
     liked = facts_about_the_axis["liked"]
@@ -5484,31 +5645,63 @@ def readiness(conn) -> dict:
                       else "a campaign that has concluded, and its results"),
         })
 
-    if has_rulebook:
-        # NOT "check a brief against a rule". `has_rulebook` is "some reference record
-        # exists", and nothing pins, fetches or checks against it — `prepare_evaluation` is
-        # similarity retrieval, so the rulebook reaches the evidence only if it happens to
-        # rank. Promising the "this breaks your own rule" finding would be exactly the
-        # confident, unfounded claim this item exists to prevent (§7.5/§12.1 make it true).
+    if has_reference_material:
+        # Uploaded guidelines are STILL retrieved by similarity — §12.1 pinned the rulebook
+        # FILE, not every reference record in the library. Saying otherwise here would move
+        # the old overclaim rather than remove it.
         can.append({"code": "rulebook_on_file",
-                    "what": "Cite your guidelines when they happen to be among the most "
-                            "similar records retrieved for a brief."})
-    cannot.append({
-        "code": "check_against_rules",
-        "what": "Check a brief against a rule reliably. Guidelines on file are retrieved by "
-                "similarity like anything else, so a guardrail that is not retrieved is not "
-                "a guardrail — it can say \u201cthis differs from what you did in Peru\u201d, "
-                "which invites an argument, but not \u201cthis breaks your own rule\u201d, "
-                "which does not.",
-        "needs": ("the rulebook to be pinned rather than retrieved, which is planned work"
-                  if has_rulebook else "your brand guidelines, uploaded as reference "
-                                       "material"),
-    })
+                    "what": "Cite your uploaded guidelines when they happen to be among the "
+                            "most similar records retrieved for a brief. (The rules in the "
+                            "rulebook file are a separate thing and always apply — see "
+                            "`check_against_rules`.)"})
+    # §12.1. This row lived on `cannot` and named this item by number as the work that would
+    # fix it. The rules in the rulebook are now put in front of every judgment in full,
+    # whatever the brief is about, so "this breaks your own rule" is a claim this product can
+    # make — about the rules it HOLDS.
+    #
+    # The boundary is the whole point of the wording. A guideline the customer never wrote
+    # down is not in the rulebook, and a product implying otherwise would have replaced one
+    # overclaim with another, in the tool whose entire job is saying what it cannot do.
+    applied = rulebook.applied()
+    if applied["rules_applied"]:
+        can.append({
+            "code": "check_against_rules",
+            "what": f"Check a brief against the {applied['rules_applied']} rule(s) in the "
+                    f"rulebook ({applied['version']}) and say \u201cthis breaks your own "
+                    f"rule\u201d, citing the rule by its id. They are put in front of every "
+                    f"judgment in full rather than retrieved by similarity, so a rule applies "
+                    f"whether or not the brief resembles it.",
+            "bounded_by": "Only rules written down in the rulebook. A guideline nobody has "
+                          "written down is not one this can check, and an uploaded guidelines "
+                          "DOCUMENT is retrieved by similarity like any other record.",
+        })
+    else:
+        # THE MECHANISM SHIPPING IS NOT THE CAPABILITY EXISTING. This row went onto `can` the
+        # moment the rulebook file existed, so a fresh install advertised "I can say this
+        # breaks your own rule" while holding no rules — the confident first-run claim this
+        # whole tool exists to prevent, arriving through the item meant to remove it.
+        cannot.append({
+            "code": "check_against_rules",
+            "what": f"Check a brief against a rule. The rulebook ({applied['version']}) is in "
+                    f"force and applies to every judgment, and no rules are written in it. "
+                    f"Guidelines uploaded as records are retrieved by similarity like "
+                    f"anything else, so a guardrail that is not retrieved is not a guardrail "
+                    f"\u2014 it can say \u201cthis differs from what you did in Peru\u201d, "
+                    f"which invites an argument, but not \u201cthis breaks your own "
+                    f"rule\u201d, which does not.",
+            "needs": f"your rules written into the rulebook file ({rulebook.BUNDLED_NAME}), "
+                     f"each with an id, a severity and a reason. Every one of them then "
+                     f"reaches every judgment whatever the brief is about.",
+        })
 
-    path = _shortest_path(liked, disliked, has_rulebook)
+    path = _shortest_path(liked, disliked, has_reference_material)
     if not campaigns:
         stage = "empty"
-        can = []
+        # Everything else on `can` is a claim about what the LIBRARY holds, and an empty
+        # library holds nothing. The rulebook is the exception and the reason §12.1 put it in
+        # a file: it ships with the product, so its rules apply to the very first brief
+        # somebody sends — which is the one they are most likely to be judging alone.
+        can = [row for row in can if row["code"] == "check_against_rules"]
     elif len(campaigns) < 2:
         stage = "first_records"
     elif not with_outcomes or path:
@@ -5540,7 +5733,13 @@ def readiness(conn) -> dict:
         "stage": stage,
         "campaigns": len(campaigns),
         "with_outcomes": len(with_outcomes),
-        "has_rulebook": has_rulebook,
+        # The FILE, which ships with the product — so this is true of a fresh install, and
+        # the question "are the customer's own rules in force" is `rulebook`, below.
+        "has_rulebook": True,
+        "rulebook": rulebook.applied(),
+        # D74: reference material on file, which is a different fact and was reported as this
+        # one. A competitor teardown is reference material and is not anybody's guidelines.
+        "has_reference_material": has_reference_material,
         "can": can,
         "cannot": cannot,
         "shortest_path": path,
@@ -5586,7 +5785,12 @@ def _axis_facts(conn) -> dict:
     return {
         "records": records,
         "campaigns": campaigns,
-        "has_rulebook": any(c.get("record_type") == "reference" for c in records),
+        # D74: this counts REFERENCE RECORDS, and it used to be called `has_rulebook` — so a
+        # competitor's deck filed as reference material made the product report that the
+        # customer's guidelines were on file, and `readiness` then ticked the rulebook step of
+        # its own shortest path. §12.1 makes the two separable: the rulebook is a declared
+        # artefact (a file), and no record is ever mistaken for it.
+        "has_reference_material": any(c.get("record_type") == "reference" for c in records),
         # Per RECORD, not pooled: a single campaign tagged both `liked` and `not_liked` used
         # to satisfy the axis on its own, and "the library holds both" was then technically
         # true and substantively false. The contrast this product reasons from is between
@@ -5605,10 +5809,10 @@ def _axis_facts(conn) -> dict:
 def first_steps(conn) -> list[dict]:
     """The ordered path, computed once and read by everything that shows it (§10.6/D76)."""
     axis = _axis_facts(conn)
-    return _shortest_path(axis["liked"], axis["disliked"], axis["has_rulebook"])
+    return _shortest_path(axis["liked"], axis["disliked"], axis["has_reference_material"])
 
 
-def _shortest_path(liked: bool, disliked: bool, has_rulebook: bool) -> list[dict]:
+def _shortest_path(liked: bool, disliked: bool, has_reference_material: bool) -> list[dict]:
     """The review's three, in its order, minus what is already done.
 
     Every one of these is an offer whose arguments only the user has — there is nothing in an
@@ -5636,12 +5840,18 @@ def _shortest_path(liked: bool, disliked: bool, has_rulebook: bool) -> list[dict
             needs=["what it was called", "its deck or a description of it",
                    "what you did not like about it"],
             tags=[{"value": "not_liked"}]))
-    if not has_rulebook:
+    if not has_reference_material:
         steps.append(actions.action(
-            "Add your brand guidelines as the rulebook",
+            "Add your brand guidelines as reference material",
             "upload_campaign",
-            why="A rule that is not on file can only be reported as a departure from "
-                "precedent, which invites an argument.",
+            # D74: it no longer says "as the rulebook". The rulebook is a file that ships with
+            # the product and already applies; a guidelines DOCUMENT is an ordinary record,
+            # retrieved by similarity, and worth uploading for what it actually buys — a
+            # judgment can quote it when it ranks. Calling it the rulebook told people they
+            # had done the step that puts rules in force, which they had not.
+            why="A judgment can then quote your guidelines when they are among the records "
+                "retrieved for a brief. (Rules that must apply to EVERY brief go in the "
+                "rulebook file, which already ships and already applies.)",
             consent="ask",
             needs=["the guidelines document, or the rules in your own words"],
             record_type="reference"))
@@ -6329,7 +6539,7 @@ def _say_the_disagreement(evidence: list) -> str:
             f"are on file. Cite the split, not a side: a campaign two people saw differently "
             f"is stronger evidence about this client's taste than one everybody liked, and "
             f"quoting it as unanimous throws that away. This library will not tell you who "
-            f"was right — authority order is configured in the rulebook and nothing is "
+            f"was right — authority order would be configured in the rulebook and nothing is "
             f"configured yet, so preferring the later view or the grander job title would be "
             f"authority nobody granted it. ")
 
@@ -6900,6 +7110,11 @@ def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: O
                 "subject is a record and the server will derive the query and the filters "
                 "from it."),
         },
+        # §12.1: what the rulebook actually did to THIS call, as a fact the caller can read
+        # rather than a claim the model makes about itself. `basis: computed` because the
+        # server put the rules in front of the judgment; "the model says it considered the
+        # rulebook" would be worth nothing.
+        "rulebook": rulebook.applied(),
         "note": _contract_for_this_brief(computed) + (
             # The vocabulary here has to be the vocabulary save_evaluation accepts. This
             # said "proceed/revise/reject" while the enum takes "approve" — so the prompt

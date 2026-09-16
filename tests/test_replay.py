@@ -551,7 +551,7 @@ def test_scoping_the_report_scopes_both_halves(conn):
 def test_the_report_says_which_rulebook_it_was_run_under(conn):
     """The review's own premise: "every verdict is stamped with its rulebook version". A report
     about what changed has to say what it is comparing against."""
-    assert replay.run(conn)["rulebook_version"] == core.RULEBOOK_VERSION
+    assert replay.run(conn)["rulebook_version"] == core.rulebook_version()
 
 
 # ── D104: the blast radius, before somebody confirms ────────────────────────

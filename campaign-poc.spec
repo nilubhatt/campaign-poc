@@ -43,6 +43,12 @@ datas, binaries, hiddenimports = [], [], []
 if os.path.exists("build_info.txt"):
     datas += [("build_info.txt", ".")]
 
+# §12.1: the rulebook, beside the executable rather than inside _internal/. `config.app_dir()`
+# resolves to the install directory for exactly this reason — an administrator has to be able
+# to SEE this file, and §12.2's overlay goes next to it. A rulebook buried in the bundle is
+# one nobody can read, which is most of what the item was about.
+datas += [("rulebook.yaml", ".")]
+
 # Bundle sqlite-vec fully (its compiled extension is a binary + package data).
 for pkg in ("sqlite_vec",):
     d, b, h = collect_all(pkg)
@@ -71,7 +77,12 @@ for pkg in ("uvicorn", "mcp", "starlette", "anyio", "fastapi", "pptx", "pypdf"):
 
 # Our own modules referenced only via dynamic import (main.py imports them lazily).
 hiddenimports += ["http_app", "mcp_server", "store", "core", "vectorstore",
-                  "embedding", "extract", "auth", "config", "clip_embed", "images"]
+                  "embedding", "extract", "auth", "config", "clip_embed", "images",
+                  # §12.1. `yaml` is imported inside `rulebook._read`, which PyInstaller's
+                  # static analysis reaches — but the product now REQUIRES it, and a startup
+                  # that fails on a missing parser is a failed install rather than a
+                  # degraded one, so it is named here as well.
+                  "rulebook", "yaml"]
 
 a = Analysis(
     ["main.py"],

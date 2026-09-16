@@ -117,7 +117,7 @@ def test_the_report_stamps_what_produced_it(conn):
 
     assert report["provenance"]["server_version"] == core.version.VERSION
     assert report["provenance"]["embedding_model"] == core.embedding_model_id()
-    assert report["provenance"]["rulebook_version"] == core.RULEBOOK_VERSION
+    assert report["provenance"]["rulebook_version"] == core.rulebook_version()
 
 
 def test_each_brief_reports_its_own_figures(conn):

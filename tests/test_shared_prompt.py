@@ -110,12 +110,16 @@ def test_it_carries_the_layer_rule(conn=None):
 
 
 def test_it_says_what_the_product_cannot_yet_do():
-    """The scorecard's six criteria belong to the customer's rulebook (§12.1). Hard-coding one
+    """The scorecard's six criteria belong to the customer's rulebook. Hard-coding one
     customer's rubric into a product that ships generic is what the product-owner decision
     forbids — and a procedure that silently omits a step the review asked for reads as though
-    the step is not needed."""
+    the step is not needed.
+
+    §12.1 built the file and shipped it empty, so the outstanding half moved to §12.2; the
+    section number changed and the obligation to SAY SO did not."""
     assert "rulebook" in PROCEDURE.lower()
-    assert "12.1" in PROCEDURE or "not yet" in PROCEDURE.lower()
+    assert "scorecard" in PROCEDURE.lower()
+    assert "12.2" in PROCEDURE or "outstanding" in PROCEDURE.lower()
 
 
 # ── it has to survive the transport ─────────────────────────────────────────

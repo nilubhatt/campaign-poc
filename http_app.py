@@ -13,6 +13,7 @@ into auth.authenticate() without moving these call sites.
 """
 from __future__ import annotations
 
+import sys
 import uuid
 from pathlib import Path
 
@@ -99,6 +100,13 @@ def main():
     # tool-call timeout; review flagged this).
     clip_embed.warm_up()
     embedding.warm_up()
+    # §12.1: the rulebook, before the port opens. The startup load landed in `main.py stdio`
+    # alone, so an HTTP deployment discovered a broken rulebook as a tool error mid-request —
+    # and `readiness`, the tool whose job is saying what this product cannot do, was the first
+    # to crash. A server that cannot state its own limits is the worst one to leave running.
+    import rulebook
+
+    print(f"Rulebook: {rulebook.version()}", file=sys.stderr)
     uvicorn.run(app, host=config.HTTP_HOST, port=config.HTTP_PORT)
 
 

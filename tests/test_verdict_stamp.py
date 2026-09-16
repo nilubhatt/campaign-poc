@@ -46,7 +46,7 @@ def test_every_verdict_records_what_produced_it(conn):
     stamp = store.get_evaluation(conn, saved["evaluation_id"])["provenance"]
 
     assert stamp["server_version"] == core.version.VERSION
-    assert stamp["rulebook_version"] == core.RULEBOOK_VERSION
+    assert stamp["rulebook_version"] == core.rulebook_version()
     assert stamp["embedding_model"] == core.embedding_model_id()
     assert stamp["basis"] == "computed"
 

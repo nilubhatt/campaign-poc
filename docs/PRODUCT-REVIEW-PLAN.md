@@ -2867,9 +2867,56 @@ with nothing to notice because each half works perfectly alone:
 
 ## Phase 12 — Rulebook as versioned configuration
 
-- [ ] **12.1 Skeleton `rulebook.yaml` + loader** — bundled, versioned, loaded at startup,
+- [x] **12.1 Skeleton `rulebook.yaml` + loader** — bundled, versioned, loaded at startup,
       applied deterministically **outside** the similarity path (today the rubric is a
       `reference` row retrieved by similarity, truncatable and deletable).
+      **The parenthesis is the whole item.** Guidelines lived in the library as an ordinary
+      record, so they reached a judgment only if they happened to rank in the top five for
+      that brief — and the failure was silent AND the wrong way round: the briefs least like
+      the guidelines document are the ones least likely to retrieve it, and they are exactly
+      the briefs most likely to breach it. `readiness` said so on its `cannot` list, naming
+      this item by number as the work that would fix it.
+      Every rule is now put in front of every judgment in full, whatever the brief is about.
+      Not ranked, not truncated, and not deletable by anyone editing the library: a rule in a
+      row is editable by whoever can call `update_campaign`, and a rule in a file is something
+      an administrator can see and a customer can put in version control — which is also what
+      §12.2's overlay needs.
+      **`RULEBOOK_VERSION` is gone**, replaced by `core.rulebook_version()` reading the file.
+      A constant beside a file that can disagree is the hand-maintained-copy failure this
+      project has hit four times, and here it would have made §7.6's stamp worse than useless:
+      a judgment labelled with a version it was not made under.
+      **What it does NOT claim.** `check_against_rules` moved onto `can` and carries a
+      `bounded_by` saying what it is bounded by: only rules actually written in the rulebook.
+      A guideline nobody wrote down is not checkable by anything, and an uploaded guidelines
+      DOCUMENT is still retrieved by similarity like any other record — `rulebook_on_file` is
+      still a separate, weaker row, and still says so. Replacing one overclaim with another in
+      the one tool whose job is saying what this product cannot do would have been worse than
+      leaving the limit in place.
+      **It ships EMPTY, and that is the considered answer.** The first draft carried six
+      rules about this product's own judgment discipline — and four of them already exist word
+      for word in `EVALUATION_PROCEDURE`, which reaches the model three ways, while two more
+      are enforced by validators that refuse the write. The file whose entire purpose is being
+      the single versioned home of a rule would have shipped as a second copy of six. The
+      product owns the discipline in the procedure; the customer owns the rules about their
+      briefs, which is also why §12.3's content is an example file rather than the default.
+      *Closes D27, D50, D74, D92.* `health_check` gains a `rulebook` component, because the
+      rulebook is a shipped payload like the CLIP weights and fails the same way — the server
+      answers, the database is fine, and every judgment is missing its rules. `expects`
+      declares what a brief must CARRY, so `gaps()` can report a named input nothing supplies.
+      `has_rulebook` no longer means "any reference record exists", which had been telling
+      customers who filed a competitor teardown that their own rules were in force. And
+      `watch_for` gives §7.1 its sixth computed fact: the server reads the brief for the words
+      a rule forbids and attaches the sentence — reporting `nothing_to_check` where no words
+      are declared, never `checked_clean`, because a brief said to breach no guardrails when
+      none were looked for is the false pass §11.7 spent a whole item removing.
+      **What review caught before it shipped**, and each was the item failing in its own
+      terms: a finding could not cite a rulebook rule at all (`rule_id` resolved through the
+      CAMPAIGNS table and demanded a `reference` record — the arrangement §12.1 exists to
+      replace), so the product handed the model rule ids and refused every one; the startup
+      load was on one entry point of three; `readiness` advertised rule-checking on an install
+      with no rules written; and every frozen install would have failed to start, because
+      PyInstaller puts `datas` under `_internal/` while `config.app_dir()` looks beside the
+      executable.
 - [ ] **12.2 Customer overlay file** layering on the default, with the version stamped onto
       every saved judgment (pairs with 7.6).
 - [ ] **12.3 Fabletics example config** — the full transcribed content (guardrails, tag
@@ -2881,6 +2928,47 @@ with nothing to notice because each half works perfectly alone:
       tracked client comments 2.5 now ingests ARE the `approval_notes` gap — in most agency
       flows a returned deck's comments are exactly that — or whether a separate structured
       field is still owed.*
+
+
+## Phase 13 — The engineering work filed into a bucket
+
+Thirteen tracker rows say the same thing in their own words: *"Re-pointed from 10.1, which was
+being used as a bucket for work filed while it was the next unstarted item."* They were then
+re-pointed to 12.1 for the same reason, which would have made the rulebook item the second
+bucket. None of them is about a rulebook.
+
+They are named here as their own phase because that is what they are — real work, sequenced,
+with an item to close them against — rather than because a phase number makes them optional.
+Every one is either a cost that is fine at the sizes anyone has today and will not stay fine,
+or a second copy of something that already exists once.
+
+- [ ] **13.1 One definition of "measured"** — `readiness`, `gaps`, `coverage` and
+      `disconfirming` each decide separately what a measured library is, and two of them now
+      disagree OUT LOUD: a library can be told all its campaigns have measured results and, in
+      the next response, that nothing in it has a measured verdict. *Closes D75, D88.*
+- [ ] **13.2 Computed facts cached rather than recomputed** — `gaps()` recomputes every
+      campaign's facts on every call (500 decks ≈ 40 s, dominated by the channel regexes) and
+      does it before the empty-library early return. Facts are deterministic on body text, so
+      they belong beside the record, written at ingest and on edit. *Closes D95.*
+- [ ] **13.3 The embedding and scan costs** — the same string embedded twice per save and
+      three times per prepare; `store.citations` scanned once per coverage cell; quote
+      verification re-reading every chunk per finding; a content edit re-embedding a whole
+      deck for a title change; `retire_stale` scanning the registry on every metric write.
+      *Closes D79, D90, D91, D97, D107.*
+- [ ] **13.4 The re-index's two loose ends** — `embedding.embed` called with no timeout on
+      the re-index path alone, so a hung embedder hangs the handler per chunk; and chunk
+      ordering after a re-index, which silently broke "chunk 0 is the summary". *Closes D99,
+      D100.*
+- [ ] **13.5 The remaining two-copy helpers** — `_newly_eligible`/`graduate`, the offered-once
+      flags, `touch_metric`/`touch_correction` (byte-identical market-fold loops) and
+      `campaigns_that_skipped`/`campaigns_that_skipped_correction`. "One mechanism" is true of
+      the decisions and not of the code under them. *Closes D114.*
+- [ ] **13.6 Two gaps that cannot see the record they are about** —
+      `execution_never_checked` fires only where briefed creative already exists, so a
+      concluded campaign uploaded as text with no assets is invisible to it; and commitment
+      vectors are cached without `record_vector_model`, so a CLIP weights change compares
+      across models and `count_unreadable_vectors` does not cover the space. *Closes D122,
+      D126.*
 
 ---
 

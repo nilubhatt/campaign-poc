@@ -1,0 +1,80 @@
+# The rulebook (§12.1) — the rules every judgment is made under, versioned.
+#
+# WHAT THIS FILE IS FOR
+#
+# Before it, brand guidelines lived in the library as an ordinary `reference` record, which
+# meant they reached a judgment only if they happened to rank in the top five most similar
+# records for that brief. `readiness` said so in writing: "a guardrail that is not retrieved
+# is not a guardrail — it can say 'this differs from what you did in Peru', which invites an
+# argument, but not 'this breaks your own rule', which does not."
+#
+# The failure was silent and the wrong way round. The briefs most likely to breach a
+# guideline are the ones least like the guideline document, so the case the rules existed for
+# was the case they were least likely to be retrieved for. Everything written in this file is
+# put in front of the model every single time, whatever the brief is about.
+#
+# WHY IT SHIPS EMPTY
+#
+# It ships with no rules, and that is the considered answer rather than an unfinished one.
+#
+# The first version shipped six, about this product's own judgment discipline — cite what you
+# quote, say what you could not check, keep both sides of a disagreement. Review pointed out
+# that four of them already exist word for word in `EVALUATION_PROCEDURE`, which is in the
+# server instructions, in the `prepare_evaluation` description and in the note — and that two
+# are enforced by validators in `core.py` that refuse the write. Restating them here would
+# have made this file a second copy of a rule that already has one, which is this codebase's
+# signature defect and the thing §7.4 was written to stop.
+#
+# So the product ships the MECHANISM and none of the content. What belongs here is a rule
+# about YOUR briefs, which nothing else in this product knows: the things your agency has
+# agreed and would otherwise have to remember. The shape is documented below; §12.3 will ship
+# a worked example as a customer file rather than as this file, for the same reason.
+#
+# EDITING IT
+#
+# `version` is stamped onto every judgment saved under it, so two judgments made under
+# different rules can be told apart years later. Change the rules, change the version — the
+# stamp is worth nothing if it can stay still while the rules move.
+#
+# A rule needs four things, and a fifth makes it checkable:
+#
+#   rules:
+#     - id: no-ai-imagery          # stable; a finding cites this, so renaming it orphans
+#                                  # every judgment that cited the old name
+#       rule: >-                   # the rule itself, in your words, addressed to whoever
+#         Never use AI-generated imagery in client-facing creative.
+#       severity: blocking         # blocking | should_fix. There is no `note`: a breach of a
+#                                  # rule that changes nothing is not a rule, and the finding
+#                                  # validator refuses a guardrail breach below `should_fix`.
+#       why: >-                    # a rule with no reason is one nobody can argue with, and
+#         Our audience reacts badly to it and two clients have asked in writing.
+#       watch_for: ['midjourney', 'ai-generated', 'generative imagery']
+#                                  # OPTIONAL. The words a brief would contain if it breached
+#                                  # this rule. With them the server READS the brief and
+#                                  # attaches the sentence; without them the rule still
+#                                  # reaches every judgment, but only the model can apply it.
+#
+# And what a brief must CARRY, which is a different kind of rule:
+#
+#   expects:
+#     - id: kpi-workbook
+#       input: A KPI workbook
+#       why: >-
+#         Nothing can be reconciled later against a brief that never said what it was for.
+#       looks_like: ['kpi', 'workbook', 'targets']   # required: the words that would show it
+#                                                    # arrived, or the gap can never be closed
+
+version: "core-1.0"
+
+# What the version means to somebody reading a judgment stamped with it, rather than to
+# whoever wrote the file.
+describes: >-
+  The rules this product ships with, which are none. A judgment stamped `core-1.0` was made
+  under this product's own judgment discipline — which lives in the evaluation procedure
+  rather than here, because stating it twice is how the two come to disagree — and under
+  whatever rules were written in THIS file at the time. Change the rules and change the
+  version: the stamp is the only thing that tells two rulebooks apart afterwards.
+
+rules: []
+
+expects: []

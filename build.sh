@@ -26,6 +26,14 @@ python3 scripts/fetch_weights.py .weights-cache
 mkdir -p dist/campaign-intelligence/models
 cp .weights-cache/open_clip_model.safetensors* dist/campaign-intelligence/models/
 
+# §12.1: the rulebook, BESIDE the executable rather than only inside _internal/.
+# PyInstaller 6 puts every `datas` entry under the contents directory whatever relative
+# destination the spec names, and `config.app_dir()` deliberately resolves to the install
+# directory and not `sys._MEIPASS` — because an administrator has to be able to SEE and EDIT
+# this file, which is most of what the item is about. Without this copy every frozen install
+# read the buried one: edits to the visible file would do nothing, silently.
+cp rulebook.yaml dist/campaign-intelligence/rulebook.yaml
+
 os=$(uname -s | tr '[:upper:]' '[:lower:]'); arch=$(uname -m)
 out="campaign-intelligence-${os}-${arch}.tar.gz"
 tar -C dist -czf "$out" campaign-intelligence

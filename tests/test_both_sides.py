@@ -206,7 +206,11 @@ def test_the_model_is_told_what_a_disagreement_is_worth(conn):
     # The two things the model has to be told, or the structure is decoration: cite the
     # split rather than a side, and this library will not rank the sides for you.
     assert "Cite the split" in note
-    assert "authority order is configured in the rulebook" in note
+    # "would be configured": §12.1 shipped the rulebook, and it carries no authority order —
+    # the sentence used to say "is configured in the rulebook and nothing is configured yet",
+    # which read, once the file existed, as though the mechanism were there and empty.
+    assert "authority order would be configured in the rulebook" in note
+    assert "nothing is configured" in note
 
 
 def test_a_library_with_no_disagreements_says_nothing_about_them(conn):

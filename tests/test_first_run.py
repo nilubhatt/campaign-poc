@@ -88,12 +88,25 @@ def test_the_path_is_empty_once_all_three_are_done(conn):
 
 def test_an_empty_library_says_it_has_no_opinions(conn):
     """"A fresh install has no campaigns and therefore no opinions." Said plainly, because a
-    marketer whose first judgment comes back confident and evidence-free will believe it."""
+    marketer whose first judgment comes back confident and evidence-free will believe it.
+
+    §12.1 put ONE row on `can` for an empty library, and it is worth being careful about why
+    that is not a softening. Every other `can` row is a claim about what the library holds,
+    and an empty library holds nothing. The rulebook is not in the library: it ships with the
+    product, so its rules apply to the very first brief somebody sends — which is exactly the
+    brief they are most likely to be judging alone. Saying "I can check this against your
+    written rules" on day one is true, and withholding it would be the same product
+    understating itself with the same authority it used to overstate."""
     report = core.readiness(conn)
 
     assert report["stage"] == "empty"
-    assert report["can"] == []
+    assert report["can"] == [], (
+        "the product ships no rules, so even the rulebook row is a `cannot` here — the "
+        "mechanism shipping is not the capability existing"
+    )
     assert report["cannot"], "an empty library cannot do anything, and should say so"
+    # And the instruction the test is named for is still the one a reader gets.
+    assert "cannot do" in report["note"] and "evidence-free" in report["note"]
 
 
 def test_every_limit_names_the_thing_that_would_lift_it(conn):
@@ -144,11 +157,17 @@ def test_a_measured_library_is_reported_as_working(conn):
     assert "say_what_worked" in {c["code"] for c in report["can"]}
 
 
-def test_the_rulebook_changes_what_can_be_cited_but_not_what_can_be_checked(conn):
-    """The first version of this test asserted `check_against_rules` moved into `can` once a
-    reference record existed — which was the false claim review caught. Uploading guidelines
-    means they can be CITED when they happen to rank in a similarity search; it does not mean
-    a rule is checked. The limit survives until §7.5/§12.1 pin the rulebook."""
+def test_uploading_guidelines_is_still_not_the_same_as_a_rule(conn):
+    """The distinction this test was written for, which SURVIVES §12.1 and is now the only
+    thing separating two rows.
+
+    The first version asserted `check_against_rules` moved into `can` once a reference record
+    existed — the false claim review caught. §12.1 lifted the limit, but only for rules in the
+    rulebook FILE: a guidelines PDF uploaded into the library is still an ordinary record,
+    still retrieved by similarity, and still absent from the briefs least like it. So
+    `rulebook_on_file` turns on when you upload one and says what it is worth, and
+    `check_against_rules` is about the file, is true of an empty library, and does not move
+    when a document is uploaded."""
     _campaign(conn, "Bogota", outcomes=True)
 
     before = core.readiness(conn)
@@ -158,9 +177,14 @@ def test_the_rulebook_changes_what_can_be_cited_but_not_what_can_be_checked(conn
 
     assert "rulebook_on_file" not in {c["code"] for c in before["can"]}
     assert "rulebook_on_file" in {c["code"] for c in after["can"]}
+    # Unmoved by the upload, in both directions: uploading a document neither grants the
+    # rule-checking capability nor takes it away. (It is a `cannot` here because no rules are
+    # written in the rulebook — which is the point: a guidelines PDF is not a rule.)
     assert "check_against_rules" in {c["code"] for c in before["cannot"]}
-    assert "check_against_rules" in {c["code"] for c in after["cannot"]}, (
-        "having the guidelines on file does not make a guardrail checkable"
+    assert "check_against_rules" in {c["code"] for c in after["cannot"]}
+    cited = next(c for c in after["can"] if c["code"] == "rulebook_on_file")
+    assert "similar" in cited["what"], (
+        "and it still has to say that an uploaded document arrives only if it ranks"
     )
 
 
@@ -269,23 +293,38 @@ def test_a_tag_typed_the_way_a_person_types_it_still_counts(conn):
     assert written == [None], "both tag steps are done; only the rulebook remains"
 
 
-def test_having_guidelines_on_file_is_not_the_same_as_checking_against_them(conn):
-    """The claim this item was written against, made by this item. `has_rulebook` is "any
-    reference record exists", and nothing pins, fetches or checks against it —
-    `prepare_evaluation` is pure similarity retrieval, so the rulebook reaches the evidence
-    only if it happens to rank. Promising "check a brief against a rule" is the confident,
-    unfounded statement the whole review is about."""
+def test_the_new_claim_is_bounded_by_what_is_written_down(conn, tmp_path, monkeypatch):
+    """§12.1 makes "this breaks your own rule" sayable, and the danger of shipping it is
+    replacing one overclaim with another in the tool whose entire job is saying what this
+    product cannot do.
+
+    So the row has to carry its boundary: only the rules actually written in the rulebook. A
+    guideline nobody has written down is not checkable by anything, and an uploaded guidelines
+    document is retrieved by similarity like any other record."""
     _campaign(conn, "Bogota", outcomes=True)
     core.ingest_campaign(conn, title="Brand guidelines", detail="never use AI imagery",
                          record_type="reference", confirm=True)
 
-    report = core.readiness(conn)
-    can = {c["code"]: c for c in report["can"]}
-    cannot = {c["code"] for c in report["cannot"]}
+    import rulebook
 
-    assert "check_against_rules" not in can, "not until the rulebook is actually pinned"
-    assert "rulebook_on_file" in can
-    assert "check_against_rules" in cannot, "still cannot, and says what would change it"
+    monkeypatch_target = tmp_path / "rulebook.yaml"
+    monkeypatch_target.write_text(
+        "version: 'acme-2'\nrules:\n  - id: no-ai\n    rule: No AI imagery.\n"
+        "    severity: blocking\n    why: Two clients asked in writing.\n")
+    monkeypatch.setattr(rulebook, "_bundled", lambda: monkeypatch_target)
+    rulebook.load.cache_clear()
+    try:
+        report = core.readiness(conn)
+        can = {c["code"]: c for c in report["can"]}
+
+        assert "check_against_rules" in can
+        bounded = can["check_against_rules"]["bounded_by"]
+        assert "written down" in bounded
+        assert "similarity" in bounded, (
+            "the uploaded-document case is the one somebody will assume is covered"
+        )
+    finally:
+        rulebook.load.cache_clear()
 
 
 def test_a_wholly_unmeasured_library_is_offered_the_thing_that_would_fix_it(conn):

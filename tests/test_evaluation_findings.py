@@ -48,12 +48,30 @@ def cited_records(conn):
         ("camp_jdsea", "Jakarta SEA launch", "campaign",
          "Every asset in the flighting table carries a content angle, posting date and "
          "requirements per asset.", now, now))
-    conn.execute(
-        "INSERT INTO campaigns (id, title, record_type, detail, created_at, updated_at) "
-        "VALUES (?,?,?,?,?,?)",
-        ("no_ai_imagery", "Paid social guidelines", "reference",
-         "No AI-generated imagery in any paid placement.", now, now))
     conn.commit()
+
+
+@pytest.fixture(autouse=True)
+def _a_rulebook_with_the_rule(tmp_path, monkeypatch):
+    """§12.1: `rule_id` names a rule in the RULEBOOK, not a `reference` campaign row.
+
+    This fixture used to INSERT a campaign with the id `no_ai_imagery` and cite that — the
+    arrangement §12.1 removed, because a rule that reaches a judgment only when similarity
+    retrieves it is not a rule. The id is unchanged so the tests below read the same.
+    """
+    import rulebook
+
+    book = tmp_path / "rulebook.yaml"
+    book.write_text(
+        "version: 'test-1'\nrules:\n  - id: no_ai_imagery\n"
+        "    rule: No AI-generated imagery in any paid placement.\n"
+        "    severity: blocking\n    why: The client has asked in writing.\n")
+    monkeypatch.setattr(rulebook, "_bundled", lambda: book)
+    rulebook.load.cache_clear()
+    try:
+        yield book
+    finally:
+        rulebook.load.cache_clear()
 
 
 def _finding(**over):

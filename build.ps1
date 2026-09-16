@@ -26,6 +26,14 @@ if ($LASTEXITCODE -ne 0) { throw "CLIP weights missing or failed verification - 
 New-Item -ItemType Directory -Force -Path dist\campaign-intelligence\models | Out-Null
 Copy-Item .weights-cache\open_clip_model.safetensors* dist\campaign-intelligence\models\
 
+# Section 12.1: the rulebook, BESIDE the executable rather than only inside _internal\.
+# PyInstaller 6 puts every `datas` entry under the contents directory whatever relative
+# destination the spec names, while `config.app_dir()` deliberately resolves to the install
+# directory and not `sys._MEIPASS` - an administrator has to be able to SEE and EDIT this
+# file, which is most of what the item is about. Without this copy every frozen install reads
+# the buried one, and edits to the visible file would do nothing, silently.
+Copy-Item rulebook.yaml dist\campaign-intelligence\rulebook.yaml
+
 $zip = "campaign-intelligence-windows-amd64.zip"
 if (Test-Path $zip) { Remove-Item $zip }
 Compress-Archive -Path dist\campaign-intelligence\* -DestinationPath $zip

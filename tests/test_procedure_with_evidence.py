@@ -79,7 +79,7 @@ def test_the_rulebook_version_is_stated_even_though_there_is_none(conn):
     say nothing."""
     note = _package(conn)["note"]
     assert "rulebook" in note.lower()
-    assert core.RULEBOOK_VERSION in note
+    assert core.rulebook_version() in note
 
 
 def test_the_weighting_rules_survive_into_the_note(conn):
@@ -114,4 +114,4 @@ def test_it_reaches_the_model_over_the_protocol(conn):
 
     note = asyncio.run(call())["note"]
     assert core.EVALUATION_PROCEDURE in note
-    assert core.RULEBOOK_VERSION in note
+    assert core.rulebook_version() in note

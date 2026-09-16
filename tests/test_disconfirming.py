@@ -54,10 +54,27 @@ def library(conn):
         core.add_metrics(conn, campaign_id=ids[key], detail=numbers)
         store.update_campaign(conn, ids[key],
                               tags=[{"value": verdict, "source": "verified"}])
-    ids["rules"] = core.ingest_campaign(
-        conn, title="Brand guidelines", record_type="reference",
-        detail="No AI-generated imagery in any paid placement.")["campaign_id"]
+    # §12.1: the rule is in the RULEBOOK now, not a `reference` record retrieved by
+    # similarity. `library["rules"]` is its id rather than a campaign id.
+    ids["rules"] = "no-ai-imagery"
     return ids
+
+
+@pytest.fixture(autouse=True)
+def _a_rulebook_with_the_rule(tmp_path, monkeypatch):
+    import rulebook
+
+    book = tmp_path / "rulebook.yaml"
+    book.write_text(
+        "version: 'test-1'\nrules:\n  - id: no-ai-imagery\n"
+        "    rule: No AI-generated imagery in any paid placement.\n"
+        "    severity: blocking\n    why: The client has asked in writing.\n")
+    monkeypatch.setattr(rulebook, "_bundled", lambda: book)
+    rulebook.load.cache_clear()
+    try:
+        yield book
+    finally:
+        rulebook.load.cache_clear()
 
 
 def _evaluation(library, **over):

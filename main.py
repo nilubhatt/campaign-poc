@@ -77,6 +77,16 @@ def main() -> int:
         # binary's own entry point did not.
         clip_embed.warm_up()
         embedding.warm_up()
+        # §12.1: the rulebook, read before the first request rather than on the first
+        # judgment. `load()` RAISES on a file that will not parse, and the point of doing it
+        # here is WHERE the error lands: discovered lazily it surfaces as a tool error to a
+        # model in the middle of judging something, long after whoever edited the file has
+        # moved on. Failing at startup puts it where the gesture was. It is deliberately not
+        # caught — a server running with the rules quietly absent is the failure this whole
+        # item removes, wearing the face of a successful start.
+        import rulebook
+
+        print(f"Rulebook: {rulebook.version()}", file=sys.stderr)
         mcp.run(transport="stdio")
     elif cmd == "init":
         # The installers' final self-test opens the database READ-ONLY on purpose (§2.3: a
