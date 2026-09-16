@@ -262,14 +262,35 @@ def resolve(conn, correction_id: str, *, decision: str,
                               "separate question, asked once it recurs across markets.")}
 
 
+# §12.4/D113: "correction" means THREE unrelated things in this product.
+#
+#   1. `diff_campaigns`' corrections TAKEN — findings the next version addressed (§5.4/6.3)
+#   2. a `recomputed` metric VALUE — a number that was wrong and was fixed (§8.1)
+#   3. THIS: a standing correction, a rule the library watched recur until somebody confirmed
+#      it, which then judges every future brief in its markets
+#
+# A reader who sees "3 corrections" cannot tell which, and they carry completely different
+# weight — one is a diff observation, one is a data fix, one is a standing requirement.
+# Renaming the stored vocabulary would break every saved row and every tool argument, so each
+# SURFACE says which kind it means instead, in the words a reader uses.
+_WHAT_A_STANDING_CORRECTION_IS = (
+    "A STANDING CORRECTION: a rule this library watched recur across decks until somebody "
+    "confirmed it, which briefs in its markets are then judged against. Not a finding from a "
+    "diff, and not a corrected number — those are different things this product also calls "
+    "corrections.")
+
+
 def _public(row: Optional[dict]) -> Optional[dict]:
-    """`correction_id` alongside the row's own `id`.
+    """`correction_id` alongside the row's own `id`, and WHICH kind of correction this is.
 
     One name for this thing everywhere it is read — the tools take `correction_id`, `note`
     returns `correction_id`, and a reader having to know that `find` says `id` instead is the
     small drift that turns into a wrong argument at a call site.
     """
-    return {**row, "correction_id": row["id"]} if row else None
+    if not row:
+        return None
+    return {**row, "correction_id": row["id"],
+            "what_it_means": _WHAT_A_STANDING_CORRECTION_IS}
 
 
 def find(conn, text: str) -> Optional[dict]:
@@ -431,10 +452,14 @@ def graduation(conn, correction_id: str, *, from_rulebook: Optional[str] = None)
     entry = describe(conn, correction_id)
     if not entry:
         raise ValueError(f"{correction_id!r} is not a correction on file")
+    seen_on = store.correction_campaigns(conn, correction_id)
     gate = {**learning.gate(
         name=entry["text"], noun="rule",
-        campaigns=learning.distinct_briefs(conn, store.correction_campaigns(conn,
-                                                                            correction_id)),
+        campaigns=learning.distinct_briefs(conn, seen_on),
+        # §12.4/D103: §8.3's gate is "across at least two PARTNERS or markets" and only the
+        # markets half could be counted. Two agencies writing the same note in one market is
+        # exactly the breadth the gate is named for, and it was refused.
+        partners=store.breadth_of(conn, seen_on)["partners"],
         markets=entry["markets"], status=entry["status"],
         expected_in=entry["expected_in"], confirmed_by=entry["confirmed_by"],
         # §12.3/D108: a rule the CUSTOMER declared in their own rulebook, which does not have

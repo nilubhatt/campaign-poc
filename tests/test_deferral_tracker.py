@@ -91,6 +91,37 @@ def test_nothing_is_still_deferred_to_an_item_already_finished():
     )
 
 
+def test_an_accepted_limit_does_not_promise_work_that_then_lands():
+    """The staleness check ran on `Open — deferred` alone, and the section it did not read is
+    the one that goes quietly wrong.
+
+    L7 read *"a deck can be attached to an existing campaign only as an image asset... D39
+    covers the missing capability."* D39 shipped. The limit's first clause became false the
+    day `attach_deck` landed, and nothing noticed, because a limit is not supposed to be a
+    thing that changes — which is exactly why an unguarded forward promise inside one rots
+    without a sound.
+
+    So: an accepted limit may not point at a deferral that has since CLOSED. Pointing at an
+    OPEN one is fine and is how L8 cross-references D82 and D77 — the row is saying "that case
+    is tracked over there". The moment the work lands, somebody has to come back and ask
+    whether the limit still holds, and this is what asks them. A row's own provenance (`was
+    D125`) is not a pointer and does not count.
+    """
+    closed = set(re.findall(r"\(was (D\d{1,3})\)", TRACKER.read_text(encoding="utf-8")))
+    forward = re.compile(r"(?<!was )\b(D\d{1,3})\b")
+    offenders = []
+    for row_id, row in _tracker_rows("Accepted limits"):
+        for hit in forward.findall(row):
+            if hit in closed:
+                offenders.append(f"{row_id} -> {hit}")
+
+    assert not offenders, (
+        f"these accepted limits name deferrals that have since closed: {offenders}. The work "
+        f"landed; the limit was written when it had not. Re-read the limit and either "
+        f"rewrite it for the world as it is now or, if it no longer holds, remove it."
+    )
+
+
 def test_a_rejected_decision_carries_its_reason():
     """"Decided against" with no reason is indistinguishable from "forgotten", and the whole
     point of recording it is that it is not re-litigated by the next person."""

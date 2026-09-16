@@ -84,16 +84,30 @@ def fold_markets(raw_markets) -> list:
 
 def gate(*, name: str, noun: str, campaigns: int, markets: list, status: str,
          expected_in=(), confirmed_by: Optional[str] = None,
-         from_rulebook: Optional[str] = None) -> dict:
+         from_rulebook: Optional[str] = None, partners: int = 0) -> dict:
     """Whether a learned thing has earned a place on the checklist, and what is missing if not.
 
     Status is asked BEFORE the counts, and the order matters. Asked the other way round, a
     thing somebody had set aside read "seen in 1 campaign, needs 3" — telling the user to keep
     recording something that will be refused forever, and re-asking a question they had
     declined, which §8.2 named as how a product teaches people to dismiss it.
+
+    `partners` is §12.4/D103, and it is the half of §8.3 this gate is NAMED for. The rule is
+    "seen across at least two PARTNERS or markets" — breadth has to be earned, because the
+    library is guessing that a recurring note is a rule rather than one shop's house style —
+    and until `campaigns.partner` existed there was nothing to count, so the gate silently
+    applied half of its own rule. Two partners in one market is real breadth and was refused;
+    counting it now is not a loosening, it is the condition as written.
     """
     markets = fold_markets(markets)
+    partners = max(int(partners or 0), 0)
+    # The WIDER of the two, not their sum. Added together, one campaign with a partner and a
+    # market counts as two and clears a gate whose entire purpose is that one source of
+    # evidence is not enough — the same double-count §12.4 removed when a region stopped
+    # counting as a second market.
+    breadth = max(len(markets), partners)
     base = {"name": name, "campaigns": campaigns, "markets": len(markets),
+            "partners": partners, "breadth": breadth,
             "seen_in": markets, "status": status, "confirmed_by": confirmed_by}
 
     # D108: a rule that came out of the CUSTOMER'S OWN RULEBOOK is confirmed by definition —
@@ -142,18 +156,27 @@ def gate(*, name: str, noun: str, campaigns: int, markets: list, status: str,
     if campaigns < GRADUATION_CAMPAIGNS:
         missing.append(f"seen in {campaigns} campaign{'s' * (campaigns != 1)}, "
                        f"needs {GRADUATION_CAMPAIGNS}")
-    if len(markets) < GRADUATION_MARKETS:
+    if breadth < GRADUATION_MARKETS:
         missing.append(f"seen in {len(markets)} market{'s' * (len(markets) != 1)} "
-                       f"({', '.join(markets) or 'none recorded'}), "
-                       f"needs {GRADUATION_MARKETS} — one partner's house {noun} should not "
-                       f"become a standing requirement for everyone")
+                       f"({', '.join(markets) or 'none recorded'})"
+                       + (f" and {partners} partner{'s' * (partners != 1)}"
+                          if partners else " and no partner on record")
+                       + f", needs {GRADUATION_MARKETS} of either — one partner's house "
+                         f"{noun} should not become a standing requirement for everyone")
     if missing:
         return {**base, "eligible": False, "code": "not_yet",
                 "what_it_means": f"{name} is not ready to be expected of a brief: "
                                  + "; ".join(missing) + "."}
     return {**base, "eligible": True, "code": "eligible",
-            "what_it_means": (f"{name} can be added to the checklist for "
-                              f"{', '.join(markets)}, once a person confirms it.")}
+            "what_it_means": (
+                f"{name} can be added to the checklist for "
+                + (f"{', '.join(markets)}" if markets else
+                   # The breadth came from PARTNERS, and this record has no market on it. The
+                   # sentence used to end "for ," and the promotion would then be scoped to an
+                   # empty market list — a standing requirement that reaches nothing.
+                   f"no market in particular — its breadth is {partners} partners rather than "
+                   f"markets, so say which markets it should apply in")
+                + ", once a person confirms it.")}
 
 
 def require_a_person(confirmed_by: Optional[str]) -> str:

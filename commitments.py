@@ -327,10 +327,18 @@ def _look_for(conn, promise: dict, assets: list, vectors: list) -> dict:
     if _NOT_ANSWERABLE.search(promise["text"]):
         return _unchecked(
             promise,
+            # §12.4/D125 settles what this is: an accepted limit, not work owed. Naming the
+            # INSTRUMENT is what makes it honest — without it a reader cannot tell a boundary
+            # of this product from something broken or unfinished, and that difference decides
+            # whether they wait for a fix or go and look themselves.
             "this promise is about how MANY or about ALL of something, and looking for the "
-            "photograph that most resembles a phrase cannot answer that — for “a single "
-            "colourway”, four colourways in frame would make the match STRONGER. Somebody has "
-            "to look.")
+            "photograph that most resembles a phrase cannot answer that — for “a "
+            "single colourway”, four colourways in frame would make the match STRONGER. "
+            "Counting what is in a photograph needs object DETECTION and attribute "
+            "extraction, which is a different instrument from the retrieval and perceptual "
+            "hashing this product ships; it is not a gap that will close by itself. Somebody "
+            "has to look, and the honest report is “not checked” rather than a "
+            "verdict.")
     query = staged.get(f"commitment:{promise['id']}")
     if query is None:
         try:

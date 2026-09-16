@@ -312,17 +312,24 @@ def test_confirmed_is_not_treated_as_verified():
                         synonyms=enums.TAG_SOURCE_SYNONYMS)
 
 
-def test_a_status_the_library_has_no_home_for_is_not_guessed_at():
+def test_a_status_the_library_now_has_a_home_for_is_not_guessed_at():
     """difflib measures string similarity, not meaning: "cancelled" is three edits from
-    "concluded" and the opposite of it. Suggesting it would file an abandoned campaign as a
-    finished one, and every later "what worked" query would count it."""
-    with pytest.raises(ValueError) as exc:
-        enums.normalise("cancelled", field="status", valid=store.VALID_STATUSES,
-                        synonyms=enums.STATUS_SYNONYMS)
+    "concluded" and the OPPOSITE of it. Suggesting it would have filed an abandoned campaign
+    as a finished one, and every later "what worked" query would have counted it.
 
-    message = str(exc.value)
-    assert "Did you mean 'concluded'" not in message
-    assert "cancel" in message.lower()
+    §12.4/D38 gave it a home, so this is now the stronger version of the same guarantee: the
+    word resolves to ITSELF, and the campaign is not filed as concluded by either route —
+    neither a suggestion the user accepts nor a silent fold. The test immediately below says
+    why this had to change: "a vocabulary's advice has to be retired when the thing it routed
+    around gets built"."""
+    assert enums.normalise("cancelled", field="status", valid=store.VALID_STATUSES,
+                           synonyms=enums.STATUS_SYNONYMS) == "cancelled"
+
+    # And a word that still has no home is still refused without a misleading suggestion.
+    with pytest.raises(ValueError) as exc:
+        enums.normalise("archived", field="status", valid=store.VALID_STATUSES,
+                        synonyms=enums.STATUS_SYNONYMS)
+    assert "Did you mean 'concluded'" not in str(exc.value)
 
 
 def test_nothing_still_sends_a_target_into_freeform_prose(conn):
@@ -372,14 +379,22 @@ def test_the_error_message_never_suggests_the_opposite_of_what_was_typed():
 
 
 def test_a_coincidence_of_letters_is_not_a_suggestion():
-    """`approved` scores 0.625 against `proposed` and `cancelled` 0.667 against `concluded`
-    — both above the old cutoff, both meaning something else. A real typo scores 0.82 and up,
-    so the line goes between them."""
-    for given, wrong in (("approved", "proposed"), ("cancelled", "concluded")):
+    """`approved` scores 0.625 against `proposed` — above the old cutoff, and meaning
+    something else entirely. A real typo scores 0.82 and up, so the line goes between them.
+
+    §12.4/D38: `cancelled` was the other example here, and it is no longer a coincidence of
+    letters — it is a status this product HAS. That is the point of the item: the word was
+    being refused because there was nowhere to put it, and the nearest valid value was a
+    different fact about the campaign."""
+    for given, wrong in (("approved", "proposed"),):
         with pytest.raises(ValueError) as exc:
             enums.normalise(given, field="status", valid=store.VALID_STATUSES,
                             synonyms=enums.STATUS_SYNONYMS)
         assert f"Did you mean {wrong!r}" not in str(exc.value), given
+
+    # And it resolves to itself rather than to the word it merely resembles.
+    assert enums.normalise("cancelled", field="status", valid=store.VALID_STATUSES,
+                           synonyms=enums.STATUS_SYNONYMS) == "cancelled"
 
 
 @pytest.mark.parametrize("typo,expected", [

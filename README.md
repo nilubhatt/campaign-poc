@@ -124,7 +124,7 @@ Offline smoke test (no Ollama): `CAMPAIGN_POC_EMBED_PROVIDER=hash python -m http
 `list_commitments` · `add_commitment` · `drop_commitment` ·
 `classify_drift` · `drift_readings` · `record_context_event` · `campaign_context` · `withdraw_context_event` · `attribute_outcome` · `withdraw_attribution` ·
 `list_campaigns` · `get_campaign` · `find_similar_campaigns` ·
-`diff_campaigns` · `coverage` · `gaps` · `answer_gap` · `feedback_queue` · `feedback_choose` · `feedback_record` · `getting_started` · `prepare_evaluation` · `save_evaluation` · `get_evaluation` · `answer_finding` · `answers` · `load_rulebook_corrections` · `backfill_author_unknown` · `person_on_file` · `pseudonymise_person` · `correct_person_name` · `personal_data_position` ·
+`diff_campaigns` · `coverage` · `gaps` · `answer_gap` · `feedback_queue` · `feedback_choose` · `feedback_record` · `getting_started` · `prepare_evaluation` · `save_evaluation` · `get_evaluation` · `answer_finding` · `answers` · `load_rulebook_corrections` · `attach_deck` · `update_asset` · `backfill_author_unknown` · `person_on_file` · `pseudonymise_person` · `correct_person_name` · `personal_data_position` ·
 `list_evaluations` · `reconcile_evaluation` · `save_reconciliation` · `get_reconciliation` · `calibration` · `link_evaluation` · `resolve_measure` ·
 `measure_status` · `graduate_measure` · `note_correction` · `list_corrections` ·
 `correction_status` · `resolve_correction` · `graduate_correction` ·

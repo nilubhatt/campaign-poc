@@ -44,8 +44,10 @@ from typing import Iterable, Optional
 # How close a suggestion has to be before offering it is help rather than noise. Measured
 # rather than guessed: real typos in this project's vocabularies score 0.82 and up
 # ("predicated"/"predicted" 0.95, "in_flite"/"in_flight" 0.82), while the coincidences score
-# below 0.7 — "approved"/"proposed" 0.63 and "cancelled"/"concluded" 0.67, both of which
-# mean something else entirely and would have been suggested at 0.6.
+# below 0.7 — "approved"/"proposed" 0.63, which means something else entirely and would have
+# been suggested at 0.6. ("cancelled"/"concluded" 0.67 was the other example, and §12.4/D38
+# turned it into a real status: the word was being refused because there was nowhere to put
+# it, and the nearest valid value was a different fact about the campaign.)
 _SUGGESTION_CUTOFF = 0.75
 
 # Prefixes that make a word the DENIAL of what follows. difflib rates "unverified" at 0.89
@@ -128,6 +130,15 @@ STATUS_SYNONYMS = {
     "running": "in_flight",
     "active": "in_flight",
     "ongoing": "in_flight",
+    # §12.4/D38. `on_hold` is `paused` in somebody else's words, not a fifth state.
+    "on_hold": "paused",
+    "holding": "paused",
+    "parked": "paused",
+    "suspended": "paused",
+    "killed": "cancelled",
+    "dropped": "cancelled",
+    "pulled": "cancelled",
+    "shelved": "cancelled",
     "done": "concluded",
     "finished": "concluded",
     "complete": "concluded",
@@ -185,22 +196,19 @@ _EXPLAIN = {
     # place. It is kept below as a DISTINCTION rather than a refusal, because the reason it was
     # refused is still true: a target is not a prediction, and weighing one as the other scores
     # the library against somebody's ambition.
-    ("status", "cancelled"): (
-        "This library has no status for a campaign that was called off. 'concluded' means it "
-        "ran to the end, so filing a cancelled campaign there would count it in every later "
-        "'what worked' question. Leave the status unset and say so in the campaign's detail."
-    ),
+    # §12.4/D38: `cancelled` and `paused` ARE statuses now, so `killed` and `on_hold` are
+    # near-misses for them rather than for nothing. The four entries that stood here told a
+    # caller "this library has no status for a campaign that was called off — leave the status
+    # unset", and an unset status is read as `concluded`: the advice steered a cancelled
+    # campaign into the bucket it was written to keep it out of. A near-miss table that
+    # outlives the values it describes is worse than none, because it is confident.
     ("status", "killed"): (
-        "This library has no status for a campaign that was called off. Leave the status "
-        "unset and say so in the campaign's detail."
-    ),
-    ("status", "paused"): (
-        "This library has no status for a paused campaign. 'in_flight' is the closest true "
-        "statement if it is expected to resume; if it is not, leave the status unset."
+        "'cancelled' is the word this library uses for a campaign that was called off. It is "
+        "a real status — it does NOT count as having run, so it is never a missing result."
     ),
     ("status", "on_hold"): (
-        "This library has no status for a paused campaign. 'in_flight' is the closest true "
-        "statement if it is expected to resume; if it is not, leave the status unset."
+        "'paused' is the word this library uses for a campaign stopped for now and expected "
+        "to resume. It is a real status and is neither concluded nor cancelled."
     ),
     ("metric_type", "benchmark"): (
         "A benchmark is somebody else's number. This field records this campaign's own "

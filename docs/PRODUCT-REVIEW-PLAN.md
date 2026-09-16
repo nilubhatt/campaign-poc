@@ -2974,11 +2974,73 @@ with nothing to notice because each half works perfectly alone:
       while the tool reported them in force — stored and never applied, which is D108's own
       sentence. Review found it; a column carries "everywhere" now, and the test that should
       have caught it had asserted a dict that is always truthy.
-- [ ] **12.4 Schema gaps named in the review** — no field today for `asset_link`,
+- [x] **12.4 Schema gaps named in the review** — no field today for `asset_link`,
       `approval_notes`, or market-scoped feedback patterns. *Decide explicitly whether the
       tracked client comments 2.5 now ingests ARE the `approval_notes` gap — in most agency
       flows a returned deck's comments are exactly that — or whether a separate structured
       field is still owed.*
+      **The decision: they ARE.** A returned deck's tracked comments are what the client wrote
+      when they sent it back, and they arrive with an author, an anchor to the slide, a date
+      and a reply thread — because they came out of the file rather than being retyped into a
+      box. A separate `approval_notes` field would be a second place for the same thing and
+      the worse copy of it. What was genuinely missing is not the notes but the VERDICT:
+      `approval`, `approval_note` and `approval_by`, which is a PERSON because "the client
+      approved it" with nobody's name against it is an opinion this library cannot attribute.
+      *Thirteen tracker rows had accumulated here*, because every "this needs a field that
+      does not exist" answer for seven phases was sent to this item. They were four different
+      kinds of thing, and settling them meant deciding which kind each was rather than
+      building thirteen features.
+      **Fields, and the readers that make them fields rather than columns.** The first round
+      of this item added all five and wired two, and both reviewers opened on the same
+      sentence: a field added because a review named it and read by nothing is the defect this
+      project has hit most. So — `asset_link` (where the work actually lives, which
+      `asset_path` is not); `campaign_type`, which now KEYS the checklist (D102: a measure
+      whose evidence was type-coherent is asked of that type in every market, and of no other
+      type in its own — market was standing in for the word "launch" and got both halves
+      wrong); `partner`, which `learning.gate` now counts through `store.breadth_of` (D103:
+      §8.3's gate is NAMED for partners — "across at least two PARTNERS or markets" — and two
+      agencies writing the same note in one market, which is exactly not one shop's house
+      style, was refused); the statuses a campaign can actually be in (D38 — `cancelled` and
+      `paused` were refused, and "we stopped this one" is an outcome), with the WIRE pinned to
+      `store.VALID_STATUSES` by a test and every reader swept, because the schema published
+      three while the core accepted five and `coverage` called a cancelled campaign
+      `not_yet_run`; and retire/revive history (D106: one timestamp cannot say "twice"), read
+      on `measure_status` and filled with the observation `retire_stale` computes rather than
+      a default sentence true of every retirement.
+      **Surfaces** — `attach_deck` (D39), which unblocked D51's gap: a record whose comments
+      were never read could only gain them by being uploaded again as a duplicate, which §5.2
+      refused in writing, so the gap went unreported for seven phases rather than recommend
+      it. It reads a deck through the same paths an upload does — body, commentary, §9.3
+      promises, the images inside it — because a record repaired the way the gap recommends
+      must not come out thinner than one uploaded whole; a file nothing can be read from is
+      refused rather than written, so the record stays repairable; and the gap counts only
+      records with NO deck, which is the population the offer actually fits. The first round
+      reported it on pasted-text briefs too, whose only remedy `attach_deck` rejects — §5.2's
+      complaint arriving back through the door the fix for it opened. And `update_asset`
+      (D123), because a model that guessed `proposed` on fourteen photographs had produced an
+      unrepairable record; its `why` is stored on `authorship.note` rather than echoed back
+      and dropped.
+      **Meaning** — "correction" meant three unrelated things (D113): a diff's corrections
+      taken, a recomputed metric value, and a standing correction. Renaming the stored
+      vocabulary would break every saved row, so each surface says which it means.
+      **Limits** — D125 is settled as an accepted limit rather than work owed. Refusing a
+      promise about a COUNT is right, because a max-similarity search confirms a universal
+      claim by construction: four colourways in frame make "a single colourway" match
+      STRONGER. Counting what is in a photograph needs object detection, a different
+      instrument from the retrieval this product ships — and the refusal now NAMES that, so a
+      reader can tell a boundary from a defect. D109 moved to §13.4, which is where the
+      missing timeout it is actually blocked on gets fixed — and §13.4's own line was updated
+      to name it, because a re-point written on one side only aims a row at an item that does
+      not know it is owed anything.
+
+      **Already built** — the third thing the item's own line names, *"market-scoped feedback
+      patterns"*, was not a missing field: §8.6 built it and nothing here said so, which is
+      how work that is done still reads as owed. A standing correction carries `markets`
+      (where it was seen) and `expected_in` (the markets it graduated into), and
+      `corrections.in_force` applies it only in those — with `applies_everywhere` for a rule
+      the customer declared in their own rulebook, which §12.3 added because a declared rule
+      is not scoped by where the library happened to notice it. Verified at
+      `corrections.py:610`, not assumed.
 
 
 ## Phase 13 — The engineering work filed into a bucket
@@ -3006,10 +3068,11 @@ or a second copy of something that already exists once.
       verification re-reading every chunk per finding; a content edit re-embedding a whole
       deck for a title change; `retire_stale` scanning the registry on every metric write.
       *Closes D79, D90, D91, D97, D107.*
-- [ ] **13.4 The re-index's two loose ends** — `embedding.embed` called with no timeout on
-      the re-index path alone, so a hung embedder hangs the handler per chunk; and chunk
-      ordering after a re-index, which silently broke "chunk 0 is the summary". *Closes D99,
-      D100.*
+- [ ] **13.4 The re-index's three loose ends** — `embedding.embed` called with no timeout on
+      the re-index path alone, so a hung embedder hangs the handler per chunk; chunk ordering
+      after a re-index, which silently broke "chunk 0 is the summary"; and D109, re-pointed
+      here from §12.4 because the thing it is blocked on is D99's missing timeout and fixing
+      it anywhere else would be fixing the symptom. *Closes D99, D100, D109.*
 - [ ] **13.5 The remaining two-copy helpers** — `_newly_eligible`/`graduate`, the offered-once
       flags, `touch_metric`/`touch_correction` (byte-identical market-fold loops) and
       `campaigns_that_skipped`/`campaigns_that_skipped_correction`. "One mechanism" is true of

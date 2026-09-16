@@ -136,10 +136,18 @@ RecordType = _enum("campaign", "reference", "stub")
 reference — background material: brand guidelines, a rubric, a competitor deck.
 stub — a placeholder with results but no brief, e.g. a row imported from a KPI workbook."""
 
-Status = _enum("proposed", "in_flight", "concluded")
+# §12.4/D38: all five, and the wire list has to be the same five `store.VALID_STATUSES` holds.
+# It listed three while the core accepted five, so the schema a model reads first said
+# `cancelled` and `paused` were invalid words — the "core accepts, wire does not" shape §11.5
+# hit with a stripped `said_by`, running the other way round. A model that believes the schema
+# files a cancelled campaign as `concluded`, and "concluded" is what every outcome gap, every
+# reconciliation and every calibration figure is counted from.
+Status = _enum(*store.VALID_STATUSES)
 """proposed — not yet run: a pitch, a draft, a brief awaiting sign-off.
 in_flight — live, running, in flight, activated.
-concluded — finished, wrapped, completed, ended, done, post-campaign."""
+concluded — finished, wrapped, completed, ended, done, post-campaign.
+cancelled — called off before or during. It did NOT run, so it is not a missing outcome.
+paused — stopped for now and expected to resume; on hold. Not concluded and not cancelled."""
 
 # §9.1: what an image IS. The default is `proposed` because every asset already in a library
 # came out of a deck, and reading briefed creative as evidence of what ran is the confusion the
@@ -152,6 +160,17 @@ DriftClassification = _enum("improvement", "neutral", "degradation", "too_early"
 neutral — moved away from the brief and it made no difference.
 degradation — moved away from the brief and that cost something.
 too_early — nothing measured yet, so whether it mattered cannot be said."""
+
+# §12.4/D15: the verdict on a returned deck. The NOTES are the tracked comments §2.5 reads;
+# this is whether it came back signed off, which they do not say.
+Approval = _enum("approved", "approved_with_changes", "rejected", "withdrawn")
+"""approved — signed off as it stands.
+approved_with_changes — signed off conditionally; `approval_note` is what it was conditional on.
+rejected — not signed off. The deck does not proceed in this form.
+withdrawn — taken back by whoever sent it, before a verdict. Nobody said no; it stopped.
+
+All four are somebody's ACT, so all four require `said_by` (§11.2). There is no value here
+meaning "nobody has decided yet" — that is the field being unset, which is what it already is."""
 
 AssetPhase = _enum("proposed", "delivered")
 """proposed — creative lifted from a brief; what somebody intends to run.
@@ -337,7 +356,10 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
                     collection: Optional[str] = None,
                     supersedes: Optional[str] = None, asset_ref: Optional[dict] = None,
                     confirm: bool = False,
-                    starts_on: Optional[str] = None, ends_on: Optional[str] = None) -> dict:
+                    starts_on: Optional[str] = None, ends_on: Optional[str] = None,
+                    asset_link: Optional[str] = None,
+                    campaign_type: Optional[str] = None,
+                    partner: Optional[str] = None) -> dict:
     """Store a past or proposed campaign in the memory.
 
     The user is a non-technical marketer, not someone filling out a form — have a
@@ -446,7 +468,14 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
                                     region=region, market=market, markets=markets,
                                     collection=collection, supersedes=supersedes,
                                     asset_ref=asset_ref, confirm=confirm,
-                                    starts_on=starts_on, ends_on=ends_on)
+                                    starts_on=starts_on, ends_on=ends_on,
+                                    # §12.4. A field the core accepts and the WIRE does not is
+                                    # the shape §11.5's `said_by` had for a release: pydantic
+                                    # strips what the schema does not declare, so the value
+                                    # never arrives and every test that calls core directly
+                                    # passes.
+                                    asset_link=asset_link, campaign_type=campaign_type,
+                                    partner=partner)
     finally:
         conn.close()
 
@@ -459,7 +488,13 @@ def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optio
                     market: Optional[str] = None, markets: Optional[list[str]] = None,
                     collection: Optional[str] = None,
                     supersedes: Optional[str] = None,
-                    starts_on: Optional[str] = None, ends_on: Optional[str] = None) -> dict:
+                    starts_on: Optional[str] = None, ends_on: Optional[str] = None,
+                    asset_link: Optional[str] = None,
+                    campaign_type: Optional[str] = None,
+                    partner: Optional[str] = None,
+                    approval: Optional[Approval] = None,
+                    approval_note: Optional[str] = None,
+                    said_by: Optional[str] = None) -> dict:
     """Edit a campaign's metadata (title, detail, record_type, status, tags, region, market,
     markets, collection, supersedes). Only the fields you pass change. tags/markets, if given, fully
     REPLACE the existing list (not a merge) — pass the complete new list, including any
@@ -483,6 +518,24 @@ def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optio
     replaced record carries a judgment nobody has checked yet — that is the moment to ask
     which of its predictions held.
 
+    `approval` is the VERDICT on a returned deck (§12.4/D15). The deck's tracked comments ARE
+    the approval notes and are already stored as commentary; what nothing recorded was
+    whether the client actually said yes. `approval_note` is the one line it was conditional
+    on, and `said_by` becomes `approval_by` — a sign-off with nobody's name against it is a
+    claim this product will not make on somebody's behalf, so passing `approval` without
+    `said_by` is refused.
+
+    `asset_link` is where the work actually LIVES — a Figma board, a Drive folder, the link
+    somebody opens six months later. Not `asset_path`, which is this product's own copy of a
+    file. It must be a link somebody can open: "ask Dana" in a field called `asset_link` is
+    a field that looks like a link and is not one.
+
+    `campaign_type` is what KIND of campaign this is — a store launch, an always-on
+    programme, a seasonal drop (§12.4/D102). Market was standing in for it, so a measure
+    learned from store launches was expected of every campaign in that market and of no
+    store launch anywhere else. `partner` is who ran it, and §8.3's gate is named for it:
+    "across at least two PARTNERS or markets" could only count markets until this existed.
+
     `starts_on`/`ends_on` are WHEN IT RAN, as ISO dates (§9.6). Worth asking for on any
     concluded campaign: without a window nothing can be checked against the calendar, so
     "this launch overlapped Ramadan" and "the port was shut for the first half of it" are
@@ -501,7 +554,10 @@ def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optio
                                     record_type=record_type, status=status, tags=tags,
                                     region=region, market=market, markets=markets,
                                     collection=collection, supersedes=supersedes,
-                                    starts_on=starts_on, ends_on=ends_on)
+                                    starts_on=starts_on, ends_on=ends_on,
+                                    asset_link=asset_link, campaign_type=campaign_type,
+                                    partner=partner, approval=approval,
+                                    approval_note=approval_note, said_by=said_by)
     finally:
         conn.close()
 
@@ -1087,7 +1143,8 @@ def finish_indexing(campaign_id: Optional[str] = None) -> dict:
 @_catch_value_errors
 def list_campaigns(record_type: Optional[RecordType] = None, status: Optional[Status] = None) -> dict:
     """List records in the memory. Optionally filter by record_type ('campaign', 'reference',
-    'stub') and/or status ('proposed', 'in_flight', 'concluded'). is_superseded/supersedes
+    'stub') and/or status ('proposed', 'in_flight', 'concluded', 'cancelled', 'paused' —
+    the last two did not run, so they are never missing results). is_superseded/supersedes
     show whether a record has been replaced by a corrected/later one (and by what) — check
     these before treating two similarly-titled records as both live.
 
@@ -1927,6 +1984,50 @@ def backfill_author_unknown() -> dict:
 
 @mcp.tool()
 @_catch_value_errors
+def attach_deck(campaign_id: str, asset_ref: dict) -> dict:
+    """Attach a deck to a campaign that is ALREADY on file (§12.4).
+
+    Offer this when a record's comments were never read — `gaps` says which — or when somebody
+    has the deck for a record that was created from a description. It reads the file, stores
+    it, indexes its text, and reads its tracked comments and speaker notes, ALL ON THE SAME
+    RECORD.
+
+    **Do not use `upload_campaign` for this.** That creates a second record for the same
+    campaign, which splits its evidence in two and makes both halves thinner — this tool
+    exists because that was previously the only way.
+
+    A record that already HAS a deck is refused. A new version of a brief is a new record that
+    supersedes the old one (`upload_campaign` with `supersedes=`), which keeps both: replacing
+    the text in place would throw away what every saved judgment was made against."""
+    conn = store.connect()
+    try:
+        return core.attach_deck(conn, campaign_id=campaign_id, asset_ref=asset_ref)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def update_asset(asset_id: str, phase: AssetPhase, why: str, said_by: str) -> dict:
+    """Correct what an image is evidence OF (§12.4).
+
+    `phase` says whether an image is BRIEFED creative or what actually ran, and everything
+    about how it is used follows from that: which corpus a reuse match is drawn from, whether
+    `compare_execution` treats it as the plan or the outcome. A set of event photographs filed
+    as `proposed` makes the execution comparison compare the results with themselves.
+
+    Offer it when somebody says a batch went in wrong. **Ask who is correcting it and why** —
+    this changes what past evidence meant, so both go on the record; do not fill them in."""
+    conn = store.connect()
+    try:
+        return core.update_asset(conn, asset_id=asset_id, phase=phase, why=why,
+                                 said_by=said_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
 def load_rulebook_corrections(confirmed_by: str) -> dict:
     """Put the standing corrections declared in your rulebook in force (§12.3).
 
@@ -2329,6 +2430,11 @@ def graduate_correction(correction_id: str, confirmed_by: str) -> dict:
 def measure_status(measure: str) -> dict:
     """Where a measure stands against the graduation gate (§8.3): how many campaigns and how
     many markets have carried it, whether it is eligible, and what is missing if it is not.
+
+    `history` is every occasion it was demoted or brought back (§12.4/D106), when there has
+    been one. `status` is where it stands now and cannot say how it got there — a measure
+    retired and revived twice is one nobody has settled, which is a different thing from one
+    that has simply always been expected.
 
     Read-only. Use it to answer "should we be asking for this on every brief yet?" without
     promoting anything."""

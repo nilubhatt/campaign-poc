@@ -59,6 +59,11 @@ NAME_COLUMNS = (
     ("context_attributions", "stated_by", "said what an event did to a campaign's numbers"),
     ("context_attributions", "withdrawn_by", "withdrew an account of an event"),
     ("reactions", "said_by", "recorded what they made of a campaign"),
+    # §12.4/D15: whose sign-off a returned deck carries. A person, on a campaign row — and
+    # §11.7's guard caught it the moment the column was added, which is what that guard is
+    # for: a name in a column nothing scans is a name `person_on_file` reports as absent and
+    # `pseudonymise_person` leaves behind.
+    ("campaigns", "approval_by", "signed off on a deck"),
     ("answers", "said_by", "answered a question this library asked"),
     ("feedback_notes", "said_by", "left a note about a campaign"),
     ("corrections", "confirmed_by", "confirmed a standing rule"),

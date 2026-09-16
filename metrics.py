@@ -356,8 +356,18 @@ def record(conn, *, campaign_id: str, key: str, value, metric_type: str = "actua
     # somebody writing down what they hope for, and reviving a standing requirement on that is
     # the same mistake the gate made one function up.
     if metric_type == "actual":
-        store.revive_metric(conn, name)
+        # The occasion in its own words (§12.4/D106), for the same reason the retirement
+        # carries one: "measured again" is true of every revival.
+        store.revive_metric(conn, name, why=(
+            f"measured again on {campaign_id}" if campaign_id else "measured again"))
     result = {"metric": name, "value": number, "unit": unit, "source": source or "stated"}
+    # §12.4/D113, the third of the three things this product calls a correction. A value whose
+    # `source` is `recomputed` IS one — "the partner's figure is wrong and here is the right
+    # one" — and it said so nowhere, so a reader meeting it beside a standing correction had
+    # nothing to tell them apart. They carry completely different weight: this is a data fix
+    # on one campaign, and a standing correction judges every future brief in a market.
+    if (source or "stated") == "recomputed":
+        result["what_a_correction_means_here"] = _WHAT_A_RECOMPUTED_VALUE_IS
     # §8.5, on the write that changes staleness rather than on a read. A campaign reporting its
     # measures is exactly the event that can make another measure's absence a pattern, and it
     # is the moment somebody is present to be told.
@@ -644,13 +654,32 @@ def graduation(conn, name: str) -> dict:
     entry = describe(conn, name)
     if not entry:
         raise ValueError(f"{name!r} is not a measure on file")
+    measured_on = campaigns_with(conn, name, measured_only=True)
     gate = learning.gate(
         name=name, noun="metric",
-        campaigns=learning.distinct_briefs(conn, campaigns_with(conn, name,
-                                                                measured_only=True)),
+        campaigns=learning.distinct_briefs(conn, measured_on),
+        # §12.4/D103: the PARTNERS half of §8.3's gate, which is the half it is named for and
+        # the half nothing could count until `campaigns.partner` existed.
+        partners=store.breadth_of(conn, measured_on)["partners"],
         markets=entry["markets"], status=entry["status"],
         expected_in=entry["expected_in"], confirmed_by=entry.get("confirmed_by"))
     out = {**gate, "measure": gate["name"]}
+    # §12.4/D106, ON the surface that answers "where does this measure stand". The table was
+    # written by two paths and read by nothing — no tool exposed it, and a history nobody can
+    # reach is the "stored and never applied" defect this project keeps hitting, one table
+    # along. This is the surface it belongs on: "retired in March, revived in June, retired
+    # again in October" is the answer to a different question from `status`, and `status` is
+    # the one that cannot give it. Only when there IS one, so an ordinary measure that has
+    # never been demoted says nothing rather than reporting an empty list as a fact.
+    comings_and_goings = store.measure_history(conn, name)
+    if comings_and_goings:
+        out["history"] = comings_and_goings
+        out["history_means"] = (
+            f"{name} has been demoted or brought back {len(comings_and_goings)} time(s). A "
+            f"measure that cycles is one the library keeps deciding about and nobody has "
+            f"settled — worth a person's attention in a way a stable one is not. These are "
+            f"the library's own observations, not anybody's decision: nothing here was "
+            f"somebody's call, which is why no name is against them.")
     # D104/§8.7: the blast radius, ON the gate rather than in a separate tool nobody would
     # think to call. The person confirming needs "this shows 14 stored campaigns as missing
     # it" BEFORE they confirm; afterwards it is a surprise rather than a decision. Only when
@@ -727,46 +756,77 @@ def graduate(conn, name: str, *, confirmed_by: str) -> dict:
         # overwrote the name of the person who actually confirmed it, which is the one audit
         # field this whole gate exists to create.
         raise ValueError(gate["what_it_means"])
+    # §12.4/D102: the campaign TYPE this measure earned, when every campaign carrying it was
+    # the same kind of campaign. That makes the checklist key "store launch" rather than
+    # "Peru" — the review's own sentence — so it reaches store launches in every market and
+    # stops reaching seeding briefs that never had footfall to uplift.
+    on_type = store.breadth_of(
+        conn, campaigns_with(conn, gate["measure"], measured_only=True))["one_type"]
     store.graduate_metric(conn, gate["measure"], markets=gate["seen_in"],
-                          confirmed_by=confirmed_by)
+                          confirmed_by=confirmed_by, campaign_types=on_type)
     entry = describe(conn, gate["measure"])
     return {**entry, "graduated": True,
             # §8.7: the moment the replay becomes non-empty is the moment to point at it.
             "next_actions": actions.after_graduation(what=gate["measure"],
                                                      markets=entry["expected_in"]),
             "what_it_means": (
-                f"Briefs in {', '.join(entry['expected_in'])} are now checked for "
-                f"{gate['measure']}, on {confirmed_by.strip()}'s confirmation. Ones that do "
-                f"not report it will be shown as missing it — a gap to consider, not a "
-                f"verdict. It stops being asked for if it falls out of use.")}
+                (f"Every {', '.join(on_type)} brief is now checked for {gate['measure']}, in "
+                 f"any market, on {confirmed_by.strip()}'s confirmation — every campaign that "
+                 f"carried it was one, so that is what makes it the right question rather "
+                 f"than where it happened. Briefs of other kinds are not checked for it."
+                 if on_type else
+                 f"Briefs in {', '.join(entry['expected_in'])} are now checked for "
+                 f"{gate['measure']}, on {confirmed_by.strip()}'s confirmation.")
+                + " Ones that do not report it will be shown as missing it — a gap to "
+                  "consider, not a verdict. It stops being asked for if it falls out of use.")}
 
 
 # ── §8.4: the data grows, the prompt does not ────────────────────────────────
 
-def expected_for(conn, *, market: Optional[str] = None, markets: Optional[list] = None) -> list:
-    """The measures a brief in these markets is expected to carry.
+def expected_for(conn, *, market: Optional[str] = None, markets: Optional[list] = None,
+                 campaign_type: Optional[str] = None) -> list:
+    """The measures a brief is expected to carry, keyed on campaign type or on market.
 
     Read from the registry at call time. *"No prompt was edited to make that appear."* A
     measure graduating changes what every subsequent brief is checked against without anybody
     touching a string, which is the whole of §8.4: grow the data the template renders, never
     the template.
 
-    A market is REQUIRED. With neither argument this returned the union of every market's
-    checklist, so a record with no market — most of a young library — was measured against
-    every expectation anybody had ever earned anywhere. That is the check that fires on
-    everything, arrived at by an `if market and ...` that read as a convenience.
+    **§12.4/D102 — which key.** The review's own sentence is *"expected for a store LAUNCH:
+    budget, reach, footfall uplift, sell-through at 60 days"*, and market was standing in for
+    the word "launch". So a measure learned entirely from store launches in Peru was expected
+    of a seeding brief in Peru, which never had footfall to uplift, and was expected of no
+    store launch in Mexico, which had exactly the same reason to report it. Both halves are
+    the same mistake: the checklist was keyed on the wrong thing.
+
+    A measure whose evidence was type-coherent is keyed on its TYPE and reaches every market,
+    because what makes footfall uplift the right question is that it is a store launch, not
+    that it is in Peru. A measure whose evidence spanned types keeps the market key — that is
+    every row written before D102 and every measure genuinely about a place.
+
+    A market is REQUIRED for the market-keyed ones. With neither argument this returned the
+    union of every market's checklist, so a record with no market — most of a young library —
+    was measured against every expectation anybody had ever earned anywhere. That is the check
+    that fires on everything, arrived at by an `if market and ...` that read as a convenience.
+    A type-keyed measure is not subject to that: it has a key of its own, and an untyped brief
+    simply does not match it.
     """
     import store
 
     wanted = {store.fold_market(m) for m in (markets or ([market] if market else []))}
     wanted.discard(None)
-    if not wanted:
-        return []
+    mine = store.fold_campaign_type(campaign_type)
     out = []
     for name, entry in sorted(_registry(conn).items()):
         if entry["status"] != "expected":
             continue               # retired, provisional, ignored and known are not checklists
-        if not wanted & {store.fold_market(m) for m in entry["expected_in"]}:
+        by_type = {store.fold_campaign_type(t) for t in entry.get("expected_for_types") or []}
+        by_type.discard(None)
+        if by_type:
+            if mine in by_type:
+                out.append(name)
+            continue
+        if not wanted or not wanted & {store.fold_market(m) for m in entry["expected_in"]}:
             continue
         out.append(name)
     return out
@@ -787,10 +847,15 @@ def expected_check(conn, campaign_id: str) -> dict:
     # The three reasons a record has no checklist are `learning`'s, because §8.6 needs the same
     # three and writing them twice is how a reference record came to be told it was missing
     # something in one place and not the other.
+    import store
+
     named, refusal = learning.subject_markets(conn, campaign_id)
     if refusal:
         return {**refusal, "expected": [], "carried": [], "missing": []}
-    expected = expected_for(conn, markets=named)
+    # §12.4/D102: the brief's own kind, which is the other key a checklist can hang on.
+    record = store.get_campaign(conn, campaign_id) or {}
+    kind = record.get("campaign_type")
+    expected = expected_for(conn, markets=named, campaign_type=kind)
     carried, missing = [], []
     for name in expected:
         measured = [r for r in values_for(conn, campaign_id, name)
@@ -799,13 +864,15 @@ def expected_check(conn, campaign_id: str) -> dict:
     return {
         "market": ", ".join(named),
         "markets": named,
+        "campaign_type": kind,
         "expected": expected,
         "carried": carried,
         "missing": missing,
         "basis": "computed",
         "code": "checked" if expected else "none_expected",
         "status": "checked" if expected else "nothing_to_check",
-        "what_it_means": _expected_sentence(", ".join(named), expected, carried, missing),
+        "what_it_means": _expected_sentence(", ".join(named), expected, carried, missing,
+                                            campaign_type=kind),
     }
 
 
@@ -820,12 +887,20 @@ def _count_word(n: int) -> str:
     return _COUNT_WORDS[n] if n < len(_COUNT_WORDS) else str(n)
 
 
-def _expected_sentence(market, expected, carried, missing) -> str:
+def _expected_sentence(market, expected, carried, missing, campaign_type=None) -> str:
     if not expected:
         return ("Nothing is expected of a brief in this market yet. A measure joins the "
                 "checklist once it has been seen across several campaigns and markets and a "
                 "person has confirmed it.")
-    head = f"Expected for a campaign in {market}: " if market else "Expected: "
+    # §12.4/D102: the review's own sentence is "Expected for a store LAUNCH", and this said
+    # "for a campaign in Peru" because market was the only key a checklist could hang on.
+    # Naming the type where there is one is not decoration: it is what tells a reader why the
+    # measure is being asked for, and therefore whether the answer "this brief is missing
+    # footfall uplift" is a real gap or a checklist pointed at the wrong kind of campaign.
+    if campaign_type and str(campaign_type).strip():
+        head = f"Expected for a {str(campaign_type).strip()}: "
+    else:
+        head = f"Expected for a campaign in {market}: " if market else "Expected: "
     head += ", ".join(expected) + "."
     if not missing:
         return head + " This brief carries all of them."
@@ -834,6 +909,18 @@ def _expected_sentence(market, expected, carried, missing) -> str:
             return head + " This brief does not carry it."
         return head + f" This brief carries none of the {_count_word(len(expected))}."
     return head + f" This brief is missing {', '.join(missing)}."
+
+
+# §12.4/D113. The stored vocabulary cannot be renamed — every saved row and every tool
+# argument is written in it — so each surface says which kind it means. `corrections._public`
+# and `core.diff_campaigns` carry the other two.
+_WHAT_A_RECOMPUTED_VALUE_IS = (
+    "`source: recomputed` is a CORRECTED NUMBER: somebody checked the figure that was "
+    "reported and this is what it actually was. Both values stay on file, because which "
+    "figure a judgment was made against is part of that judgment. It is not a STANDING "
+    "correction — a rule this library watched recur until somebody confirmed it, which then "
+    "judges every brief in its markets — and it is not a finding a later deck answered. This "
+    "product calls all three corrections and they carry completely different weight.")
 
 
 # ── §8.5: retirement, never deletion ─────────────────────────────────────────
@@ -867,7 +954,15 @@ def retire_stale(conn) -> list:
         skipped = store.campaigns_that_skipped(conn, name, since=entry["last_seen"],
                                                markets=entry["expected_in"])
         if skipped >= RETIREMENT_AFTER:
-            store.retire_metric(conn, name)
+            # §12.4/D106: the OBSERVATION, not the default. This computed the specific
+            # sentence four lines down and passed nothing, so every history row in real use
+            # read "no longer reported by recent campaigns" — a sentence that is true of every
+            # retirement and therefore says nothing about any of them. The whole of D106 is
+            # that a reader years later can tell one occasion from another, and "skipped by 5
+            # campaigns in Peru, Mexico" is the part that does that.
+            store.retire_metric(conn, name, why=(
+                f"skipped by the last {skipped} campaign(s) in "
+                f"{', '.join(entry['expected_in']) or 'its markets'}"))
             retired.append({
                 "measure": name,
                 "was_expected_in": entry["expected_in"],

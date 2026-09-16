@@ -12,6 +12,7 @@ Embeddings for semantic search live alongside campaigns (JSON-encoded float list
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 import uuid
@@ -31,7 +32,10 @@ CREATE TABLE IF NOT EXISTS campaigns (
     id            TEXT PRIMARY KEY,
     title         TEXT NOT NULL,
     record_type   TEXT NOT NULL DEFAULT 'campaign',   -- campaign | reference | stub
-    status        TEXT,            -- proposed | in_flight | concluded (campaigns only)
+    status        TEXT,            -- `VALID_STATUSES`: proposed | in_flight |
+                                   -- concluded | cancelled | paused (campaigns only).
+                                   -- §12.4/D38: the last two do NOT count as having
+                                   -- run, so neither is ever a missing outcome.
     tags          TEXT NOT NULL DEFAULT '[]',   -- JSON array of {value, source}, no fixed
                                     -- taxonomy; source is verified|stated (§ tag provenance)
     region        TEXT,            -- freeform, single value, e.g. "Malaysia" (exact-match
@@ -74,6 +78,34 @@ CREATE TABLE IF NOT EXISTS campaigns (
                                     -- response; this is what lets gaps() still report months
                                     -- later that a deck's commentary was never looked at
     asset_path    TEXT,            -- stored original file (relative to ASSET_DIR)
+    -- §12.4: WHERE THE WORK LIVES, which `asset_path` is not. That is a file this product
+    -- copied; this is the Figma board, the Drive folder, the DAM record — what somebody
+    -- reading a judgment six months later opens to look at the thing being judged.
+    asset_link    TEXT,
+    -- §12.4/D102: what KIND of campaign this is. The review asks for "the checklist for a
+    -- campaign TYPE" and renders it "Expected for a store launch"; nothing carried that, so
+    -- market stood in — and market is the wrong axis, because it made a store-launch measure
+    -- expected of every campaign in that market and of no store launch anywhere else.
+    -- Free text with a DECLARED vocabulary behind it (§12.2), which is why it could not be
+    -- built before: unfolded, "Store Launch" and `store_launch` are two checklists.
+    campaign_type TEXT,
+    -- §12.4/D103: who ran it. §8.3's gate is "across at least two PARTNERS or markets" and
+    -- nothing recorded the partner, so market stood in for that too. Two campaigns with one
+    -- partner in two markets is weaker evidence of a general rule than two partners in one.
+    partner       TEXT,
+    -- §12.4/D15: the VERDICT on a returned deck, which is the half of `approval_notes` that
+    -- was genuinely missing. The NOTES are the tracked comments §2.5 ingests — that is the
+    -- decision the item asks for, and it is "yes, they are": a returned deck's comments are
+    -- what the client wrote when they sent it back, and they arrive with an author, an anchor
+    -- to the slide and a date, which no retyped free-text box could carry.
+    --
+    -- A second `approval_notes` column would be a parallel store for the same thing, worse in
+    -- every way and drifting from the first day. What the comments do NOT say is whether the
+    -- deck came back signed off — "the timing is not" is a note, and "approved with changes"
+    -- is a different fact that a reader needs first.
+    approval      TEXT,            -- approved | approved_with_changes | rejected | withdrawn
+    approval_note TEXT,            -- one line: what the sign-off was conditional on
+    approval_by   TEXT,            -- §11.2: whose sign-off this is, and it must be a PERSON
     embedded      INTEGER NOT NULL DEFAULT 0,  -- 1 once its vector is in the vector store
     created_at    REAL NOT NULL,
     updated_at    REAL NOT NULL
@@ -151,6 +183,18 @@ CREATE TABLE IF NOT EXISTS metric_registry (
     -- is on. Two different questions, and collapsing them is what would make a shipped name
     -- like `cpm` a standing requirement for every brief on day one (§8.3).
     expected_in   TEXT NOT NULL DEFAULT '[]',  -- markets where it graduated; [] = no checklist
+    -- §12.4/D102: the campaign TYPES it graduated on, when its evidence was type-coherent.
+    -- The review's sentence is "expected for a store launch: budget, reach, footfall uplift"
+    -- and the checklist could only be keyed on market, so a measure learned entirely from
+    -- store launches was expected of every campaign in that market — a seeding brief in Peru
+    -- reported as missing footfall uplift — and of no store launch anywhere else. Market was
+    -- standing in for a thing it is not.
+    --
+    -- Filled only when EVERY campaign carrying the measure shares one type. Mixed evidence
+    -- says nothing about type, and guessing a type out of it would be a narrower checklist
+    -- than the evidence earns. `[]` therefore means "keyed on market", which is what every
+    -- row written before this column existed means and is the behaviour it had.
+    expected_for_types TEXT NOT NULL DEFAULT '[]',
     confirmed_by  TEXT,                  -- "confirmed once by a PERSON" — a standing
                                          -- requirement nobody's name is against is one nobody
                                          -- can question later
@@ -337,6 +381,13 @@ CREATE TABLE IF NOT EXISTS authorship (
     subject_kind      TEXT NOT NULL,   -- 'context_event' | 'correction' | 'answer' | ...
     subject_key       TEXT NOT NULL,
     on_behalf_of      TEXT NOT NULL,
+    note              TEXT,            -- §12.4: WHY, in the words of whoever decided. Every
+                                       -- write on this table demands a reason from its caller
+                                       -- and there was nowhere to put one: `update_asset`
+                                       -- required `why`, returned it, and dropped it on the
+                                       -- floor. "Somebody decided these were the delivered
+                                       -- shots" without the reason is the half of the record
+                                       -- a reader six months later does not need.
     on_behalf_of_role TEXT,            -- §11.4: as STATED at the time, never looked up later
     captured_source   TEXT NOT NULL,   -- identity.AUTHOR_SOURCES
     captured_method   TEXT NOT NULL,   -- identity.METHODS
@@ -658,6 +709,30 @@ CREATE TABLE IF NOT EXISTS vector_provenance (
                                     -- entries across spaces is normal, not a mixed index
     created_at    REAL NOT NULL
 );
+
+-- §12.4/D106: every occasion a measure was retired or revived, not only the latest.
+-- `retired_at` is one timestamp and a measure that cycles in and out has no record of having
+-- done so — which is the whole point of demoting rather than deleting: "we used to track
+-- this" is an answer somebody needs, and "we have twice" is a different one.
+--
+-- No `said_by`. This library retires a measure nobody has reported for N campaigns and revives
+-- one somebody measures again; there is no person in the loop, and naming one would be the
+-- product signing its own name to a decision (§11.2). `why` is what it OBSERVED.
+--
+-- IN `_SCHEMA`, and this is not a formatting preference. It was declared down in `_INDEXES`
+-- beside its own index, where it worked — fresh installs got the table — and was INVISIBLE to
+-- `_declared_tables()`, which derives from `_SCHEMA` alone. That is D89's defect exactly: a
+-- column added to it later would reach a new install and never an upgraded one, and the two
+-- sweeps that read `_SCHEMA` to check every stored name (`test_verdict_stamp`'s upgrade guard,
+-- `test_personal_data`'s name-column scan) would walk straight past it. Tables belong here;
+-- `_INDEXES` gets the index and nothing else.
+CREATE TABLE IF NOT EXISTS measure_history (
+    id        TEXT PRIMARY KEY,
+    canonical TEXT NOT NULL,
+    what      TEXT NOT NULL,      -- retired | revived
+    why       TEXT NOT NULL,      -- what the library observed, in its own words
+    at        REAL NOT NULL
+);
 """
 
 
@@ -688,6 +763,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS context_seed_key_idx ON context_events(seed_ke
 CREATE INDEX IF NOT EXISTS attributions_campaign_idx ON context_attributions(campaign_id);
 CREATE INDEX IF NOT EXISTS feedback_notes_campaign_idx ON feedback_notes(campaign_id);
 CREATE INDEX IF NOT EXISTS campaign_notices_idx ON campaign_notices(campaign_id, cleared_at);
+CREATE INDEX IF NOT EXISTS measure_history_idx ON measure_history(canonical, at);
 """
 
 
@@ -914,6 +990,22 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS write_refusals (
             id TEXT PRIMARY KEY, reason TEXT NOT NULL, created_at REAL NOT NULL);
     """)
+    # §12.4/D106: a measure RETIRED before this table existed has no `retired` occasion, so
+    # the first thing its history said after the upgrade was "revived" — a record that reads
+    # as though the library brought back something it had never demoted. The retirement is
+    # derivable: `retired_at` is on the row and is the timestamp it happened at. Seeded once,
+    # and only for rows that have no history at all, so an upgrade cannot invent an occasion
+    # beside one the new code already recorded.
+    if _columns(conn, "measure_history") and _columns(conn, "metric_registry"):
+        for row in conn.execute(
+                "SELECT canonical, retired_at FROM metric_registry WHERE status = 'retired' "
+                "AND retired_at IS NOT NULL AND canonical NOT IN "
+                "(SELECT canonical FROM measure_history)").fetchall():
+            conn.execute(
+                "INSERT INTO measure_history (id, canonical, what, why, at) VALUES (?,?,?,?,?)",
+                (_id("mhist"), row["canonical"], "retired",
+                 "retired before this library recorded its reasons", row["retired_at"]))
+
     recon_columns = _columns(conn, "reconciliations")
     if recon_columns and "basis" not in recon_columns:
         conn.execute("ALTER TABLE reconciliations ADD COLUMN basis TEXT")
@@ -1003,7 +1095,15 @@ def _id(prefix: str) -> str:
 # Tuples, not sets: these are shown to a person, and set iteration order is arbitrary, so
 # the same error could list the options differently on two runs.
 VALID_RECORD_TYPES = ("campaign", "reference", "stub")
-VALID_STATUSES = ("proposed", "in_flight", "concluded")
+# §12.4/D38: `cancelled` and `paused` were REFUSED, with an error explaining there was no
+# home for them — and a brief that was cancelled is exactly the record a library about what
+# works most needs to keep. "We stopped this one" is an outcome, and it is one of the more
+# useful things this library can say about a kind of brief.
+#
+# `on_hold` is NOT a fourth value: it is the same fact as `paused` in somebody else's words,
+# and two states nothing distinguishes are two checklists, two cells and two gap reports for
+# one situation. It is a synonym.
+VALID_STATUSES = ("proposed", "in_flight", "concluded", "cancelled", "paused")
 VALID_TAG_SOURCES = ("verified", "stated")
 _VALID_RECORD_TYPES = VALID_RECORD_TYPES          # older internal names, kept
 _VALID_STATUSES = VALID_STATUSES
@@ -1339,10 +1439,44 @@ def _parse_tag_query(tags) -> list[tuple[str, Optional[str]]]:
     return out
 
 
+def checked_link(value):
+    """A link somebody will follow, or a refusal (§12.4).
+
+    "ask Dana" in a field called `asset_link` is a field that LOOKS like a link and is not
+    one, and the reader finds that out by clicking. The check is deliberately shallow — a
+    scheme and something after it — because this product cannot tell a live Figma board from a
+    dead one and pretending otherwise would be a different false claim.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if not re.match(r"^(https?|s3|gs|smb|file)://\S+$", text, re.IGNORECASE):
+        raise ValueError(
+            f"`asset_link` must be a link somebody can open — it is where the work lives, and "
+            f"a reader follows it. Got {text!r}. Use the full URL (https://…), or leave it out "
+            f"and put the note in `detail`.")
+    return text
+
+
+def fold_campaign_type(value):
+    """The comparison key for a campaign type (§12.4/D102).
+
+    Through the declared vocabulary, like every other one: unfolded, "Store Launch" and
+    `store_launch` are two checklists, which is C16's failure and the reason D102 could not be
+    built until §12.2 gave a customer somewhere to declare their own words.
+    """
+    if not value or not str(value).strip():
+        return None
+    return fold_vocabulary("campaign_types", str(value))
+
+
 def insert_campaign(conn, *, title, record_type="campaign", status=None, detail=None,
                     deck_text=None, asset_path=None, tags=None, region=None, market=None,
                     markets=None, collection=None, supersedes=None,
-                    commentary_checked=False, starts_on=None, ends_on=None) -> str:
+                    commentary_checked=False, starts_on=None, ends_on=None,
+                    asset_link=None, campaign_type=None, partner=None) -> str:
     record_type = _normalise_record_type(record_type)
     status = _normalise_status(status)
     tags = normalize_tags(tags, has_actual_metrics=False)  # brand-new: no metrics can exist yet
@@ -1362,11 +1496,14 @@ def insert_campaign(conn, *, title, record_type="campaign", status=None, detail=
     conn.execute(
         """INSERT INTO campaigns (id, title, record_type, status, tags, region, market,
                                   markets, collection, supersedes, detail, deck_text,
-                                  asset_path, commentary_checked, starts_on, ends_on,
+                                  asset_path, asset_link, campaign_type, partner,
+                                  commentary_checked, starts_on, ends_on,
                                   created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (cid, title, record_type, status, json.dumps(tags), region, market,
          json.dumps(markets), collection, supersedes, detail, deck_text, asset_path,
+         checked_link(asset_link), str(campaign_type).strip() if campaign_type else None,
+         str(partner).strip() if partner else None,
          1 if commentary_checked else 0, starts, ends, now, now),
     )
     conn.commit()
@@ -1669,10 +1806,39 @@ def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Opti
     return [r["id"] for r in rows]
 
 
+def attach_deck_to_campaign(conn, campaign_id: str, *, deck_text: str, asset_path: str,
+                            commentary_checked: bool) -> bool:
+    """Put a deck on a record that already exists (§12.4/D39). False if it already had one.
+
+    Separate from `update_campaign`, which deliberately does not accept `deck_text` — content
+    that large is a re-upload, and its docstring has always said so. This is the other case:
+    a record that has NO deck getting its first one, which was previously possible only by
+    uploading a duplicate campaign.
+
+    **The "has no deck yet" test is in the WHERE clause, and that is the point of this
+    function.** `core.attach_deck` checks it too, and has to, because it owes a sentence
+    explaining supersession rather than a bare False. But a check in the caller is a
+    check-then-act: two attaches racing past it both passed, and the row ended up with one
+    deck's text carrying the other deck's comments — a record that says one thing and is
+    annotated with remarks about another, which is precisely the misattribution this product
+    is built against. The condition that decides has to be the one the database applies.
+    """
+    changed = conn.execute(
+        "UPDATE campaigns SET deck_text = ?, asset_path = ?, "
+        "commentary_checked = ?, updated_at = ? WHERE id = ? "
+        "AND COALESCE(TRIM(deck_text), '') = '' AND asset_path IS NULL",
+        (deck_text, asset_path, 1 if commentary_checked else 0, _now(),
+         campaign_id)).rowcount
+    conn.commit()
+    return bool(changed)
+
+
 def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_type=None,
                     status=None, tags=None, region=None, market=None, markets=None,
                     collection=None, supersedes=None, starts_on=None, ends_on=None,
-                    window_source=None) -> bool:
+                    window_source=None, asset_link=None, campaign_type=None,
+                    partner=None, approval=None, approval_note=None,
+                    approval_by=None) -> bool:
     """Update campaign metadata (§6.4) — NOT deck_text/chunks/embeddings; re-upload (or
     supersede) for content changes. Only given fields change; tags/markets, if given, fully
     replace the existing list rather than merging. Returns whether the campaign exists.
@@ -1721,6 +1887,24 @@ def update_campaign(conn, campaign_id: str, *, title=None, detail=None, record_t
         fields.append("markets = ?"); params.append(json.dumps(normalize_markets(markets)))
     if collection is not None:
         fields.append("collection = ?"); params.append(collection)
+    # §12.4: the three the review named. A record that predates a field is the ordinary case
+    # for anything added later, so each is settable on an existing record and not only at
+    # upload.
+    if asset_link is not None:
+        fields.append("asset_link = ?"); params.append(checked_link(asset_link))
+    if campaign_type is not None:
+        fields.append("campaign_type = ?"); params.append(str(campaign_type).strip() or None)
+    if partner is not None:
+        fields.append("partner = ?"); params.append(str(partner).strip() or None)
+    if approval is not None:
+        fields.append("approval = ?")
+        params.append(enums.normalise(approval, field="approval", valid=VALID_APPROVALS,
+                                      allow_none=False))
+    if approval_note is not None:
+        fields.append("approval_note = ?")
+        params.append(" ".join(str(approval_note).split()) or None)
+    if approval_by is not None:
+        fields.append("approval_by = ?"); params.append(str(approval_by).strip() or None)
     if supersedes is not None:
         fields.append("supersedes = ?")
         params.append(checked_supersedes(conn, campaign_id, supersedes))
@@ -2115,7 +2299,7 @@ def disagreement_on(conn, campaign_id: str, rows=None) -> Optional[dict]:
 
 
 def record_authorship(conn, *, subject_kind: str, subject_key: str, on_behalf_of: str,
-                      role: Optional[str] = None) -> dict:
+                      role: Optional[str] = None, note: Optional[str] = None) -> dict:
     """Record who decided this, and the account that made the call (§11.1–§11.4).
 
     `captured_*` is derived here and never accepted from a caller — that is the whole point.
@@ -2129,10 +2313,11 @@ def record_authorship(conn, *, subject_kind: str, subject_key: str, on_behalf_of
     row = _id("who")
     conn.execute(
         "INSERT INTO authorship (id, subject_kind, subject_key, on_behalf_of, "
-        "on_behalf_of_role, captured_source, captured_method, captured_account, "
+        "on_behalf_of_role, note, captured_source, captured_method, captured_account, "
         "captured_host, captured_display, channel, session_id, captured_at, created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (row, subject_kind, subject_key, who["on_behalf_of"]["name"], role,
+         " ".join(str(note or "").split()) or None,
          captured["source"], captured["method"],
          captured.get("os_user") or captured.get("subject"), captured.get("host"),
          captured.get("display_name"), identity.channel(), identity.session_id(),
@@ -2167,6 +2352,9 @@ def _as_authorship(row) -> dict:
         if row[field]:
             captured[key] = row[field]
     said = {"name": row["on_behalf_of"], "source": "stated"}
+    # `note` is what they SAID, so it travels with the name and not with the derived account.
+    if "note" in row.keys() and row["note"]:
+        said["why"] = row["note"]
     if row["on_behalf_of_role"]:
         said["role"] = row["on_behalf_of_role"]
         said["role_basis"] = "as stated at the time"
@@ -2223,6 +2411,11 @@ def answers_for(conn, subject_kind: str, keys: Optional[list] = None) -> dict:
         latest[row["subject_key"]] = {
             "answer": row["answer"], "note": row["note"], "said_by": row["said_by"],
             "said_at": row["said_at"], "evaluation_id": row["evaluation_id"],
+            # The server's own clock, beside the caller-supplied `said_at`. §10.2's set-aside
+            # is a statement about the records that existed WHEN it was made — "these decks
+            # are gone" says nothing about one uploaded next week — and deciding that needs a
+            # timestamp the caller did not write. `said_at` is a string somebody passed in.
+            "recorded_at": row["created_at"],
             # Always. A reader who cannot tell a person's answer from a computed fact will
             # eventually cite one as the other, which is the whole of §2.4.
             "basis": "stated",
@@ -2504,6 +2697,11 @@ def map_chunks_to_campaigns(conn, chunk_ids: list[str]) -> dict[str, str]:
 
 # ── assets (§6.6/6.7: images today, other modalities keyed the same way later) ──
 
+# §12.4/D15. `withdrawn` is the agency pulling it rather than the client refusing it — a
+# different fact about the same deck, and the one a later reader most often needs to explain
+# why a promising brief has no results.
+VALID_APPROVALS = ("approved", "approved_with_changes", "rejected", "withdrawn")
+
 VALID_ASSET_PHASES = ("proposed", "delivered")
 
 
@@ -2525,6 +2723,25 @@ def set_asset_fingerprint(conn, asset_id: str, phash: str) -> None:
         (asset_id, phash, _now()),
     )
     conn.commit()
+
+
+def get_asset(conn, asset_id: str) -> Optional[dict]:
+    """One asset, or None (§12.4/D123)."""
+    row = conn.execute("SELECT * FROM assets WHERE id = ?", (asset_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def set_asset_phase(conn, asset_id: str, phase: str) -> bool:
+    """Correct what an image IS evidence of (§12.4/D123).
+
+    `phase` decides whether an image is BRIEFED creative or what actually ran, and §9.1 says
+    everything falls out of that — so a model that guessed `proposed` on fourteen photographs
+    had produced an unrepairable record, because nothing could set it.
+    """
+    changed = conn.execute("UPDATE assets SET phase = ? WHERE id = ?",
+                           (phase, asset_id)).rowcount
+    conn.commit()
+    return bool(changed)
 
 
 def get_assets_for_campaign(conn, campaign_id: str) -> list[dict]:
@@ -3396,6 +3613,10 @@ def metric_registry(conn) -> dict:
         d["aliases"] = json.loads(d["aliases"] or "[]")
         d["markets"] = json.loads(d["markets"] or "[]")
         d["expected_in"] = json.loads(d.get("expected_in") or "[]")
+        # §12.4/D102. `.get` because an upgraded database reaches this before
+        # `_add_missing_columns` has run on the process that opened it, and `[]` is the right
+        # answer there: keyed on market, which is what it was.
+        d["expected_for_types"] = json.loads(d.get("expected_for_types") or "[]")
         d["answered"] = bool(d.get("answered"))
         d["surfaced"] = bool(d.get("surfaced"))
         out[d["canonical"]] = d
@@ -4025,6 +4246,46 @@ def campaigns_that_skipped_correction(conn, correction_id: str, *, since: Option
     return int(row["n"] or 0)
 
 
+def breadth_of(conn, campaign_ids: list) -> dict:
+    """How widely a thing has been seen: across partners AND markets (§12.4/D103).
+
+    §8.3's gate is "across at least two PARTNERS or markets" and it could only count markets,
+    because nothing in the schema recorded who the partner was. Two campaigns with one partner
+    in two markets is weaker evidence of a general rule than two partners in one market — the
+    gate exists to stop one partner's house style becoming everybody's standing requirement,
+    and it could not see the thing it is named for.
+
+    `learning.gate` is the caller, through `metrics.graduation` and `corrections.graduation`.
+    It had none for a round, which is this project's most-repeated defect and the one the
+    §12.4 test file opens by naming: a field added because a review asked for it and read by
+    nothing leaves the row closed and the defect exactly where it was.
+    """
+    partners, markets, types = set(), set(), set()
+    typed = 0
+    for campaign_id in campaign_ids or []:
+        record = get_campaign(conn, campaign_id)
+        if not record:
+            continue
+        if (record.get("partner") or "").strip():
+            partners.add(record["partner"].strip().casefold())
+        markets |= {m for m in (fold_market(m) for m in markets_of(record)) if m}
+        kind = fold_campaign_type(record.get("campaign_type"))
+        if kind:
+            types.add(kind)
+            typed += 1
+    return {"partners": len(partners), "markets": len(markets),
+            "widest": max(len(partners), len(markets)),
+            # §12.4/D102: the campaign TYPES, and whether the evidence is coherent about them.
+            # `one_type` is the only shape that justifies keying a checklist on type: every
+            # campaign carrying this thing was the same kind of campaign, and none was silent
+            # about what kind it was. Mixed evidence, or evidence where half the records have
+            # no type, says nothing about type at all — and narrowing a checklist on that
+            # would remove expectations the evidence never earned the right to remove.
+            "types": sorted(types),
+            "one_type": sorted(types) if (len(types) == 1 and typed == len(campaign_ids or []))
+                        else []}
+
+
 def markets_of(campaign: dict) -> list:
     """Every market a campaign counts towards, or `[None]` when it has none.
 
@@ -4085,7 +4346,8 @@ def fold_market(name: Optional[str]) -> Optional[str]:
     return fold_vocabulary("markets", str(name))
 
 
-def graduate_metric(conn, canonical: str, *, markets: list, confirmed_by: str) -> None:
+def graduate_metric(conn, canonical: str, *, markets: list, confirmed_by: str,
+                    campaign_types: Optional[list] = None) -> None:
     """Promote a measure onto the checklist for the markets it earned (§8.3).
 
     `expected_in` is the markets it was actually SEEN in, not every market on file. A measure
@@ -4100,35 +4362,73 @@ def graduate_metric(conn, canonical: str, *, markets: list, confirmed_by: str) -
     # graduated, judged against, retired and graduated again look NEWER than the judgment that
     # was checked against it — so the report asserted the judgment had never seen it, which is
     # the confident unfounded claim the report exists to avoid.
-    conn.execute("UPDATE metric_registry SET status = 'expected', expected_in = ?, "
-                 "answered = 1, surfaced = 1, confirmed_by = ?, "
-                 "confirmed_at = COALESCE(confirmed_at, ?), "
-                 "retired_at = NULL WHERE canonical = ?",
-                 (json.dumps(sorted(markets)), confirmed_by, _now(), canonical))
+    fields = ("status = 'expected', expected_in = ?, answered = 1, surfaced = 1, "
+              "confirmed_by = ?, confirmed_at = COALESCE(confirmed_at, ?), retired_at = NULL")
+    params: list = [json.dumps(sorted(markets)), confirmed_by, _now()]
+    # §12.4/D102, and guarded on the column because an upgraded database gets it from
+    # `_add_missing_columns` and this runs on every promotion.
+    if "expected_for_types" in _columns(conn, "metric_registry"):
+        fields += ", expected_for_types = ?"
+        params.append(json.dumps(sorted(set(campaign_types or []))))
+    conn.execute(f"UPDATE metric_registry SET {fields} WHERE canonical = ?",
+                 params + [canonical])
     conn.commit()
 
 
-def retire_metric(conn, canonical: str) -> None:
+def _record_measure_history(conn, canonical: str, what: str, why: str) -> None:
+    """One occasion, appended (§12.4/D106)."""
+    if not _columns(conn, "measure_history"):
+        return
+    conn.execute("INSERT INTO measure_history (id, canonical, what, why, at) "
+                 "VALUES (?,?,?,?,?)",
+                 (_id("mhist"), canonical, what, " ".join((why or "").split()), _now()))
+
+
+def measure_history(conn, canonical: str) -> list:
+    """Every time this measure was retired or revived, oldest first (§12.4/D106)."""
+    if not _columns(conn, "measure_history"):
+        return []
+    return [{"what": row["what"], "why": row["why"], "at": row["at"], "basis": "computed"}
+            for row in conn.execute(
+                "SELECT what, why, at FROM measure_history WHERE canonical = ? "
+                "ORDER BY at, rowid", (canonical,)).fetchall()]
+
+
+def retire_metric(conn, canonical: str, *, why: str = "") -> None:
     """Demote, never delete (§8.5).
 
     `expected_in` and every recorded value are left exactly where they are. The measure stops
     being asked for; the record that it was once asked for survives, because "we used to track
     this" is an answer somebody will need and a deleted row can only say "we never did".
     """
-    conn.execute("UPDATE metric_registry SET status = 'retired', retired_at = ? "
-                 "WHERE canonical = ?", (_now(), canonical))
+    # Guarded on the rowcount, exactly as `revive_metric` is. Unguarded, retiring a name that
+    # is not in the registry — or one already retired — appended a `retired` occasion anyway,
+    # so the history could assert an event that never happened against a registry with no such
+    # measure in it. A history that records things the library did not do is worse than no
+    # history, because the whole of D106 is that somebody will read it years later.
+    changed = conn.execute(
+        "UPDATE metric_registry SET status = 'retired', retired_at = ? "
+        "WHERE canonical = ? AND status != 'retired'", (_now(), canonical)).rowcount
+    if changed:
+        # D106: the occasion, kept. `retired_at` is the LATEST one and overwrites the last.
+        _record_measure_history(conn, canonical, "retired",
+                                why or "no longer reported by recent campaigns")
     conn.commit()
 
 
-def revive_metric(conn, canonical: str) -> None:
+def revive_metric(conn, canonical: str, *, why: str = "") -> None:
     """A retired measure that somebody recorded again is expected again (§8.5).
 
     It graduated once and a person confirmed it. Asking them to confirm it a second time
     because a quarter went by is asking the same question twice, which §8.2 established is how
     a product teaches people to dismiss it.
     """
-    conn.execute("UPDATE metric_registry SET status = 'expected', retired_at = NULL "
-                 "WHERE canonical = ? AND status = 'retired'", (canonical,))
+    changed = conn.execute(
+        "UPDATE metric_registry SET status = 'expected', retired_at = NULL "
+        "WHERE canonical = ? AND status = 'retired'", (canonical,)).rowcount
+    if changed:
+        _record_measure_history(conn, canonical, "revived",
+                                why or "measured again after being retired")
     conn.commit()
 
 

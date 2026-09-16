@@ -60,7 +60,10 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                     markets: Optional[list] = None, collection: Optional[str] = None,
                     supersedes: Optional[str] = None,
                     asset_ref: Optional[dict] = None, confirm: bool = True,
-                    starts_on: Optional[str] = None, ends_on: Optional[str] = None) -> dict:
+                    starts_on: Optional[str] = None, ends_on: Optional[str] = None,
+                    asset_link: Optional[str] = None,
+                    campaign_type: Optional[str] = None,
+                    partner: Optional[str] = None) -> dict:
     """
     Store a past/proposed campaign, chunk it, and embed each chunk for search (§6.1).
 
@@ -198,6 +201,11 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         # second deliberate `update_campaign` call, which is the unreachable human step this
         # project has now hit three times.
         starts_on=starts_on, ends_on=ends_on,
+        # §12.4: where the work lives, what kind of campaign it is, and who ran it — the three
+        # the review named as having no field. Validated on the way in (`checked_link`) rather
+        # than on the way out, because a link nobody can open is worth catching while the
+        # person who typed it is still here.
+        asset_link=asset_link, campaign_type=campaign_type, partner=partner,
     )
 
     # §11.5, at the door most people arrive by. A tag may carry `said_by`, and `upload_campaign`
@@ -211,103 +219,11 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
     # manual upload_image_asset call per image isn't a workflow anyone would actually use
     # (product feedback). Only possible when a real file reached us (asset_ref); the
     # LLM-first deck_text-only path has no file to extract images from.
-    image_assets: list[dict] = []
-    # Distinguishes "checked, found nothing/nothing to flag" from "never checked" (e.g. the
-    # deck_text-only path with no file, an unsupported file type like legacy .ppt, or
-    # extraction itself failing) - all otherwise look identical as an empty image_assets
-    # list, which a calling LLM can't tell apart. Tied to the file type actually being one we
-    # know how to check, not just to the per-image loop completing without error below (a
-    # single image's storage failure shouldn't retroactively make an otherwise-successful
-    # check report itself as "never happened").
-    images_checked = False
-    images_embedded = 0
-    current_campaign = None
-    if asset_path_for_images is not None:
-        image_mime = extract.guess_mime(asset_path_for_images.name)
-        try:
-            found_images, img_warnings = extract.extract_images(asset_path_for_images, mime=image_mime)
-            warnings += img_warnings
-        except Exception as exc:
-            found_images = []
-            warnings.append(notices.notice(
-                "images_unreadable",
-                detail=f"image extraction failed (deck images will not be searchable or "
-                       f"reuse-checked): {exc}"))
-        else:
-            images_checked = image_mime in (config.PPTX_MIME, "application/pdf")
-
-        if found_images:
-            current_campaign = store.get_campaign(conn, cid)
-
-        # PASS 1 — store, fingerprint, reuse-check. Deliberately NOT budgeted: writing a
-        # file and hashing it is milliseconds, and reuse detection is the question this
-        # product exists to answer ("this hero image is identical to one used in Mexico").
-        # Abandoning that to save a fraction of a second would cut the wrong thing. It also
-        # guarantees every image leaves a row, so an interrupted run can be finished later
-        # rather than being silently lost the way an unextracted image would be.
-        for img_bytes, ext, location in found_images:
-            stored_name = None
-            try:
-                stored_name = _keep_asset_bytes(img_bytes, ext)
-                image_full_path = config.ASSET_DIR / stored_name
-                aid = store.insert_asset(conn, cid, file_path=stored_name)
-            except Exception as exc:
-                if stored_name:
-                    (config.ASSET_DIR / stored_name).unlink(missing_ok=True)
-                warnings.append(notices.notice(
-                    "image_not_stored",
-                    detail=f"deck image on slide/page {location} could not be stored: {exc}"))
-                continue
-            entry = {"asset_id": aid, "location": location, "fingerprinted": False,
-                     "visually_embedded": False, "reuse_flags": [],
-                     "_path": image_full_path}
-            try:
-                h = images.phash(image_full_path)
-                store.set_asset_fingerprint(conn, aid, h)
-                entry["fingerprinted"] = True
-            except Exception as exc:
-                warnings.append(notices.notice(
-                    "image_not_fingerprinted",
-                    detail=f"deck image {aid} not fingerprinted (reuse detection will miss "
-                           f"it): {exc}"))
-            else:
-                try:
-                    entry["reuse_flags"] = _phash_matches(
-                        conn, h, exclude_campaign_id=cid, current=current_campaign)
-                except Exception as exc:
-                    warnings.append(notices.notice(
-                        "reuse_check_failed",
-                        detail=f"deck image {aid} fingerprinted but reuse check failed: "
-                               f"{exc}"))
-            image_assets.append(entry)
-
-        # PASS 2 — the expensive half. This is what yields when time runs out; the images
-        # are already stored and reuse-checked, so stopping here costs only visual
-        # similarity, and every skipped one has a row waiting to be finished.
-        for entry in image_assets:
-            if time.monotonic() >= deadline:
-                warnings.append(notices.notice(
-                    "indexing_incomplete",
-                    affects=f"{images_embedded} of {len(image_assets)} images in this deck "
-                            f"are in visual search so far. All of them were stored and "
-                            f"checked for reuse, so nothing is lost.",
-                    next_actions=actions.to_finish_indexing(cid),
-                    detail=f"visually embedded {images_embedded} of {len(image_assets)} "
-                           f"deck images before the "
-                           f"{config.TOOL_TIME_BUDGET_SECONDS:g}s time budget ran out"))
-                break
-            try:
-                vec = clip_embed.embed_image(entry["_path"])
-                _add_vector(conn, entry["asset_id"], vec, space="asset")
-                store.mark_asset_embedded(conn, entry["asset_id"])
-                entry["visually_embedded"] = True
-                images_embedded += 1
-            except Exception as exc:
-                warnings.append(_vision_notice(
-                    f"deck image {entry['asset_id']} not visually embedded: {exc}"))
-
-        for entry in image_assets:
-            entry.pop("_path", None)
+    found = _index_deck_images(conn, cid, asset_path_for_images, deadline=deadline)
+    image_assets = found["image_assets"]
+    images_checked = found["images_checked"]
+    images_embedded = found["images_embedded"]
+    warnings += found["warnings"]
 
     if not units and deck_text:
         # LLM-first path: Claude passed one flat string with no page/slide boundaries —
@@ -451,6 +367,119 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         # replaces — see `_judgment_to_check`.
         **({"earlier_judgment": earlier_judgment} if earlier_judgment else {}),
     }
+
+
+def _index_deck_images(conn, cid: str, asset_path_for_images, *, deadline: float) -> dict:
+    """Every image inside a deck: stored, fingerprinted, reuse-checked, visually embedded.
+
+    Lifted out of `ingest_campaign` so that `attach_deck` runs the SAME one (§12.4/D39). It
+    did not, and a record repaired the way `commentary_never_read` recommends had nothing on
+    the briefed side of `compare_execution` — the comparison the whole of Phase 9 is about,
+    reading empty on exactly the records the gap had just told somebody to fix. Copying the
+    ninety lines into the new path would have been this codebase's own most-repeated defect,
+    two implementations of one rule, on the hot path.
+    """
+    warnings: list[dict] = []
+    image_assets: list[dict] = []
+    # Distinguishes "checked, found nothing/nothing to flag" from "never checked" (e.g. the
+    # deck_text-only path with no file, an unsupported file type like legacy .ppt, or
+    # extraction itself failing) - all otherwise look identical as an empty image_assets
+    # list, which a calling LLM can't tell apart. Tied to the file type actually being one we
+    # know how to check, not just to the per-image loop completing without error below (a
+    # single image's storage failure shouldn't retroactively make an otherwise-successful
+    # check report itself as "never happened").
+    images_checked = False
+    images_embedded = 0
+    current_campaign = None
+    if asset_path_for_images is not None:
+        image_mime = extract.guess_mime(asset_path_for_images.name)
+        try:
+            found_images, img_warnings = extract.extract_images(asset_path_for_images, mime=image_mime)
+            warnings += img_warnings
+        except Exception as exc:
+            found_images = []
+            warnings.append(notices.notice(
+                "images_unreadable",
+                detail=f"image extraction failed (deck images will not be searchable or "
+                       f"reuse-checked): {exc}"))
+        else:
+            images_checked = image_mime in (config.PPTX_MIME, "application/pdf")
+
+        if found_images:
+            current_campaign = store.get_campaign(conn, cid)
+
+        # PASS 1 — store, fingerprint, reuse-check. Deliberately NOT budgeted: writing a
+        # file and hashing it is milliseconds, and reuse detection is the question this
+        # product exists to answer ("this hero image is identical to one used in Mexico").
+        # Abandoning that to save a fraction of a second would cut the wrong thing. It also
+        # guarantees every image leaves a row, so an interrupted run can be finished later
+        # rather than being silently lost the way an unextracted image would be.
+        for img_bytes, ext, location in found_images:
+            stored_name = None
+            try:
+                stored_name = _keep_asset_bytes(img_bytes, ext)
+                image_full_path = config.ASSET_DIR / stored_name
+                aid = store.insert_asset(conn, cid, file_path=stored_name)
+            except Exception as exc:
+                if stored_name:
+                    (config.ASSET_DIR / stored_name).unlink(missing_ok=True)
+                warnings.append(notices.notice(
+                    "image_not_stored",
+                    detail=f"deck image on slide/page {location} could not be stored: {exc}"))
+                continue
+            entry = {"asset_id": aid, "location": location, "fingerprinted": False,
+                     "visually_embedded": False, "reuse_flags": [],
+                     "_path": image_full_path}
+            try:
+                h = images.phash(image_full_path)
+                store.set_asset_fingerprint(conn, aid, h)
+                entry["fingerprinted"] = True
+            except Exception as exc:
+                warnings.append(notices.notice(
+                    "image_not_fingerprinted",
+                    detail=f"deck image {aid} not fingerprinted (reuse detection will miss "
+                           f"it): {exc}"))
+            else:
+                try:
+                    entry["reuse_flags"] = _phash_matches(
+                        conn, h, exclude_campaign_id=cid, current=current_campaign)
+                except Exception as exc:
+                    warnings.append(notices.notice(
+                        "reuse_check_failed",
+                        detail=f"deck image {aid} fingerprinted but reuse check failed: "
+                               f"{exc}"))
+            image_assets.append(entry)
+
+        # PASS 2 — the expensive half. This is what yields when time runs out; the images
+        # are already stored and reuse-checked, so stopping here costs only visual
+        # similarity, and every skipped one has a row waiting to be finished.
+        for entry in image_assets:
+            if time.monotonic() >= deadline:
+                warnings.append(notices.notice(
+                    "indexing_incomplete",
+                    affects=f"{images_embedded} of {len(image_assets)} images in this deck "
+                            f"are in visual search so far. All of them were stored and "
+                            f"checked for reuse, so nothing is lost.",
+                    next_actions=actions.to_finish_indexing(cid),
+                    detail=f"visually embedded {images_embedded} of {len(image_assets)} "
+                           f"deck images before the "
+                           f"{config.TOOL_TIME_BUDGET_SECONDS:g}s time budget ran out"))
+                break
+            try:
+                vec = clip_embed.embed_image(entry["_path"])
+                _add_vector(conn, entry["asset_id"], vec, space="asset")
+                store.mark_asset_embedded(conn, entry["asset_id"])
+                entry["visually_embedded"] = True
+                images_embedded += 1
+            except Exception as exc:
+                warnings.append(_vision_notice(
+                    f"deck image {entry['asset_id']} not visually embedded: {exc}"))
+
+        for entry in image_assets:
+            entry.pop("_path", None)
+
+    return {"image_assets": image_assets, "images_checked": images_checked,
+            "images_embedded": images_embedded, "warnings": warnings}
 
 
 def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
@@ -3652,7 +3681,13 @@ _GAP_RANK = {
     # and simply has not been looked at — and the looking is a few minutes rather than a
     # workbook somebody has to go and find.
     "judgments_never_reconciled": 3,
-    # "commentary_never_read" is recorded but not reported — see gaps() for why.
+    # §12.4/D51. LOWER than every gap about missing evidence (the number is a position, and a
+    # smaller one ranks higher): the deck is usually already on file and the remedy is one
+    # call, where `few_verified_outcomes` is the hole this product was built around. Above
+    # nothing, though — a client's recorded objection is often the most useful precedent the
+    # library could have, and these records have none. Recorded since §2.5 and NOT reported
+    # until D39 gave it an action that did not create a duplicate record.
+    "commentary_never_read": 6,
 }
 
 
@@ -4467,6 +4502,61 @@ def _ranked_gaps(conn) -> dict:
                 campaign_id=unchecked[0]["id"], phase="delivered")]),
         })
 
+    # §12.4/D51: records whose deck's comments were never read. Recorded since §2.5 and NOT
+    # reported until now, for a good reason: the only action available was `upload_campaign`,
+    # which creates a SECOND record and fires `duplicate_title` — the offer §5.2 refused in
+    # writing. "A gap whose only action makes things worse is a complaint."
+    #
+    # D39 built `attach_deck`, so the gap has an action that works and can be reported.
+    # RECORDS WITH NO DECK AT ALL, which is the population `attach_deck` can actually repair.
+    # Without the deck test this fired on every record whose brief arrived as typed text and
+    # every upload whose file type carries no comments this product can read — and for those
+    # the gap's own sentence ("not because their decks were silent, but because no file was
+    # ever read") is false, while the action it offers is the one `attach_deck` refuses. A gap
+    # whose only remedy is rejected by the tool it names is the complaint §5.2 spent an item
+    # removing, arriving back through the door the fix for it opened.
+    #
+    # It is not a gap this product could honestly report for the others either: it cannot read
+    # a .docx's comments, so it cannot know whether there are any, and "N records may have
+    # unread comments" is the confident claim from an absence that §2.4 exists to refuse.
+    unread = [c for c in store.list_campaigns(conn)
+              if c.get("record_type") == "campaign"
+              and not c.get("commentary_checked")
+              and not (c.get("deck_text") or "").strip()
+              and not c.get("asset_path")
+              and c["id"] not in store.get_superseded_campaign_ids(conn)]
+    if unread:
+        found.append({
+            "code": "commentary_never_read",
+            "what": f"{len(unread)} record{'s' * (len(unread) != 1)} "
+                    f"{'have' if len(unread) != 1 else 'has'} never had a deck read for "
+                    f"comments: "
+                    f"{', '.join(c['title'] for c in unread[:_MAX_NAMED])}"
+                    + (f" (and {len(unread) - _MAX_NAMED} more)"
+                       if len(unread) > _MAX_NAMED else "") + ".",
+            "why_it_matters": ("A client's recorded objection is often the most useful "
+                               "precedent in the library, and these records have none — not "
+                               "because their decks were silent, but because no file was ever "
+                               "read. A judgment citing them cannot tell those apart."),
+            "counts": {"records": len(unread)},
+            "affects": len(unread),
+            "basis": "computed",
+            # The newest record this gap counts, so a set-aside made about the records on
+            # file then does not silence it for records that arrive later (§10.2).
+            "since": max((c.get("created_at") or 0) for c in unread),
+            # NOT `upload_campaign`: that is the duplicate §5.2 refused in writing, and
+            # offering it here is what kept this gap unreported for seven phases.
+            "next_actions": actions.trim([actions.action(
+                f"Attach the deck for \u201c{unread[0]['title']}\u201d",
+                "attach_deck",
+                why="The deck's comments are read when it is attached, so the client's own "
+                    "objections become precedent a judgment can cite — on the SAME record "
+                    "rather than a second copy of it.",
+                consent="ask",
+                needs=["the deck file itself"],
+                campaign_id=unread[0]["id"])]),
+        })
+
     # §9.9: the item's whole diagnosis is that reconciliation "needs somebody to decide to go
     # back and nobody does" — and it gave itself no gap, so the number waiting was invisible on
     # every reporting surface. `calibration` meanwhile reported a perfect record beside them.
@@ -4525,6 +4615,7 @@ def _ranked_gaps(conn) -> dict:
                                "it ran. Without a window every outcome is read as though "
                                "nothing else was going on."),
             "counts": {"campaigns": len(windowless)}, "affects": len(windowless),
+            "since": max((c.get("created_at") or 0) for c in windowless),
             "next_actions": actions.trim([actions.action(
                 f"Say when “{windowless[0]['title'][:36]}” ran",
                 "update_campaign",
@@ -4580,6 +4671,8 @@ def _ranked_gaps(conn) -> dict:
                               "looks.",
             "counts": {"markets": shown, "markets_total": len(barren)},
             "affects": len({c["id"] for m in barren for c in by_market[m]}),
+            "since": max((c.get("created_at") or 0)
+                         for m in barren for c in by_market[m]),
             "next_actions": actions.trim([actions.action(
                 f"Record results for a campaign in {display[barren[0]]}",
                 "add_metrics",
@@ -4626,7 +4719,12 @@ def _ranked_gaps(conn) -> dict:
 # exist, and a blacklist cannot tell the difference because the difference is not syntactic.
 #
 # `execution_never_checked` is out for the same reason: photographs of what ran are work.
-_CAN_BE_SET_ASIDE = ("market_without_outcomes", "no_window")
+# §12.4/D51: `commentary_never_read` joins them, and it has to. A brief that only ever
+# existed as pasted text has no file whose comments could be read, so without a way to say
+# "there is no deck" the gap is permanent and unclosable — which is a gap everybody learns to
+# ignore, and D51's own reason for not reporting it at all. Now it closes two ways: attach the
+# deck, or say there is not one.
+_CAN_BE_SET_ASIDE = ("market_without_outcomes", "no_window", "commentary_never_read")
 
 # One per response, ever. Measured at 3 of 7 offers in a single `gaps()` reply — one per gap,
 # because `trim` caps each gap's own list and nothing capped the response — which made "shall
@@ -4649,6 +4747,28 @@ def _what_people_said_about_the_gaps(conn, ranked: dict) -> dict:
     for gap in ranked["gaps"]:
         answer = said.get(gap["code"])
         if answer and answer["answer"] == "not_applicable":
+            # §10.2/D53 and §12.4: the set-aside is keyed on the gap's CODE, and the evidence
+            # underneath it moves. "This will never be true here" is a statement about the
+            # records somebody was looking at — a market whose agency no longer exists, decks
+            # that are genuinely lost — and it says nothing whatever about a record uploaded
+            # afterwards. Suppressed by code alone, one decision silenced the gap permanently,
+            # including for evidence that did not exist when it was made: the product agreeing
+            # to stop mentioning something it had not yet seen. `since` is the newest thing
+            # this gap counts; when it postdates the answer, the gap comes back and says why.
+            since = gap.get("since")
+            recorded = answer.get("recorded_at")
+            if not (since and recorded and since > recorded):
+                continue
+            gap["answered"] = answer
+            gap["reopened"] = {
+                "basis": "computed",
+                "what_it_means": (
+                    f"This was set aside by {answer['said_by']}, and records counted by it "
+                    f"have arrived since. What was said then was about what was on file "
+                    f"then; it is reported again because this evidence is new. Setting it "
+                    f"aside again covers these too."),
+            }
+            kept.append(gap)
             continue
         if answer and answer["answer"] == "known_not_yet":
             gap["answered"] = answer
@@ -4913,6 +5033,226 @@ def _pair_up(earlier: list[dict], later: list[dict]) -> dict:
     return assignment
 
 
+# How many passages a diff shows per side. Two long decks with nothing in common would
+# otherwise return both in full, in a reply somebody has to read.
+_MAX_PASSAGES = 10
+
+
+# A single passage's ceiling in the reply. `_MAX_PASSAGES` bounds the COUNT and nothing
+# bounded the size: a deck with no blank lines in it is one paragraph, so one "passage" was
+# 78 KB on each side and a diff of two such decks was a 156 KB tool result. Truncated with the
+# cut marked, because a quotation that has been shortened must never look complete.
+_MAX_PASSAGE_CHARS = 1200
+
+
+def _folded_passage(text: str) -> str:
+    """The form two passages are compared on: whitespace, case and Unicode composition folded.
+
+    NFC is not a nicety. "Café" is one codepoint on a Windows machine and "e" plus a combining
+    accent on a Mac, the two are the same sentence to every reader, and Python compares them
+    unequal — so a deck that had been through both reported every accented paragraph as
+    removed AND added, which is the diff saying the brief changed when nobody touched it.
+    """
+    import unicodedata
+
+    return unicodedata.normalize("NFC", " ".join(str(text or "").split())).casefold()
+
+
+def _short_passage(text: str) -> str:
+    """One passage, bounded, with the cut visible."""
+    whole = str(text or "").strip()
+    if len(whole) <= _MAX_PASSAGE_CHARS:
+        return whole
+    return whole[:_MAX_PASSAGE_CHARS].rstrip() + f" … [{len(whole)} characters in all]"
+
+
+def _passages_changed(conn, earlier: str, later: str) -> dict:
+    """Added and removed passages between two versions, by layer (§12.4/D63).
+
+    From what is ALREADY STORED for each version: nothing is extracted again and no file is
+    re-read, which is the item's framing. The two layers come from different places, and the
+    comment inside `by_layer` says why — the body from the record's own `deck_text`, the
+    commentary from its chunks. D63's wording is "from the chunks already stored"; taking that
+    literally made every version differ on its own title, because the first chunk carries the
+    title and detail as a summary. The departure is deliberate; claiming both was the error.
+
+    Compared on a FOLDED form so that whitespace and case do not register as a change — a diff
+    that reports every paragraph because the chunker packed them differently is one nobody
+    reads twice. Unicode is normalised in the same fold: "Café" typed as one codepoint and as
+    "e" plus an accent are the same sentence to every reader and different bytes to Python, so
+    a deck round-tripped through a Mac reported its whole text as replaced.
+
+    By layer, and the layer is load-bearing. A paragraph gone from the BODY is the brief
+    changing; a comment gone is the client's remark being dropped, which is a different and
+    usually more interesting event. One list would make a deleted objection look like an edit.
+    That is also why commentary is filled FIRST when the reply has to be trimmed: body first,
+    a fifteen-paragraph rewrite pushed out every dropped client comment, so the layer the
+    docstring calls more interesting was the layer truncation removed.
+    """
+    def by_layer(campaign_id: str) -> dict:
+        out: dict = {"body": {}, "commentary": {}}
+        record = store.get_campaign(conn, campaign_id) or {}
+        # The BODY from `deck_text`'s own paragraphs, not from the chunks. A chunk is not a
+        # passage: `chunking.pack` merges units up to 1800 characters, and the first chunk
+        # carries the title and detail as a summary — so every version differed on its own
+        # title and the whole deck read as replaced. §6.1 made the same call for quotes, for
+        # the same reason: the chunk boundary is one the document does not have.
+        for unit in (record.get("deck_text") or "").split("\n\n"):
+            folded = _folded_passage(unit)
+            if folded:
+                out["body"].setdefault(folded, _short_passage(unit))
+        # Commentary IS one chunk per comment and never merged, so its chunks are its
+        # passages — and they carry the author and anchor nothing else can reconstruct.
+        for row in conn.execute(
+                "SELECT text FROM campaign_chunks WHERE campaign_id = ? AND kind = "
+                "'commentary'", (campaign_id,)).fetchall():
+            folded = _folded_passage(row["text"] or "")
+            if folded:
+                out["commentary"].setdefault(folded, _short_passage(row["text"] or ""))
+        return out
+
+    before, after = by_layer(earlier), by_layer(later)
+    added, removed, more = [], [], 0
+    # COMMENTARY FIRST, and this ordering is the whole of the layer rule at the point where it
+    # costs something. Body first, a deck with fifteen rewritten paragraphs and two dropped
+    # client comments returned ten body passages and ZERO commentary, with the comments folded
+    # into an undifferentiated `more: 12` — the layer this function's own docstring calls "the
+    # more interesting of the two" was the one the cap removed, every time, because there is
+    # always more body than commentary.
+    for layer in ("commentary", "body"):
+        gone = [before[layer][k] for k in before[layer] if k not in after[layer]]
+        new = [after[layer][k] for k in after[layer] if k not in before[layer]]
+        more += max(0, len(gone) - _MAX_PASSAGES) + max(0, len(new) - _MAX_PASSAGES)
+        removed += [{"layer": layer, "text": t} for t in gone[:_MAX_PASSAGES]]
+        added += [{"layer": layer, "text": t} for t in new[:_MAX_PASSAGES]]
+
+    return {
+        "added": added[:_MAX_PASSAGES], "removed": removed[:_MAX_PASSAGES],
+        "more": more + max(0, len(added) - _MAX_PASSAGES) + max(0, len(removed) - _MAX_PASSAGES),
+        "basis": "computed",
+        "what_it_means": (
+            "What the two decks say differently, from the passages already stored for each. "
+            "`layer` matters: a passage gone from `body` is the brief changing, and one gone "
+            "from `commentary` is a remark somebody made about it being dropped — which is "
+            "usually the more interesting of the two. Whether a change ANSWERS anything is a "
+            "reading of both decks and is not asserted here."
+            if added or removed else
+            "The two decks say the same things, passage for passage. Any difference between "
+            "them is in the structured fields rather than the text."),
+    }
+
+
+_MAX_CLIENT_ASKS = 8
+
+# The commentary kinds that are SOMEBODY ELSE writing on the deck (§12.4/D62). `extract` reads
+# three, and the third is not one of these: a `speaker_note` is the notes slide, which is the
+# deck author's own presenter script. All three are worth storing and searching — the notes
+# slide often says what the brief means — but only these two are an ASK somebody made of the
+# work. Read through a list with the kind stripped off, "Presenter: remember to smile" came
+# back as what the client wrote when they sent the deck back.
+_SOMEBODY_ELSES_REMARK = ("comment", "annotation")
+
+# What the earlier deck's VERDICT does to the weight of its asks (§12.4/D15 read beside D62).
+# One sentence each, and they are genuinely different readings of the same quotation — which
+# is the argument for recording the verdict at all.
+_WHAT_THE_VERDICT_DOES_TO_THE_ASKS = {
+    "rejected": ("The earlier deck was REJECTED, so these are the objections it did not "
+                 "survive. A version answering them is answering the reason it was refused."),
+    "approved_with_changes": ("The earlier deck was signed off CONDITIONALLY, so these are "
+                              "what it was conditional on. `approval_note` says which."),
+    "approved": ("The earlier deck was signed off as it stood, so these are remarks made "
+                 "alongside a yes rather than conditions on one — worth reading and not "
+                 "worth treating as a blocker."),
+    "withdrawn": ("The earlier deck was taken back before a verdict, so nobody said no to "
+                  "it. These are the remarks it had collected by then."),
+}
+
+
+def _what_the_client_asked_for(conn, earlier: str) -> dict:
+    """The comments on the earlier deck, as the asks a new version is answering (§12.4/D62).
+
+    This is the §12.4/D15 decision put to work: a returned deck's tracked comments ARE the
+    approval notes, so they are also the corrections the next version is responding to. The
+    product was reading them as searchable text and as nothing else.
+
+    It does NOT decide whether each one was addressed. Whether "drop the third colourway" was
+    done is a judgment about two documents, and asserting it from a keyword overlap is the
+    confident-unfounded claim this product exists to avoid — `adopted` says what the LIBRARY's
+    findings did, from finding ids, which is a fact. This says what was asked, quotes it, and
+    leaves the reading to whoever is looking at both decks.
+    """
+    # `get_commentary`, not `text_on_file`. The latter strips `kind`, and the three kinds are
+    # not the same claim: a `comment` and a PDF `annotation` are somebody writing ON the deck,
+    # and a `speaker_note` is the DECK AUTHOR'S OWN presenter script. Read through the stripped
+    # list, "Presenter: remember to smile, and skip slide 4" was reported to the model as "what
+    # the client wrote when they sent it back" — the agency's own note, filed as the client's
+    # ask, by a product whose entire thesis is that it can say where a claim came from.
+    everything = store.get_commentary(conn, earlier)
+    rows = [row for row in everything
+            if row.get("kind") in _SOMEBODY_ELSES_REMARK and (row.get("text") or "").strip()]
+    own_notes = len(everything) - len(rows)
+    items = []
+    for row in rows[:_MAX_CLIENT_ASKS]:
+        item = {"text": " ".join((row.get("text") or "").split())}
+        # The author where the file carried one, because "who asked for this" is half of what
+        # makes an ask worth answering — and because an unattributed remark must not be
+        # narrated as the client's either.
+        for field in ("author", "slide", "page"):
+            if row.get(field):
+                item[field] = row[field]
+        items.append(item)
+    if not items:
+        return {"count": 0, "items": [], "basis": "computed",
+                "what_it_means": (
+                    "The earlier deck carries no remarks anybody wrote ON it"
+                    + (f" — only {own_notes} speaker note(s), which are the deck author's own "
+                       f"script rather than anything a reviewer asked for."
+                       if own_notes else
+                       " — either nobody wrote any, or the file was never read for them, "
+                       "which `commentary_never_read` in `gaps` tells apart.")),
+                }
+    named = sorted({str(row["author"]).strip() for row in rows if (row.get("author") or "").strip()})
+    # §12.4/D15's verdict, BESIDE the asks, because the two are one fact read apart. "Drop the
+    # third colourway" under `rejected` is why the deck did not proceed; the same sentence
+    # under `approved_with_changes` is what the sign-off was conditional on; under `approved`
+    # it is a remark somebody made in passing. The verdict was stored and read by nothing, and
+    # this is the surface where not having it changes what the asks MEAN.
+    verdict = (store.get_campaign(conn, earlier) or {}).get("approval")
+    said_so = (store.get_campaign(conn, earlier) or {}).get("approval_by")
+    return {
+        "count": len(rows), "items": items, "basis": "computed",
+        **({"approval": verdict, "approval_by": said_so,
+            "approval_means": _WHAT_THE_VERDICT_DOES_TO_THE_ASKS[verdict]}
+           if verdict in _WHAT_THE_VERDICT_DOES_TO_THE_ASKS else {}),
+        # `some_unattributed` rather than a sentence, so a caller can act on it: a reader who
+        # cannot tell "R. Vega asked for this" from "somebody did" will eventually quote the
+        # second as the first.
+        "authors": named, "some_unattributed": any(not (r.get("author") or "").strip()
+                                                   for r in rows),
+        "what_it_means": (
+            f"{len(rows)} remark(s) written on the earlier deck by "
+            + (f"{', '.join(named)}" if named else "somebody the file does not name")
+            + f": the asks this version is answering, quoted rather than judged — whether "
+              f"each was addressed is a reading of both decks, and this product does not "
+              f"assert it from word overlap. `adopted` beside this is a different claim: what "
+              f"the LIBRARY's own findings did, from their ids."
+            + (f" {own_notes} speaker note(s) on the deck are NOT here: those are the deck "
+               f"author's own script, not a reviewer's ask." if own_notes else "")),
+    }
+
+
+# §12.4/D113. The stored vocabulary cannot be renamed — every saved row and every tool
+# argument is written in it — so each surface says which kind it means, in the words a reader
+# uses. `corrections._public` carries the standing-rule version of this sentence.
+_WHAT_A_DIFF_CORRECTION_IS = (
+    "A correction HERE is an observation about two documents: a finding raised on the earlier "
+    "version that the later one answered. It binds nothing and judges nothing else. It is not "
+    "a STANDING correction — a rule this library watched recur until somebody confirmed it, "
+    "which then judges every brief in its markets — and it is not a RECOMPUTED number, which "
+    "is a corrected value for one measure on one campaign. This product calls all three "
+    "corrections and they carry completely different weight.")
+
+
 def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
     """What changed between two versions of the same brief.
 
@@ -5014,10 +5354,30 @@ def diff_campaigns(conn, *, earlier: str, later: str) -> dict:
         "carried_stale": (_stale_citations(conn, before, "earlier")
                           + _stale_citations(conn, after, "later")),
         "record_changes": _record_changes(first, second),
+        # §12.4/D113, set HERE rather than at the end of the function: this returns early for
+        # records with no structured judgment on both sides, so a sentence appended at the
+        # bottom reached only half the callers — and the half it missed is the ordinary one.
+        "what_a_correction_means_here": _WHAT_A_DIFF_CORRECTION_IS,
         # D58: what the BRIEFS say differently, not just what their structured fields do. A
         # budget dropped, a channel gone, a date contradiction introduced — all invisible
         # until §7.1 could read them, and all things a reader of a v1→v2 diff is asking about.
         "fact_changes": _fact_changes(conn, earlier, later),
+        # §12.4/D63: what the two decks actually SAY differently, passage by passage and by
+        # layer. `fact_changes` says a budget moved and `record_changes` says a field did;
+        # neither says the third-colourway paragraph is gone, which is what somebody comparing
+        # two versions is looking at. The chunks were already stored per version and nothing
+        # had read them against each other.
+        "passages": _passages_changed(conn, earlier, later),
+        # §12.4/D62: what the CLIENT asked for, from the comments on the earlier deck.
+        # "In the Colombia case 'corrections' meant the client's tracked comments at least as
+        # much as the library's findings" — and a diff that reports only which of its OWN
+        # findings were addressed is reporting on itself. What the client actually wrote when
+        # they sent the deck back was being read as nothing.
+        #
+        # Reported beside `adopted` and never merged into it: one is what this product
+        # decided, the other is what the client instructed, and blending them would let the
+        # library take credit for somebody else's sentence.
+        "what_the_client_asked_for": _what_the_client_asked_for(conn, earlier),
         "comparable": all(structured),
         "warnings": warnings,
     }
@@ -5407,7 +5767,11 @@ MAX_COVERAGE_CELLS = 25
 # Worst first. `no_outcomes` outranks `single_example` because a cell with two campaigns and
 # nothing measured compares a proposal against what was planned, which is weaker than one
 # measured example.
-_EVIDENCE_ORDER = ("no_outcomes", "single_example", "measured", "not_yet_run")
+# §12.4/D38: `never_ran` sits beside `not_yet_run` and is a different statement. A cancelled
+# campaign has not "not yet run" — it will never run, and the difference is whether anybody
+# should ever come back for its results. Ranked last with it, because neither is a hole in the
+# evidence somebody can close.
+_EVIDENCE_ORDER = ("no_outcomes", "single_example", "measured", "not_yet_run", "never_ran")
 
 
 def _citation_concentration(conn, campaign_ids: list) -> dict:
@@ -5497,7 +5861,12 @@ def coverage(conn) -> dict:
             # the complaint nobody can answer that §5.3 wrote out. Beyond that, both markers
             # can be true at once and the one that costs more wins — the counts above are
             # there so nothing hides behind it.
-            "evidence": ("not_yet_run" if stage != "concluded"
+            # §12.4/D38 added two statuses and this reader was not swept, so a CANCELLED
+            # campaign was reported as `not_yet_run` — a false statement on a surface built
+            # to say what the library's evidence is worth, and one that invites somebody to
+            # go and collect results for a campaign that was called off.
+            "evidence": ("never_ran" if stage == "cancelled"
+                         else "not_yet_run" if stage != "concluded"
                          else "no_outcomes" if not with_outcomes
                          else "single_example" if len(rows) == 1
                          else "measured"),
@@ -5585,7 +5954,8 @@ def coverage(conn) -> dict:
                  "`no_outcomes` means nothing in that cell was ever measured, "
                  "`single_example` means one campaign is carrying every judgment about it. "
                  "`not_yet_run` is neither — a campaign that has not concluded cannot have "
-                 "results yet."),
+                 "results yet — and `never_ran` is a campaign that was cancelled, which "
+                 "nobody should go looking for results for at all."),
     }
 
 
@@ -6838,6 +7208,276 @@ def _incompleteness_warnings(conn) -> list[dict]:
 _CONTENT_FIELDS = ("title", "detail")
 
 
+def _rebuild_body_index(conn, campaign_id: str) -> dict:
+    """Re-chunk and re-embed a record's BODY from what is stored on the row.
+
+    One implementation, used by an edit that changed the text (D80) and by a deck attached to
+    a record that already existed (§12.4/D39). Two copies of "rebuild the index" would agree
+    on the day they were written and drift by the next item — which is the failure this
+    codebase names most often.
+
+    Commentary is a different layer and is never rebuilt here: it is not derived from the row
+    columns, and its chunks carry an author and an anchor that nothing else can reconstruct.
+    """
+    record = store.get_campaign(conn, campaign_id)
+    summary = "\n\n".join(p for p in (record["title"], record.get("detail")) if p)
+    units = (record.get("deck_text") or "").split("\n\n")
+    texts = chunking.pack(([summary] if summary else []) + [u for u in units if u.strip()])
+
+    old_ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM campaign_chunks WHERE campaign_id = ? AND kind = 'body'",
+        (campaign_id,)).fetchall()]
+    vectorstore.delete_many(conn, old_ids)
+    store.forget_vector_models(conn, old_ids)
+    conn.execute("DELETE FROM campaign_chunks WHERE campaign_id = ? AND kind = 'body'",
+                 (campaign_id,))
+    conn.commit()
+    if not texts:
+        store.mark_embedded(conn, campaign_id, False)
+        return {"chunks": 0, "embedded": 0}
+
+    new_ids = store.insert_chunks(conn, campaign_id, texts)
+    embedded = 0
+    for chunk_id, text in zip(new_ids, texts):
+        try:
+            _add_vector(conn, chunk_id, embedding.embed(text))
+            store.set_chunk_embedded(conn, chunk_id)
+            embedded += 1
+        except Exception:                      # noqa: BLE001
+            # Partial state is a designed outcome here as everywhere else (§2.1): the row is
+            # correct, the index is behind, and `finish_indexing` closes it.
+            break
+    store.mark_embedded(conn, campaign_id, embedded == len(texts))
+    return {"chunks": len(texts), "embedded": embedded}
+
+
+def _reindex(conn, campaign_id: str, *, commentary: list) -> dict:
+    """The body, plus commentary chunks that arrived with a newly attached deck (§12.4/D39).
+
+    The commentary half is `ingest_campaign`'s, kept in the same shape: one chunk per comment,
+    never merged, each keeping its author and anchor — two notes packed together would share
+    one attribution, and the anchor is half of what makes a comment worth keeping.
+    """
+    built = _rebuild_body_index(conn, campaign_id)
+    embedded = built["embedded"]
+    for item in commentary:
+        source = {k: item.get(k) for k in
+                  ("kind", "author", "date", "anchor", "page", "slide", "reply_to")}
+        source = {k: v for k, v in source.items() if v is not None}
+        pieces = chunking.pack([item["text"]])
+        ids = store.insert_chunks(conn, campaign_id, pieces, kind="commentary",
+                                  sources=[source] * len(pieces))
+        for chunk_id, text in zip(ids, pieces):
+            try:
+                _add_vector(conn, chunk_id, embedding.embed(text))
+                store.set_chunk_embedded(conn, chunk_id)
+                embedded += 1
+            except Exception:                  # noqa: BLE001
+                break
+    return {"chunks": built["chunks"] + len(commentary), "embedded": embedded}
+
+
+def update_asset(conn, *, asset_id: str, phase: str, why: str, said_by: str) -> dict:
+    """Correct an asset's phase (§12.4/D123).
+
+    `phase` is what an image IS evidence of — briefed creative, or what actually ran — and
+    §9.1 says everything falls out of that: the reuse check, the execution comparison, which
+    corpus a match is drawn from. A model that guessed `proposed` on fourteen event
+    photographs had produced an unrepairable record, because nothing could set it afterwards.
+
+    It takes a reason and a person, like every other consequential write here: changing this
+    changes what a past judgment's evidence MEANT, and "somebody decided these were the
+    delivered shots" is the part a reader needs six months later.
+    """
+    who = identity.person(said_by, field="said_by")
+    if not (why or "").strip():
+        raise ValueError(
+            "`why` is required: this changes what the image is evidence OF — briefed creative "
+            "or what actually ran — and every reuse check and execution comparison reads it. "
+            "A correction nobody can account for later is one nobody can trust.")
+    phase = enums.normalise(phase, field="phase", valid=store.VALID_ASSET_PHASES,
+                            allow_none=False)
+
+    before = store.get_asset(conn, asset_id)
+    if not before:
+        raise ValueError(f"{asset_id!r} is not an asset on file.")
+    # The account DERIVED before anything is written. `record_authorship` ran after the phase
+    # had already been committed, so an identity failure left the correction made and nobody's
+    # name against it — a changed reading of what an image is evidence of, with no account of
+    # who changed it, which is the one thing §11.1 exists to prevent. Deriving it first turns
+    # that into a refusal: the asset stays as it was and the caller is told why. This is a
+    # read with no side effects, and `record_authorship` still derives its own, so there is
+    # one implementation of who-is-speaking rather than a second copy here.
+    identity.who_said_it(on_behalf_of=who)
+    if not store.set_asset_phase(conn, asset_id, phase):
+        raise ValueError(f"{asset_id!r} could not be updated.")
+    # §11.1: the account beside the name, on a write that changes what evidence means — and
+    # WITH the reason. `why` was required, returned in the response, and stored nowhere: the
+    # docstring above calls it "the part a reader needs six months later" and it was lost the
+    # moment the call returned. A required argument the product throws away is worse than no
+    # argument, because the caller believes they have recorded something.
+    store.record_authorship(conn, subject_kind="asset", subject_key=asset_id,
+                            on_behalf_of=who, note=why.strip())
+    return {
+        "asset_id": asset_id, "phase": phase, "was": before["phase"],
+        "why": why.strip(), "said_by": who, "basis": "stated",
+        "what_it_means": (
+            f"This image now counts as {phase!r} rather than {before['phase']!r}. "
+            + ("It is what RAN, so it is evidence for the execution comparison and is "
+               "searched as delivered creative."
+               if phase == "delivered" else
+               "It is BRIEFED creative, so it is what execution is compared against rather "
+               "than evidence of what happened.")
+            + " Judgments saved before this correction were made against the old reading."),
+    }
+
+
+def attach_deck(conn, *, campaign_id: str, asset_ref: dict) -> dict:
+    """Attach a deck to a record that already exists (§12.4/D39).
+
+    **The gap this fills is not a convenience.** `update_campaign` takes no `asset_ref` and
+    `upload_image_asset` takes an image, so a record whose `commentary_checked` is false could
+    only gain its comments by being UPLOADED AGAIN AS A DUPLICATE — which is the offer §5.2
+    refused in writing, and D51's gap was blocked behind it because the only remedy available
+    was the thing the product tells people not to do.
+
+    It was found by 5.2's own test that every offered action must name arguments its tool
+    accepts: the obvious offer could not be made, because there was no tool to make it with.
+
+    REPLACING a deck is not what this does. A record that already has one gets a new version
+    through §6.3's supersession, which keeps both — silently swapping the text would throw
+    away what every saved judgment was made against, and a quote verified against the old
+    deck would then fail against a record that never said it.
+    """
+    record = store.get_campaign(conn, campaign_id)
+    if not record:
+        return {"error": f"campaign {campaign_id} not found"}
+    if (record.get("deck_text") or "").strip() or record.get("asset_path"):
+        raise ValueError(
+            f"{record['title']!r} already has a deck. Attaching another would replace the "
+            f"text every saved judgment about this record was made against, and a quote "
+            f"verified against the old one would then fail against a record that never said "
+            f"it. To record a NEW version, upload it and mark it as superseding this one "
+            f"(`supersedes={campaign_id!r}`), which keeps both.")
+
+    path, warnings = _resolve_asset(asset_ref)
+    if not path:
+        raise ValueError(
+            "No readable file reached the server. `asset_ref` takes a path this machine can "
+            "open, or the bytes themselves — see `upload_campaign` for the shapes it accepts.")
+
+    # EXTRACTED BEFORE ANYTHING IS KEPT OR WRITTEN. The first version copied the file into
+    # the asset directory first, so a corrupt .pptx raised out of `extract_units` having
+    # already left an orphan behind, and — worse — a file this product cannot read at all
+    # (`notes.txt`, a `.png`) was written onto the row as `asset_path` with an empty
+    # `deck_text`. That record then had "a deck" for every purpose: the refusal above fired
+    # on the next attempt, `commentary_never_read` still counted it, and the only remedy the
+    # product offered was one it now rejected. A record you cannot repair is worse than one
+    # that never got its deck.
+    commentary, commentary_checked = [], False
+    try:
+        commentary, extra = extract.extract_commentary(path)
+        warnings += extra
+        commentary_checked = extract.guess_mime(path.name) in (config.PPTX_MIME,
+                                                               "application/pdf")
+    except Exception as exc:              # noqa: BLE001
+        warnings.append(notices.notice(
+            "commentary_unreadable",
+            detail=f"comments and notes could not be read ({exc}); the deck itself was "
+                   f"attached normally"))
+    try:
+        units, extra = extract.extract_units(path)
+    except Exception as exc:              # noqa: BLE001
+        raise ValueError(
+            f"{path.name!r} could not be read as a deck ({exc}), so nothing was attached and "
+            f"{record['title']!r} is exactly as it was. A zero-byte or truncated file reads "
+            f"like this. Attaching it anyway would leave the record holding an unreadable "
+            f"file and refusing the real deck afterwards.") from exc
+    warnings += extra
+    deck_text = "\n\n".join(units)
+
+    if not deck_text.strip() and not commentary:
+        raise ValueError(
+            f"Nothing could be read out of {path.name!r} — no text and no comments — so "
+            f"nothing was attached and {record['title']!r} is exactly as it was. This "
+            f"product reads .pptx, .pdf, .docx and plain text as decks; an image belongs on "
+            f"`upload_image_asset`. Attaching a file it cannot read would mark the record as "
+            f"having a deck, which refuses the real one when it turns up.")
+
+    stored_path = _keep_asset(path)
+    # The row's own condition decides, not the check at the top of this function: two attaches
+    # racing both passed that check and the second overwrote the first's text while the first's
+    # comments stayed. False here means somebody else got there in between.
+    if not store.attach_deck_to_campaign(conn, campaign_id, deck_text=deck_text,
+                                         asset_path=stored_path,
+                                         commentary_checked=commentary_checked):
+        (config.ASSET_DIR / stored_path).unlink(missing_ok=True)
+        raise ValueError(
+            f"{record['title']!r} gained a deck while this one was being read, so nothing "
+            f"was attached — two decks on one record would leave its text saying one thing "
+            f"and its comments remarking on another. To record this one as a NEW version, "
+            f"upload it with `supersedes={campaign_id!r}`.")
+    # Re-chunked and re-embedded through the SAME path an edit takes, because a deck attached
+    # and not indexed is a file on disk: the point of attaching it is that the record can then
+    # be found by what the deck says.
+    indexed = _reindex(conn, campaign_id, commentary=commentary)
+
+    # §9.3, and the same rule the EDIT path applies: a deck that arrives is a deck whose
+    # promises this library has not read. Omitted here, a record repaired exactly as
+    # `commentary_never_read` recommends had no commitments at all, so `check_commitments`
+    # and the briefed half of `compare_execution` read empty on the records the product had
+    # just told somebody to fix. Campaigns only — brand guidelines are full of bulleted lists
+    # and none of them is a promise this campaign made.
+    promised = None
+    if record.get("record_type") in learning.CHECKABLE_RECORDS:
+        commitments.extract(conn, campaign_id=campaign_id, text="\n".join(
+            filter(None, [record.get("detail"), deck_text])))
+        promised = commitments.summary_for(conn, campaign_id)
+    # §9.1: the images inside the deck, through `ingest_campaign`'s own helper rather than a
+    # second copy of it. Without this the briefed side of every execution comparison was empty
+    # on an attached deck, which is the half of Phase 9 that says what was MEANT to run.
+    found = _index_deck_images(conn, campaign_id, path,
+                               deadline=time.monotonic() + config.TOOL_TIME_BUDGET_SECONDS)
+    warnings += found["warnings"]
+
+    out = {
+        "campaign_id": campaign_id, "title": record["title"],
+        "commentary_checked": commentary_checked,
+        "commentary_found": len(commentary),
+        "image_assets": found["image_assets"],
+        "images_checked": found["images_checked"],
+        "images_total": len(found["image_assets"]),
+        "images_embedded": found["images_embedded"],
+        "basis": "computed",
+        **indexed,
+        "what_it_means": (
+            f"The deck is now on {record['title']!r} — the same record, not a copy. Its text "
+            f"is searchable and "
+            + (f"{len(commentary)} comment(s) were read from it."
+               if commentary_checked else
+               "this file type carries no comments this product can read, which is recorded "
+               "so a later reader can tell that from a deck that had none.")),
+    }
+    if promised is not None:
+        out["promised"] = promised
+    # §2.1/D98: partial state is never silent, and this path was. A deck attached with two of
+    # nine sections embedded returned `chunks: 9, embedded: 2` into a field nothing tells the
+    # model to read, with no warning and no offer — so the observable result of a half-failed
+    # attach was a successful one, and the record stayed unfindable by the very text that was
+    # just attached to make it findable. The edit path raises this notice; so does ingest.
+    behind = indexed["chunks"] - indexed["embedded"]
+    if behind > 0:
+        warnings.append(notices.notice(
+            "chunk_not_embedded",
+            detail=f"{behind} of {indexed['chunks']} section(s) of the attached deck could "
+                   f"not be indexed, so searches will not match what they say.",
+            affects="This record will not come back in searches for the deck just attached.",
+            count=behind,
+            next_actions=actions.to_finish_indexing(campaign_id)))
+    out["warnings"] = notices.collapse(warnings)
+    return out
+
+
 def update_campaign(conn, campaign_id: str, **fields) -> dict:
     """`store.update_campaign`, plus §6.3's moment when a supersession is declared LATE.
 
@@ -6847,6 +7487,28 @@ def update_campaign(conn, campaign_id: str, **fields) -> dict:
     the better case, not the worse one: they have both judgments on screen because they just
     compared them.
     """
+    # §12.4/D15: an approval is somebody's sign-off, so it takes a name — "the client
+    # approved it" with nobody's name against it is an opinion this library holds and cannot
+    # attribute, which is the whole of §11.2. Taken as `said_by` and stored as `approval_by`,
+    # so the caller uses the same word everywhere else in this product does.
+    said_by = fields.pop("said_by", None)
+    if said_by is not None:
+        fields["approval_by"] = identity.person(said_by, field="said_by")
+    # And REFUSED without one. Validating `said_by` when it happens to arrive is not the same
+    # rule as requiring it, and the gap between the two is a row reading `approval: approved`
+    # with `approval_by` empty — which is this library asserting that somebody signed the deck
+    # off while being unable to say who. Every one of the four values is somebody's act; there
+    # is no value here meaning "nobody has decided yet", because that is the field being unset.
+    elif str(fields.get("approval") or "").strip():
+        raise ValueError(
+            "`approval` needs `said_by`: it is a person's sign-off on a returned deck, and "
+            "recording the verdict without the name leaves this library asserting that the "
+            "work was approved with no way to say by whom. Pass the person who gave it.")
+    # Dropped when nothing was passed, so a wire call that omits them does not write NULLs
+    # over what is already on the row.
+    for empty in [k for k, v in list(fields.items()) if v is None]:
+        fields.pop(empty)
+
     if not store.update_campaign(conn, campaign_id, **fields):
         return {"error": f"campaign {campaign_id} not found"}
     # §11.5: a tag carrying a person's name IS an opinion, however it arrived. Without this
@@ -7003,33 +7665,11 @@ def _reindex_if_content_changed(conn, campaign_id: str, fields: dict) -> dict:
             and record.get("record_type") in learning.CHECKABLE_RECORDS):
         commitments.extract(conn, campaign_id=campaign_id, text="\n".join(
             filter(None, [record.get("detail"), record.get("deck_text")])))
-    units = (record.get("deck_text") or "").split("\n\n")
-    texts = chunking.pack(([summary] if summary else []) + [u for u in units if u.strip()])
-    # Commentary is a different layer and was not edited — it is not rebuilt, and its chunks
-    # stay exactly where they were.
-    old_ids = [r["id"] for r in conn.execute(
-        "SELECT id FROM campaign_chunks WHERE campaign_id = ? AND kind = 'body'",
-        (campaign_id,)).fetchall()]
-    vectorstore.delete_many(conn, old_ids)
-    store.forget_vector_models(conn, old_ids)
-    conn.execute("DELETE FROM campaign_chunks WHERE campaign_id = ? AND kind = 'body'",
-                 (campaign_id,))
-    conn.commit()
-    if not texts:
-        store.mark_embedded(conn, campaign_id, False)
+    built = _rebuild_body_index(conn, campaign_id)
+    if not built["chunks"]:
         return {"reindexed": {"fields": changed, "chunks": 0, "embedded": 0}}
-    new_ids = store.insert_chunks(conn, campaign_id, texts)
-    embedded = 0
-    for chunk_id, text in zip(new_ids, texts):
-        try:
-            _add_vector(conn, chunk_id, embedding.embed(text))
-            store.set_chunk_embedded(conn, chunk_id)
-            embedded += 1
-        except Exception:                      # noqa: BLE001
-            # Partial state is a designed outcome here as everywhere else (§2.1): the row is
-            # correct, the index is behind, and `finish_indexing` closes it.
-            break
-    store.mark_embedded(conn, campaign_id, embedded == len(texts))
+    embedded = built["embedded"]
+    texts = [None] * built["chunks"]
     out = {"reindexed": {"fields": changed, "chunks": len(texts), "embedded": embedded}}
     if embedded == len(texts):
         return out
@@ -8364,12 +9004,26 @@ def compare_execution(conn, *, campaign_id: str) -> dict:
                 consent="ask", needs=["the photographs themselves"],
                 campaign_id=campaign_id, phase="delivered")]))
     if not briefed:
+        # §12.4/D123: this is also what a batch filed with the wrong PHASE looks like — every
+        # image on the record came in as `delivered`, so the comparison has nothing on the
+        # other side. Offered here rather than as a footer on every upload, because this is
+        # the moment the mistake becomes visible: a comparison with an empty half.
         return _nothing_to_compare(
             campaign_id, briefed, delivered,
             f"{len(delivered)} delivered image{'s' * (len(delivered) != 1)} on file and "
             f"nothing briefed to compare them against — there was never a brief to drift "
             f"from, so calling them all new would say more than is known.",
-            title=record["title"])
+            title=record["title"],
+            offers=actions.trim([actions.action(
+                "Correct the phase, if some of these are the briefed creative",
+                "update_asset",
+                why="Every image on this record is filed as what RAN. If some of them came "
+                    "out of the deck, they are the thing execution is compared against — and "
+                    "with all of them on one side there is nothing to compare.",
+                consent="ask",
+                needs=["which images are the briefed creative", "who is correcting it",
+                       "why"],
+                phase="proposed")]))
 
     prints = store.asset_fingerprints(conn, [a["id"] for a in briefed + delivered])
     # A hash with no structure in it matches every other image with no structure, at distance

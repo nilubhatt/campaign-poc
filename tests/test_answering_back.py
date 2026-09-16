@@ -448,8 +448,13 @@ def test_setting_aside_the_top_gap_moves_most_valuable(conn):
     # are appended after ranking and carry no offer — so `None` beside a non-empty list is
     # the honest answer here: nothing left is something this library can hand you an action
     # for. What must never differ is `most_valuable` and what the offer surface acts on.
-    assert after["most_valuable"] is None
-    assert all(g["code"] == "field_never_recorded" for g in after["gaps"]), after["gaps"]
+    # §12.4/D51 added `commentary_never_read`, which IS offerable and IS set-asideable — so
+    # the honest answer after setting the window gap aside is the next offerable gap rather
+    # than None. What must never differ is `most_valuable` and what the offer surface acts on,
+    # which is the assertion below.
+    assert after["most_valuable"] == "commentary_never_read"
+    assert all(g["code"] in ("field_never_recorded", "commentary_never_read")
+               for g in after["gaps"]), after["gaps"]
     assert core.top_gap(conn) == after["most_valuable"], (
         "the session-start offer would fire on a gap the ranking no longer shows"
     )

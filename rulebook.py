@@ -199,7 +199,10 @@ def _read(path: Path) -> dict:
 # judgment that weighs verified evidence more heavily depends on it. A customer mapping
 # "confirmed" onto it would make "the client confirmed it worked" outweigh a measured result,
 # silently, in every comparison this product makes.
-_MAY_DECLARE = ("statuses", "markets", "collections", "tags", "channels")
+# `campaign_types` is §12.4/D102's: the review asks for "the checklist for a campaign TYPE"
+# and market was standing in for it. It is declared for the same reason markets are — unfolded,
+# "Store Launch" and `store_launch` are two checklists, which is C16's failure.
+_MAY_DECLARE = ("statuses", "markets", "collections", "tags", "channels", "campaign_types")
 _MAY_NOT_DECLARE = {
     "tag_sources": ("`verified` and `stated` are this library's claim about EVIDENCE, not "
                     "words for a stage. `verified` means a metric_type='actual' row exists "

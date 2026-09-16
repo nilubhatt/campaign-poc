@@ -137,8 +137,16 @@ def test_a_complete_library_says_nothing_is_missing(conn):
     # §9.6 added a window to what "complete" means: a finished campaign that never says when
     # it ran cannot be checked against what else was happening, so a library where nothing
     # carries dates is not complete — it just has a gap nothing was reporting.
+    #
+    # §12.4/D51 added the other half of the same idea. A record whose deck was never read for
+    # comments is missing the client's own words, which is often the most useful precedent
+    # there is — so "complete" now means the deck was read, or somebody said there was not
+    # one. The fixture says the latter, which is true of a record built from a description.
     cid = _with_results(conn, "Colombia", market="LATAM")
     core.update_campaign(conn, campaign_id=cid, starts_on="2026-03-01", ends_on="2026-03-31")
+    core.answer_gap(conn, code="commentary_never_read", answer="not_applicable",
+                    note="These records were built from descriptions; there are no decks.",
+                    said_by="R. Vega")
 
     report = core.gaps(conn)
 
@@ -287,16 +295,46 @@ def test_the_market_offered_first_is_the_one_that_matters_most(conn):
     assert "LATAM" in gap["next_actions"][0]["label"]
 
 
-def test_a_gap_is_not_reported_when_nothing_can_close_it(conn):
+def test_a_gap_is_reported_once_something_can_close_it(conn):
     """`commentary_never_read` offered `upload_campaign` — which creates a SECOND record and
     fires `duplicate_title`. Item 5.2 refused exactly this offer, in writing, one commit
-    earlier: no tool attaches a deck to an existing record (D39). A gap whose only action
-    makes things worse is a complaint, which this item's own rule forbids."""
-    core.ingest_campaign(conn, title="Pasted in", deck_text="a brief, as text", confirm=True)
+    earlier: no tool attached a deck to an existing record (D39). A gap whose only action
+    makes things worse is a complaint, which this item's own rule forbids.
+
+    §12.4 built `attach_deck`, which is the action that works, so the gap is reported — and
+    it offers THAT rather than the duplicate. The test below this one said in as many words
+    that this would change the moment D39 landed.
+
+    The record here has NO deck, which is the population `attach_deck` can repair. Written
+    against a pasted-text brief, this test asserted the gap fired on a record the offered tool
+    REFUSES — the complaint it is written against, one level down. Review caught it."""
+    core.ingest_campaign(conn, title="A stub with no deck",
+                         detail="Somebody typed in what they remembered.", confirm=True)
 
     report = core.gaps(conn)
 
-    assert all(g["code"] != "commentary_never_read" for g in report["gaps"])
+    gap = next(g for g in report["gaps"] if g["code"] == "commentary_never_read")
+    offered = {a["tool"] for a in gap.get("next_actions", [])}
+    assert "attach_deck" in offered
+    assert "upload_campaign" not in offered
+    # The offer has to be one the tool ACCEPTS, not merely one whose name fits. This is §5.2's
+    # rule applied to the argument as well as the tool: `attach_deck` refuses a record that
+    # already has a deck, so a gap naming one is a gap nobody can close.
+    named = next(a for a in gap["next_actions"] if a["tool"] == "attach_deck")
+    target = store.get_campaign(conn, named["prefilled_args"]["campaign_id"])
+    assert not (target["deck_text"] or "").strip() and not target["asset_path"]
+
+
+def test_a_pasted_brief_is_not_reported_as_a_deck_nobody_read(conn):
+    """The gap says "no file was ever read". For a brief typed in as text that is false —
+    there was never a file — and `attach_deck`, the only remedy it offers, refuses the record
+    outright. Reported anyway, the product's advice on its own evidence was an action its own
+    tool rejects, which is the §5.2 complaint the whole of D51 exists to avoid."""
+    core.ingest_campaign(conn, title="Pasted in", deck_text="a brief, as text", confirm=True)
+
+    codes = {g["code"] for g in core.gaps(conn)["gaps"]}
+
+    assert "commentary_never_read" not in codes
 
 
 def test_the_fact_is_still_recorded_even_though_it_is_not_reported(conn):
@@ -538,4 +576,4 @@ def test_every_gap_code_is_reached_by_the_test_that_checks_them_all(conn, monkey
     codes = {g["code"] for g in core.gaps(conn)["gaps"]}
 
     assert codes == {"few_verified_outcomes", "market_without_outcomes", "partly_indexed",
-                     "no_window"}
+                     "no_window", "commentary_never_read"}
