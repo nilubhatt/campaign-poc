@@ -424,7 +424,7 @@ def _offers(correction_id: str, text: str, similar: Optional[dict]) -> list:
     return actions.trim(offers)
 
 
-def graduation(conn, correction_id: str) -> dict:
+def graduation(conn, correction_id: str, *, from_rulebook: Optional[str] = None) -> dict:
     """Whether this correction has earned a place. `learning`'s gate, not a second one."""
     import store
 
@@ -436,7 +436,11 @@ def graduation(conn, correction_id: str) -> dict:
         campaigns=learning.distinct_briefs(conn, store.correction_campaigns(conn,
                                                                             correction_id)),
         markets=entry["markets"], status=entry["status"],
-        expected_in=entry["expected_in"], confirmed_by=entry["confirmed_by"]),
+        expected_in=entry["expected_in"], confirmed_by=entry["confirmed_by"],
+        # §12.3/D108: a rule the CUSTOMER declared in their own rulebook, which does not have
+        # to be seen in three campaigns first. It goes through this gate rather than around
+        # it, so there is one route to `expected` and one place the conditions live.
+        from_rulebook=from_rulebook),
         "correction_id": correction_id}
     if gate["eligible"]:
         import replay
@@ -445,16 +449,25 @@ def graduation(conn, correction_id: str) -> dict:
     return gate
 
 
-def graduate(conn, correction_id: str, *, confirmed_by: str) -> dict:
+def graduate(conn, correction_id: str, *, confirmed_by: str,
+             from_rulebook: Optional[str] = None,
+             everywhere: bool = False) -> dict:
     """Promote a correction to standing. Requires the gate AND a person (§8.3's gate, §8.6's
-    subject)."""
+    subject).
+
+    `from_rulebook` names the customer's own rulebook when the rule came from there (§12.3).
+    It changes which CONDITIONS the gate applies — a declared rule does not have to have been
+    seen in three campaigns — and changes nothing else: the person is still required, the
+    replay entry is still written, and this is still the only function that promotes one.
+    """
     import store
 
     who = learning.require_a_person(confirmed_by)
-    gate = graduation(conn, correction_id)
+    gate = graduation(conn, correction_id, from_rulebook=from_rulebook)
     if not gate["eligible"]:
         raise ValueError(gate["what_it_means"])
-    store.graduate_correction(conn, correction_id, markets=gate["seen_in"], confirmed_by=who)
+    store.graduate_correction(conn, correction_id, markets=gate["seen_in"], confirmed_by=who,
+                              applies_everywhere=everywhere)
     # §11.1: the account beside the name, on the write that puts a rule in front of every
     # future brief in its markets.
     store.record_authorship(conn, subject_kind="correction", subject_key=correction_id,
@@ -561,8 +574,17 @@ def standing_for(conn, campaign_id: str, *, markets: Optional[list] = None) -> d
     for entry in store.corrections(conn):
         if entry["status"] != "expected":
             continue
-        if not wanted & {store.fold_market(m) for m in entry["expected_in"]}:
-            continue
+        # §12.3/D108: a correction the CUSTOMER declared applies EVERYWHERE, and that is a
+        # different fact from where a learned one graduated. `expected_in = []` means "no
+        # checklist" — so before this column existed, a house rule with no market list reached
+        # no judgment in any market while the tool reported it in force.
+        #
+        # A rule the library INFERRED is still expected only where the evidence put it. That
+        # is §8.3's anti-capture argument and nothing here touches it: only somebody who wrote
+        # the rule down can say "everywhere", because only they know.
+        if not entry.get("applies_everywhere"):
+            if not wanted & {store.fold_market(m) for m in entry["expected_in"]}:
+                continue
         standing.append({
             "correction_id": entry["id"],
             "text": entry["text"],

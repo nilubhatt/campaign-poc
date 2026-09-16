@@ -83,7 +83,8 @@ def fold_markets(raw_markets) -> list:
 
 
 def gate(*, name: str, noun: str, campaigns: int, markets: list, status: str,
-         expected_in=(), confirmed_by: Optional[str] = None) -> dict:
+         expected_in=(), confirmed_by: Optional[str] = None,
+         from_rulebook: Optional[str] = None) -> dict:
     """Whether a learned thing has earned a place on the checklist, and what is missing if not.
 
     Status is asked BEFORE the counts, and the order matters. Asked the other way round, a
@@ -94,6 +95,33 @@ def gate(*, name: str, noun: str, campaigns: int, markets: list, status: str,
     markets = fold_markets(markets)
     base = {"name": name, "campaigns": campaigns, "markets": len(markets),
             "seen_in": markets, "status": status, "confirmed_by": confirmed_by}
+
+    # D108: a rule that came out of the CUSTOMER'S OWN RULEBOOK is confirmed by definition —
+    # it is in a file they wrote. The ten standing corrections §12.3 ships have provenance (a
+    # deck and a slide) and no `campaign_id` in this library, so the counting gate refused
+    # them forever: seen in 0 campaigns, needs 3. The item built to give them "somewhere to
+    # live and grow" gave them somewhere they could be stored and never applied.
+    #
+    # This is a different question from the one the gate asks, not an exemption from it. The
+    # gate exists to stop the LIBRARY promoting a rule it INFERRED from one partner's house
+    # style — breadth has to be earned because the library is guessing. A customer writing a
+    # rule down is not guessing, and nothing about three campaigns in two markets makes their
+    # own rule truer.
+    #
+    # What it does NOT skip is `require_a_person`: a rule arriving from a file is not somebody
+    # confirming it, and §8.2 spent this loop's only human step on "who says so".
+    if from_rulebook and status not in ("expected", "ignored"):
+        return {**base, "eligible": True, "code": "declared_by_the_customer",
+                # WHY it skipped the counting, on the row. Without this the audit trail reads
+                # identically to a rule that met three campaigns in two markets, and nobody
+                # later can tell a customer's declaration from the library's inference.
+                "from_rulebook": from_rulebook,
+                "basis": "stated",
+                "what_it_means": (
+                    f"{name} comes from your own rulebook ({from_rulebook}), so it does not "
+                    f"have to be seen in three campaigns first — that test is for a rule this "
+                    f"library INFERRED, where breadth is what makes the guess safe. It still "
+                    f"needs a person's name against promoting it.")}
 
     if status == "expected":
         # Not a failure, and "not ready" would send the caller off to collect data it does not

@@ -1468,9 +1468,22 @@ def _say_the_standing_corrections(standing: dict) -> str:
     rules = "; ".join(f"[{c['correction_id']}] {c['text']}" for c in shown)
     more = (f" ({len(ranked) - len(shown)} more are in `standing_corrections`)"
             if len(ranked) > len(shown) else "")
-    return (f"`standing_corrections` are rules this client has repeated across markets and "
-            f"somebody has confirmed — learned from their own feedback, not written by them "
-            f"and not invented by the product. The most-repeated: {rules}.{more} Check the "
+    # WHERE THEY CAME FROM, and the two answers are different claims. This said "learned
+    # from their own feedback, NOT WRITTEN BY THEM" about all of them — false for every rule a
+    # customer declared in their own rulebook, which they did write and which recurred
+    # nowhere. `load_declared_corrections` is careful that a judgment citing one must not read
+    # identically to one citing an inferred rule, and the only place that survived was inside
+    # a provenance string, while this sentence asserted the inferred story over the top.
+    declared = [c for c in ranked if "(declared in rulebook " in (c.get("provenance") or "")]
+    where = ("rules this client WROTE DOWN in their own rulebook, plus rules this library "
+             "watched recur across their decks until somebody confirmed them"
+             if declared and len(declared) < len(ranked) else
+             "rules this client WROTE DOWN in their own rulebook"
+             if declared else
+             "rules this client has repeated across markets and somebody has confirmed — "
+             "learned from their own feedback, not written by them")
+    return (f"`standing_corrections` are {where}, and not invented by the product. Each "
+            f"carries its provenance, which says which it is. The most-repeated: {rules}.{more} Check the "
             f"brief against each one that applies. Where one is broken, that is a "
             f"`guardrail_breach` citing `precedent: {{correction_id, quote}}` with the quote "
             f"taken from the rule's own words; the server attaches the provenance so the "
@@ -4226,6 +4239,44 @@ def authorship_backfill_offer(conn) -> list[dict]:
         consent="do")]
 
 
+def declared_corrections_offer(conn) -> list[dict]:
+    """Offer to put the customer's own standing corrections in force (§12.3/D116).
+
+    A customer writes ten corrections into their rulebook, restarts, and nothing happens: the
+    rules sit in the file and the library never mentions them. That is D108's "stored and
+    never applied" arriving one level up — through nobody being told there was anything to do.
+    This product has hit that shape eight times, and §10.6's answer is that a capability
+    nobody offers is a capability nobody calls.
+
+    Silent once they are in force, because guidance that never stops appearing is guidance
+    nobody reads.
+    """
+    import corrections
+    import rulebook
+
+    try:
+        declared = rulebook.corrections()
+    except ValueError:
+        return []   # a broken rulebook is `health_check`'s finding, loudly, not an offer
+    if not declared:
+        return []
+    waiting = [entry for entry in declared if not corrections.find(conn, entry["text"])]
+    if not waiting:
+        return []
+    return [actions.action(
+        f"Put the {len(waiting)} standing correction(s) from your rulebook in force",
+        "load_rulebook_corrections",
+        why=f"Your rulebook ({rulebook.overlay() or rulebook.version()}) declares "
+            f"{len(waiting)} standing correction(s) that no brief is being judged against "
+            f"yet. They do not have to be seen in three campaigns first — that test is for a "
+            f"rule this library inferred — but somebody has to put their name to them.",
+        consent="ask",
+        # NOT prefilled. The one thing the server cannot work out is whose confirmation this
+        # is, and filling it in would put a rule in front of every future brief under a name
+        # nobody gave.
+        needs=["who is confirming these — ask, do not assume"])]
+
+
 def stale_answers_offer(conn) -> list[dict]:
     """Offer the override log when something that SILENCES this product has gone unreviewed.
 
@@ -5587,6 +5638,107 @@ def _markets_of(campaign: dict) -> list:
 # capability statement nobody can act on is a disclaimer.
 
 
+def load_declared_corrections(conn, *, confirmed_by: str) -> dict:
+    """Put the standing corrections from the customer's own rulebook in force (§12.3/D108).
+
+    **Why they need a route at all.** They arrive with provenance — a deck and a slide — and no
+    `campaign_id` in this library, so `learning.gate` refused them forever: seen in 0
+    campaigns, needs 3. The item built to give them "somewhere to live and grow" gave them
+    somewhere they could be STORED and never applied, which is invisible from the row itself.
+
+    The counting gate is for a rule this library INFERRED from what it watched recur — breadth
+    across markets is what makes that guess safe. A rule the customer wrote in their own file
+    is not a guess, and no number of campaigns makes their own rule truer. What it still needs
+    is a person's name against promoting it, because §8.2 spent this loop's only human step on
+    "who says so" and a file is not somebody.
+
+    Idempotent, because the rulebook is read at every start and a customer edits it: a loader
+    that appended would turn one rule into five over a week of restarts, each looking like
+    independent confirmation of the same thing.
+    """
+    import corrections
+    import rulebook
+
+    who = learning.require_a_person(confirmed_by)
+    try:
+        declared = rulebook.corrections()
+    except ValueError as bad:
+        return {"loaded": 0, "already": 0, "basis": "computed",
+                "what_it_means": f"No corrections were loaded: {bad}"}
+    if not declared:
+        return {"loaded": 0, "already": 0, "basis": "computed",
+                "what_it_means": (
+                    f"Your rulebook declares no standing corrections, so none were loaded. "
+                    f"They go in {rulebook.overlay_path()} under `corrections:`, each with "
+                    f"the rule itself and where it came from.")}
+
+    version = rulebook.overlay() or rulebook.version()
+    loaded, already, follow_on = [], 0, []
+    for entry in declared:
+        existing = corrections.find(conn, entry["text"])
+        if existing and existing["status"] == "expected":
+            already += 1
+            continue
+        if existing:
+            # ALREADY HEARD, NOT YET IN FORCE — the likeliest case for a house rule, and it
+            # failed silently. The library had recorded the same rule provisionally from a
+            # deck, the loader counted it "already on file" and never promoted it, and the
+            # offer went quiet because it used the same lookup. True sentence, rule never
+            # applied, nothing said.
+            correction_id = existing["correction_id"]
+        else:
+            correction_id = corrections.note(
+                conn, text=entry["text"], campaign_id=None,
+                # WHERE it came from, naming the file. A judgment citing this must not read
+                # identically to one citing a rule the library inferred and a person confirmed
+                # after three campaigns: those are different claims about how much is known.
+                provenance=f"{entry['provenance']} (declared in rulebook {version})",
+            )["correction_id"]
+        promoted = corrections.graduate(
+            conn, correction_id, confirmed_by=who, from_rulebook=version,
+            # No market list means EVERYWHERE, which is what a house rule is.
+            everywhere=not entry["markets"])
+        follow_on.extend(promoted.get("next_actions") or [])
+        loaded.append(correction_id)
+
+    # DRIFT: rules that stand under a rulebook that no longer declares them. A customer
+    # edits the wording or deletes a line, and the old rule keeps applying — eleven standing
+    # for ten declared, neither wrong on its face, and the offer goes quiet because everything
+    # declared is on file. Reported rather than retired automatically: a typo in a file must
+    # not silently withdraw a rule that saved judgments already cite.
+    declared_now = {entry["text"].casefold() for entry in declared}
+    stale = [row["text"] for row in corrections.all_of_them(conn)
+             if row.get("status") == "expected"
+             and row["text"].casefold() not in declared_now
+             and any("(declared in rulebook " in (sighting.get("provenance") or "")
+                     for sighting in corrections.sightings(conn, row["id"]))]
+
+    return {
+        "loaded": len(loaded), "already": already, "basis": "computed",
+        "rulebook": version, "confirmed_by": who,
+        **({"no_longer_declared": stale} if stale else {}),
+        # What promoting a rule offers next. Going around `corrections.graduate` dropped
+        # these silently, along with the replay entry it writes.
+        **({"next_actions": actions.trim(follow_on)} if follow_on else {}),
+        "what_it_means": (
+            f"{len(loaded)} standing correction(s) from your rulebook ({version}) are now in "
+            f"force, on {who}'s confirmation"
+            + (f"; {already} were already on file." if already else ".")
+            + (f" {len(stale)} rule(s) that came from a rulebook are still in force and are "
+               f"NO LONGER IN YOUR RULEBOOK — edited or deleted since they were loaded: "
+               f"{'; '.join(repr(t) for t in stale[:3])}"
+               + (f" and {len(stale) - 3} more" if len(stale) > 3 else "")
+               + ". They were not withdrawn automatically, because judgments already cite "
+                 "them and a typo in a file should not silently remove a rule. Retire each "
+                 "one you meant to drop."
+               if stale else "")
+            + " They did not go through the three-campaign gate: that test is for a rule this "
+              "library inferred from what it watched recur, and these are rules you wrote "
+              "down. Each carries your rulebook as its provenance, so a judgment citing one "
+              "says where it came from."),
+    }
+
+
 def readiness(conn) -> dict:
     """What this library can and cannot do yet, and the shortest path to more.
 
@@ -5755,6 +5907,7 @@ def readiness(conn) -> dict:
     set_aside = _ranked_gaps(conn).get("set_aside") or []
     offers = actions.trim(actions.offer_the_queue(waiting) + gaps_offer(conn)
                           + stale_answers_offer(conn)
+                          + declared_corrections_offer(conn)
                           + authorship_backfill_offer(conn))
     return {
         "stage": stage,

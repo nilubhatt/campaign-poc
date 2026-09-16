@@ -33,6 +33,8 @@ cp .weights-cache/open_clip_model.safetensors* dist/campaign-intelligence/models
 # this file, which is most of what the item is about. Without this copy every frozen install
 # read the buried one: edits to the visible file would do nothing, silently.
 cp rulebook.yaml dist/campaign-intelligence/rulebook.yaml
+# §12.3: the worked example, where an administrator can read it before writing their own.
+cp docs/example-rulebook.yaml dist/campaign-intelligence/example-rulebook.yaml
 
 os=$(uname -s | tr '[:upper:]' '[:lower:]'); arch=$(uname -m)
 out="campaign-intelligence-${os}-${arch}.tar.gz"

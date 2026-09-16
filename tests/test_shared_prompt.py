@@ -168,14 +168,21 @@ def test_the_procedure_is_not_so_long_that_it_displaces_the_evidence():
 
 def test_every_marketer_facing_enum_is_glossed_with_its_synonyms():
     """D32. §5.1 made the server forgiving about what a marketer types; the gloss is the
-    other half — a model that knows "live" and "in market" mean `in_flight` sends the right
-    value first time, and the forgiving layer goes back to being a safety net rather than the
-    primary path."""
+    other half — a model that knows "live" means `in_flight` sends the right value first time,
+    and the forgiving layer goes back to being a safety net rather than the primary path.
+
+    D37: the words are the PRODUCT's, so the gloss lost "in market" when `enums` did. One
+    customer's phrasing in the product's own model-facing text is the same decision
+    implemented twice, disagreeing — and this test asserted the copy rather than the source,
+    so it held the removed word in place. It reads the synonym table now, which is what the
+    gloss is a gloss OF."""
     import pathlib
     import re
 
+    import enums
+
     source = pathlib.Path(mcp_server.__file__).read_text()
-    for name, needed in (("Status", ("live", "in market", "finished", "wrapped")),
+    for name, needed in (("Status", ("live", "running", "finished", "wrapped")),
                          ("MetricType", ("forecast", "measured")),
                          ("RecordType", ("guidelines", "placeholder")),
                          ("TagSource", ("impression", "actual"))):
@@ -184,6 +191,21 @@ def test_every_marketer_facing_enum_is_glossed_with_its_synonyms():
         text = block.group(1).lower()
         for word in needed:
             assert word in text, f"{name} gloss does not mention {word!r}"
+
+    # D37, the direction that actually bit: a word the PRODUCT no longer knows must not still
+    # be taught by the gloss. `in_market` moved to the customer's rulebook and the gloss kept
+    # it — one decision implemented twice, disagreeing, with the copy a model reads first
+    # holding the removed word in place.
+    status_gloss = re.search(r'Status = _enum\([^)]*\)\n"""(.*?)"""', source, re.S).group(1)
+    for word in re.findall(r"[a-z_]+", status_gloss.lower()):
+        shaped = word.replace(" ", "_")
+        if shaped in ("proposed", "in_flight", "concluded"):
+            continue
+        if shaped in enums.STATUS_SYNONYMS or len(shaped) < 4:
+            continue
+        assert shaped not in ("in_market",), (
+            f"the Status gloss teaches {word!r}, which this product no longer knows"
+        )
 
 
 def test_the_instructions_say_a_normalised_value_should_be_spoken():

@@ -48,6 +48,10 @@ if os.path.exists("build_info.txt"):
 # to SEE this file, and §12.2's overlay goes next to it. A rulebook buried in the bundle is
 # one nobody can read, which is most of what the item was about.
 datas += [("rulebook.yaml", ".")]
+# §12.3: the worked example, beside it. "Shipped as an example/customer file" is the item's
+# own wording, and nothing shipped it — a customer who installed the built artefact had no
+# example at all, while the product's own comments told them to copy from one.
+datas += [("docs/example-rulebook.yaml", ".")]
 
 # Bundle sqlite-vec fully (its compiled extension is a binary + package data).
 for pkg in ("sqlite_vec",):

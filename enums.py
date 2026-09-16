@@ -120,10 +120,13 @@ STATUS_SYNONYMS = {
     "proposal": "proposed",
     "planned": "proposed",
     "upcoming": "proposed",
+    # D37: `in_market` is NOT here. It is one agency's phrasing, and a product that ships
+    # generic does not carry one customer's vocabulary in its own tables — the rulebook
+    # decision rules that out in as many words. It moved to `docs/example-rulebook.yaml`,
+    # where an agency that says it will find it in the file they are copying from.
     "live": "in_flight",
     "running": "in_flight",
     "active": "in_flight",
-    "in_market": "in_flight",
     "ongoing": "in_flight",
     "done": "concluded",
     "finished": "concluded",

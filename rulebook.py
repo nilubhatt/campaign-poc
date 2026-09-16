@@ -350,6 +350,72 @@ def _folded_word(word: str) -> str:
     return _re.sub(r"[\s_\-]+", " ", str(word or "").strip()).casefold()
 
 
+def _checked_corrections(loaded: dict, *, path: Path) -> list:
+    """Standing corrections the customer has declared (§12.3/D108).
+
+    A rulebook RULE and a standing CORRECTION are different things and this product keeps them
+    apart deliberately: a rule is something the customer wrote down and applies to every brief;
+    a correction is something the library watched RECUR until somebody confirmed it, and it
+    applies in the markets it was seen in. An agency arriving with this product has both — the
+    rules they have always had, and the ten things they find themselves saying on every deck.
+
+    `provenance` is required for the same reason `corrections.note` requires it: without it a
+    judgment citing one can say only "the library says so", which is the unfounded confident
+    claim this product is built against.
+    """
+    declared = loaded.get("corrections")
+    if declared is None:
+        return []
+    if not isinstance(declared, list):
+        raise ValueError(f"the rulebook at {path}: `corrections` must be a list, not a "
+                         f"{type(declared).__name__}.")
+    out, seen = [], set()
+    for position, entry in enumerate(declared, 1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"the rulebook at {path}: correction {position} is a "
+                             f"{type(entry).__name__}, not a mapping.")
+        text = " ".join(str(entry.get("text") or "").split())
+        provenance = " ".join(str(entry.get("provenance") or "").split())
+        if not text or not provenance:
+            raise ValueError(
+                f"the rulebook at {path}: correction {position} needs both the rule itself "
+                f"(`text`) and where it came from (`provenance`) — the deck and slide, or who "
+                f"asked for it. Without provenance a judgment citing it can say only \"the "
+                f"library says so\".")
+        if text.casefold() in seen:
+            raise ValueError(f"the rulebook at {path}: correction {position} repeats one "
+                             f"already declared: {text!r}.")
+        seen.add(text.casefold())
+        markets = entry.get("markets") or []
+        if not isinstance(markets, list) or not all(isinstance(m, str) for m in markets):
+            raise ValueError(f"the rulebook at {path}: correction {position} has a `markets` "
+                             f"that is not a list of strings.")
+        # The limits the WRITE enforces, checked here where the file is read. The loader
+        # appends "(declared in rulebook X)" to the provenance after this point, so the margin
+        # is left for it — without that, a provenance near the limit passed validation and was
+        # refused mid-loop by `corrections.note`, with earlier rules already committed and in
+        # force and the reply saying nothing about them. Every rerun then failed identically.
+        if len(text) > _MAX_CORRECTION_TEXT:
+            raise ValueError(
+                f"the rulebook at {path}: correction {position} is {len(text)} characters and "
+                f"the limit is {_MAX_CORRECTION_TEXT}. A standing correction is a rule "
+                f"somebody has to read on every judgment — if it needs a paragraph it is "
+                f"probably two rules.")
+        if len(provenance) > _MAX_CORRECTION_PROVENANCE:
+            raise ValueError(
+                f"the rulebook at {path}: correction {position} has {len(provenance)} "
+                f"characters of provenance and the limit is {_MAX_CORRECTION_PROVENANCE} "
+                f"(the rulebook's own name is added to it when it is loaded). Name the deck "
+                f"and the slide, not the conversation.")
+        out.append({"text": text, "provenance": provenance,
+                    # Empty means everywhere. A correction the library LEARNED is expected in
+                    # the markets it was seen in, because that is all the evidence supports; a
+                    # correction the customer declares is theirs to scope, and most of them
+                    # are house rules that hold everywhere.
+                    "markets": [m.strip() for m in markets if m.strip()]})
+    return out
+
+
 def _checked_scorecard(loaded: dict, *, path: Path) -> list:
     """The customer's scorecard criteria (D101).
 
@@ -478,7 +544,8 @@ def _checked(loaded: dict, *, path: Path, default_source: str = "product") -> di
             # D23: who to contact here. One line of free text: it goes into a remedy a person
             # reads, so validating its shape would be the product having opinions about the
             # customer's own support arrangements.
-            "support": " ".join(str(loaded.get("support") or "").split())}
+            "support": " ".join(str(loaded.get("support") or "").split()),
+            "corrections": _checked_corrections(loaded, path=path)}
 
 
 # D50. What a brief is expected to CARRY, as opposed to what a judgment must do. The rubric in
@@ -492,6 +559,12 @@ def _checked(loaded: dict, *, path: Path, default_source: str = "product") -> di
 # section is unread until a later item wires it up, which is how §11.7's disclosure shipped
 # with no call sites.
 _EXPECTED_REQUIRED = ("id", "input", "why")
+
+# What `corrections.note` will accept, checked where the FILE is read rather than discovered
+# halfway through writing. The provenance margin leaves room for the rulebook's own name,
+# which the loader appends.
+_MAX_CORRECTION_TEXT = 400
+_MAX_CORRECTION_PROVENANCE = 240
 
 
 def _checked_expectations(loaded: dict, *, path: Path) -> list:
@@ -583,7 +656,10 @@ def _layered(product: dict, overlay: dict) -> dict:
             # overlay that declares one replaces it, and one that does not keeps the
             # product's.
             "scorecard": overlay["scorecard"] or product["scorecard"],
-            "support": overlay["support"] or product["support"]}
+            "support": overlay["support"] or product["support"],
+            # The customer's, replacing rather than adding to the product's — which ships
+            # none, and would have no business shipping somebody's house rules.
+            "corrections": overlay["corrections"] or product["corrections"]}
 
 
 @functools.lru_cache(maxsize=1)
@@ -689,6 +765,11 @@ def region_of(market: str) -> Optional[str]:
     """
     name = canonical("markets", market)
     return (vocabulary("markets").get(name) or {}).get("region") if name else None
+
+
+def corrections() -> list:
+    """Standing corrections the customer declared (§12.3/D108). Empty unless they wrote some."""
+    return list(load()["corrections"])
 
 
 def support() -> Optional[str]:

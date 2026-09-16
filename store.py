@@ -531,6 +531,16 @@ CREATE TABLE IF NOT EXISTS corrections (
     -- went.
     merged_into   TEXT,
     expected_in   TEXT NOT NULL DEFAULT '[]',  -- markets where it graduated; [] = no checklist
+    -- §12.3/D108: a correction the CUSTOMER declared in their own rulebook applies in EVERY
+    -- market rather than in the ones it was seen in. `expected_in = []` already means "no
+    -- checklist", so an empty market list could not carry "everywhere" — nine of the ten
+    -- corrections the example ships reached no judgment anywhere while the tool reported them
+    -- in force, which is the stored-and-never-applied failure D108 exists to remove.
+    --
+    -- A column rather than a sentinel in `expected_in`, because the two facts are different:
+    -- a LEARNED rule is expected where the evidence put it, which is §8.3's whole anti-capture
+    -- argument, and only somebody who wrote the rule down can say "everywhere".
+    applies_everywhere INTEGER NOT NULL DEFAULT 0,
     confirmed_by  TEXT,
     confirmed_at  REAL,
     retired_at    REAL,
@@ -3933,14 +3943,16 @@ def touch_correction(conn, correction_id: str, *, campaign_id: Optional[str] = N
     conn.commit()
 
 
-def graduate_correction(conn, correction_id: str, *, markets: list, confirmed_by: str) -> None:
+def graduate_correction(conn, correction_id: str, *, markets: list, confirmed_by: str,
+                        applies_everywhere: bool = False) -> None:
     # COALESCE, for the reason `graduate_metric` gives: the first confirmation is when this
     # became a rule, and rewriting it makes §8.7 assert that a judgment which CITES the rule
     # was never checked against it.
     conn.execute("UPDATE corrections SET status = 'expected', expected_in = ?, "
                  "confirmed_by = ?, confirmed_at = COALESCE(confirmed_at, ?), "
-                 "retired_at = NULL, offered = 1 WHERE id = ?",
-                 (json.dumps(sorted(markets)), confirmed_by, _now(), correction_id))
+                 "retired_at = NULL, offered = 1, applies_everywhere = ? WHERE id = ?",
+                 (json.dumps(sorted(markets)), confirmed_by, _now(),
+                  1 if applies_everywhere else 0, correction_id))
     conn.commit()
 
 

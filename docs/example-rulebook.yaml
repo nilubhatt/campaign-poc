@@ -1,0 +1,278 @@
+# An EXAMPLE customer rulebook (§12.3) — every shape this file can carry, worked through.
+#
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# WHAT THIS IS, AND WHAT IT IS NOT
+#
+# It is a worked example of the format, using an invented agency so that every section has
+# something real-looking in it. The rules below are ILLUSTRATIVE. They are not any client's
+# actual guidelines, and nothing in this product treats them as anybody's.
+#
+# It is NOT the product's default. Install this product and write nothing, and you have no
+# rules, no vocabulary and no scorecard — the product stays generic, which is the decision
+# this whole item rests on. Copy this file, replace its contents with your own, and put it at
+# the path `campaign-intelligence init` prints:
+#
+#     <data directory>/rulebook.yaml
+#
+# Then restart the server. The rules are read once per process, so that a judgment cannot
+# depend on when in a session it was made.
+#
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# WHY EACH SECTION EXISTS
+#
+#   rules       Put in front of EVERY judgment, in full, whatever the brief is about. Not
+#               retrieved by similarity — that was the old arrangement, and a rule that
+#               arrives only when the brief resembles it is not a rule. A finding cites one by
+#               its `id` and quotes it as written.
+#   expects     What a brief must CARRY. `gaps()` reports one that nothing on file supplies.
+#   vocabulary  Your words for things this product already has: stages, markets, tags,
+#               collections, channels. A SYNONYM, not a rewrite — your records keep the words
+#               you typed, and the declaration says which of them mean the same thing, so it
+#               reaches records written years before you wrote it.
+#   scorecard   What you actually judge against. It reaches the model with the rules.
+#   support     Who IT is here, so "ask whoever installed this" can name somebody.
+#
+# ─────────────────────────────────────────────────────────────────────────────────────────
+
+# Stamped onto every judgment made under it, so two judgments made under different rules can
+# be told apart years later. CHANGE THE RULES, CHANGE THE VERSION — a stamp that can stay
+# still while the rules move is worth nothing. Quote it: `1.10` unquoted is a YAML float and
+# becomes `1.1`.
+version: "example-1"
+
+describes: >-
+  An illustrative rulebook for a fictional apparel agency, shipped with the product as a
+  worked example of the format. Nothing here is any real client's guidance.
+
+support: "Your IT contact — replace this with a name, a channel or an email"
+
+# ─── guardrails ──────────────────────────────────────────────────────────────────────────
+#
+# `severity` is `blocking` or `should_fix`. There is no `note`: a breach of a rule that
+# changes nothing is not a rule, and the finding validator refuses a guardrail breach below
+# `should_fix`.
+#
+# `watch_for` is optional and is what makes a rule CHECKABLE by the server rather than only by
+# the model reading it. The words a brief would contain if it breached the rule; the server
+# reads the brief, finds one, and attaches the sentence it found it in. Whether that is a real
+# breach is still a judgment — but it is a judgment made against a quotation.
+rules:
+  - id: no-ai-imagery
+    rule: >-
+      Never use AI-generated imagery in client-facing creative. Concept boards shown only
+      internally are fine and should say so on the slide.
+    severity: blocking
+    why: >-
+      Two clients have asked in writing, and our audience reacts badly to it in comments.
+    watch_for: ['midjourney', 'ai-generated', 'generative imagery', 'ai imagery']
+
+  - id: creator-exclusivity
+    rule: >-
+      A creator who has posted for a direct competitor within 90 days is not booked, however
+      well they perform.
+    severity: blocking
+    why: >-
+      It reads as rented enthusiasm, and we have had a client find the competitor post
+      themselves before we did.
+    watch_for: ['exclusivity waived', 'no exclusivity', 'competitor overlap']
+
+  - id: one-colourway-per-creator
+    rule: >-
+      Seed one colourway per creator. If a brief seeds several, say which is the hero and
+      why.
+    severity: should_fix
+    why: >-
+      Multi-colourway seeding is what made the Peru grid unreadable, and nothing in the
+      results could tell us which product drove the lift.
+    watch_for: ['full colourway run', 'all colourways', 'every colourway']
+
+  - id: posting-window-agreed
+    rule: >-
+      Every seeded asset carries a posting date agreed with the creator before the assets
+      ship, not a window we hope for.
+    severity: should_fix
+    why: >-
+      Unagreed windows are how a launch ends up with half its posts after the sale ended.
+
+# ─── what a brief must carry ─────────────────────────────────────────────────────────────
+#
+# `looks_like` is REQUIRED: it is the words that would show the input HAD arrived, and without
+# it the gap can be reported forever and never closed — which is a gap everybody learns to
+# ignore.
+expects:
+  - id: kpi-workbook
+    input: A KPI workbook with the targets for this activation
+    why: >-
+      Nothing can be reconciled later against a brief that never said what it was for, and
+      "did it work" is the question the whole library exists to answer.
+    looks_like: ['kpi', 'workbook', 'targets', 'success metrics']
+
+  - id: creator-roster
+    input: The creator roster, with handles and agreed rates
+    why: >-
+      A roster that arrives after booking cannot be checked against the exclusivity rule
+      while there is still time to change it.
+    looks_like: ['roster', 'creator list', 'talent list', 'handles']
+
+# ─── your words ──────────────────────────────────────────────────────────────────────────
+#
+# Each entry is a name this product knows, then the other spellings YOU use for it. Resolved
+# when two values are compared, never written into your records: your words stay in the row.
+vocabulary:
+
+  # Stages. The product has exactly three — `proposed`, `in_flight`, `concluded` — because
+  # every gap check and reconciliation is written against them. You can add your own words
+  # for them; you cannot add a fourth stage.
+  statuses:
+    in_flight: ['in market', 'live now', 'in the wild']
+    concluded: ['shipped', 'wrapped', 'out the door']
+    proposed: ['on the slate', 'pitched']
+
+  # Markets, with the region each belongs to. A region is a GROUPING of markets, not a market
+  # — declared here, a campaign in Peru whose region is LATAM counts as ONE market rather than
+  # two, which matters because "seen in at least two markets" is what stops one partner's
+  # house style becoming everybody's standing requirement.
+  # NOTE the shape: these are MARKETS, and `region` names the grouping each belongs to. Do
+  # not also declare a region as a market — `LATAM` here is a region only. A name declared as
+  # both is stripped from the market list (it is a grouping, not a place), so a campaign
+  # recorded in it would be invisible to every market-scoped check.
+  markets:
+    Peru:
+      also: ['perú']
+      region: LATAM
+    Mexico:
+      also: ['mx', 'méxico']
+      region: LATAM
+    Colombia:
+      region: LATAM
+    Indonesia:
+      also: ['id']
+      region: APAC
+    Vietnam:
+      region: APAC
+
+  # Collections — your name for a family of market or version variants of one creative idea.
+  collections:
+    spring-drop-2026: ['spring drop', 'ss26', 'ss26 drop']
+
+  # Your words for the product's own reaction and performance words. You may give them other
+  # spellings; you may not point one of the product's words at a different one of its words,
+  # because that would change which axis an opinion lands on and could invert it.
+  tags:
+    not_liked: ['went down badly', 'client pushed back']
+    liked: ['client loved it', 'went down well']
+    underperformed: ['missed the number', 'short of target']
+    performed_well: ['beat the number', 'over-delivered']
+
+  # The channels a brief is measured against. Declaring this REPLACES the product's 360
+  # checklist with yours, so a brief is never reported as missing a channel you do not use.
+  # It stays fixed per rulebook version, so two people judging the same brief cannot disagree
+  # about what it covers.
+  channels:
+    paid_social: ['paid social', 'meta', 'tiktok ads']
+    organic_social: ['organic social', 'brand handles']
+    influencer: ['influencer', 'creators', 'seeding']
+    retail_media: ['retail media', 'onsite retail']
+    ctv: ['ctv', 'connected tv']
+    ooh: ['ooh', 'out-of-home']
+    crm: ['crm', 'email', 'lifecycle']
+
+# ─── what you judge against ──────────────────────────────────────────────────────────────
+#
+# Reaches the model with the rules, on every judgment. Each criterion needs a `name` and what
+# it `asks` — a name alone is a heading, and the model would have to invent what it means,
+# which is the variance a shared procedure exists to remove.
+scorecard:
+  - name: Brand fit
+    asks: >-
+      Does this sound like us, in the words a customer would notice — or like a brief that
+      could have been written for anyone?
+
+  - name: Creator quality
+    asks: >-
+      Are the creators ones we would book again, and does the brief say why each is on the
+      list rather than only that they are?
+
+  - name: Commercial case
+    asks: >-
+      Is the spend justified by the goal stated in the brief, and is the goal one we can
+      measure afterwards?
+
+  - name: Evidence
+    asks: >-
+      Does this brief rest on something we have actually seen work, and does it say which
+      campaign?
+
+  - name: Risk
+    asks: >-
+      What in here would embarrass the client if it ran exactly as written?
+
+  - name: Measurement
+    asks: >-
+      Will we be able to tell, three months from now, whether this worked? Against what?
+
+# ─── standing corrections ────────────────────────────────────────────────────────────────
+#
+# A different thing from a rule above, and the product keeps them apart on purpose:
+#
+#   a RULE        is something you wrote down. It applies to every brief, everywhere, and a
+#                 finding cites it by `id`.
+#   a CORRECTION  is something the library watched RECUR — the same note coming back on deck
+#                 after deck — until somebody confirmed it was a rule rather than a one-off.
+#                 It applies in the markets it was seen in, and it carries the provenance of
+#                 where it came from.
+#
+# An agency arriving with this product has both: the rules they have always had, and the ten
+# things they find themselves writing on every deck. The second kind normally has to earn its
+# place — seen in three campaigns across two markets — because the library is GUESSING that a
+# recurring note is a rule. A correction you declare here is not a guess, so it skips that
+# test; it still needs a person's name against putting it in force.
+#
+# `provenance` is required. Without it a judgment citing the correction can say only "the
+# library says so", which is the unfounded confident claim this product is built against.
+# `markets` is optional: empty means everywhere, which is right for most house rules.
+corrections:
+  - text: Logo never sits on a photographic background without the scrim behind it.
+    provenance: Brand guidelines v4, slide 12
+
+  - text: >-
+      Creator captions say the product name in the first line, not only in the hashtags.
+    provenance: Client feedback, Q2 review deck, slide 8
+
+  - text: >-
+      Product shots show the garment on a person, never flat-laid, for anything below the
+      fold.
+    provenance: Client feedback, Q2 review deck, slide 9
+
+  - text: >-
+      Discounts are never the headline of a launch asset. They can appear in the body.
+    provenance: Brand guidelines v4, slide 21
+
+  - text: >-
+      Size range shown across a set of assets covers at least XS to 3X, not one body type
+      repeated.
+    provenance: Client email, 4 March, "on the Lima grid"
+
+  - text: >-
+      Music on paid social is licensed for paid use before the asset ships, not after it is
+      approved.
+    provenance: Legal note attached to the Mexico deck, slide 2
+
+  - text: >-
+      A creator's first post goes up before any paid amplification of it starts.
+    provenance: Partner feedback, creator programme retro, slide 5
+
+  - text: >-
+      Landing pages for a launch open on the product, not on an editorial story.
+    provenance: Client feedback, Q3 review deck, slide 4
+
+  - text: >-
+      Every asset naming a price carries the currency, including in markets where it is
+      obvious to us.
+    provenance: Client email, 19 May
+    markets: ['LATAM']
+
+  - text: >-
+      Community replies in the first 48 hours are handled by the agency, not the client's
+      in-house team.
+    provenance: Ways of working, kickoff deck, slide 17

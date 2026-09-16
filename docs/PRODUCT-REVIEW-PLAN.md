@@ -2946,10 +2946,34 @@ with nothing to notice because each half works perfectly alone:
       counted as TWO markets and satisfied §8.3's "seen in at least two markets" gate alone.
       Only where the rulebook declares the region: undeclared, `region` means a continent on
       one record and a country on the next, which is why the row was a question.
-- [ ] **12.3 Fabletics example config** — the full transcribed content (guardrails, tag
+- [~] **12.3 Fabletics example config** — the full transcribed content (guardrails, tag
       taxonomy, influencer criteria + red flags, partner feedback, 360 checklist, scorecard)
       and the ten standing corrections with provenance, shipped as an **example/customer**
       file, not the product default.
+      **Split, because the two halves need different things.** The FORMAT half is done:
+      `docs/example-rulebook.yaml` is a worked example of every shape the file can carry,
+      shipped beside the binary, named by `init` and by the product's own rulebook, and
+      loaded by the tests so it cannot rot silently. It carries an invented agency and says
+      so in its own header — the rules in it are illustrative and the product treats them as
+      nobody's.
+      The CONTENT half is outstanding and is an input only the customer has: the transcription
+      lives in the 11 Sep review document, not in this repository, and inventing somebody's
+      guidelines would be exactly the fabrication this project exists to prevent. Tracked as
+      an awaiting-input row rather than a deferral, because the next move is theirs.
+      *Closes D37 and D108.* D37 moved "in market" out of the product's own synonym table —
+      one agency's phrasing does not belong in a product that ships generic — and review
+      caught the sweep half done, with the model-facing gloss still teaching the word `enums`
+      had dropped.
+      **D108 was the sharp one.** A correction declared in a customer's rulebook arrives with
+      provenance and no `campaign_id`, so the counting gate refused it forever: seen in 0
+      campaigns, needs 3. That gate is for a rule the library INFERRED, where breadth is what
+      makes the guess safe; a rule somebody wrote down is not a guess, and no number of
+      campaigns makes their own rule truer. It skips the counting and not the person.
+      **And then shipped D108's own failure as its fix:** `expected_in = []` already meant "no
+      checklist", so nine of the ten declared corrections reached no judgment in any market
+      while the tool reported them in force — stored and never applied, which is D108's own
+      sentence. Review found it; a column carries "everywhere" now, and the test that should
+      have caught it had asserted a dict that is always truthy.
 - [ ] **12.4 Schema gaps named in the review** — no field today for `asset_link`,
       `approval_notes`, or market-scoped feedback patterns. *Decide explicitly whether the
       tracked client comments 2.5 now ingests ARE the `approval_notes` gap — in most agency

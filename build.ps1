@@ -33,6 +33,8 @@ Copy-Item .weights-cache\open_clip_model.safetensors* dist\campaign-intelligence
 # file, which is most of what the item is about. Without this copy every frozen install reads
 # the buried one, and edits to the visible file would do nothing, silently.
 Copy-Item rulebook.yaml dist\campaign-intelligence\rulebook.yaml
+# Section 12.3: the worked example, where an administrator can read it before writing theirs.
+Copy-Item docs\example-rulebook.yaml dist\campaign-intelligence\example-rulebook.yaml
 
 $zip = "campaign-intelligence-windows-amd64.zip"
 if (Test-Path $zip) { Remove-Item $zip }

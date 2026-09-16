@@ -124,8 +124,13 @@ def _enum(*values: str):
 
 # D32: glossed, so the model maps MEANING before the server maps shape. §5.1 made the server
 # forgiving about what a marketer types; the gloss is the other half — a model that knows
-# "live" and "in market" mean `in_flight` sends the right value in the first place, and the
+# "live" and "running" mean `in_flight` sends the right value in the first place, and the
 # forgiving layer becomes the safety net it was meant to be rather than the primary path.
+#
+# D37: the gloss lists words this PRODUCT knows, so it lost "in market" with `enums` did. One
+# customer's phrasing in the product's own model-facing text is the same decision implemented
+# twice, disagreeing — and the gloss is the copy a model reads first. It belongs in the
+# customer's rulebook, where `docs/example-rulebook.yaml` shows it being declared.
 RecordType = _enum("campaign", "reference", "stub")
 """campaign — a real past or proposed campaign.
 reference — background material: brand guidelines, a rubric, a competitor deck.
@@ -133,7 +138,7 @@ stub — a placeholder with results but no brief, e.g. a row imported from a KPI
 
 Status = _enum("proposed", "in_flight", "concluded")
 """proposed — not yet run: a pitch, a draft, a brief awaiting sign-off.
-in_flight — live, running, in market, in flight, activated.
+in_flight — live, running, in flight, activated.
 concluded — finished, wrapped, completed, ended, done, post-campaign."""
 
 # §9.1: what an image IS. The default is `proposed` because every asset already in a library
@@ -1916,6 +1921,30 @@ def backfill_author_unknown() -> dict:
     conn = store.connect()
     try:
         return core.backfill_author_unknown(conn)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def load_rulebook_corrections(confirmed_by: str) -> dict:
+    """Put the standing corrections declared in your rulebook in force (§12.3).
+
+    Offer it when `getting_started` says some are waiting, or when the user asks why a rule
+    they wrote is not being applied. **Ask who is confirming — do not fill it in.** Putting a
+    rule in front of every future brief is the one step in this loop that is deliberately a
+    person's, and a name nobody gave is a standing requirement nobody can question later.
+
+    These skip the three-campaign gate, and the reason is worth relaying if asked: that test
+    is for a rule this library INFERRED from what it watched recur, where breadth across
+    markets is what makes the guess safe. A rule the customer wrote in their own file is not a
+    guess. Each one keeps the provenance they gave it, with the rulebook named beside it, so a
+    judgment citing one can say where it came from.
+
+    Safe to run twice: corrections already on file are counted and left alone."""
+    conn = store.connect()
+    try:
+        return core.load_declared_corrections(conn, confirmed_by=confirmed_by)
     finally:
         conn.close()
 

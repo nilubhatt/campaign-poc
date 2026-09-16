@@ -113,6 +113,11 @@ def main() -> int:
         # to a file rather than a tool: a capability nobody is told about is one nobody uses.
         print(f"Your rulebook:  {rulebook.overlay_path()}"
               + ("" if rulebook.overlay_path().exists() else "   (not written yet)"))
+        # §12.3: and what to copy from. An example nobody is told about is one nobody reads —
+        # §10.6's rule, applied to a file.
+        example = config.app_dir() / "example-rulebook.yaml"
+        print(f"Worked example: {example}"
+              + ("" if example.exists() else "   (source checkout: docs/example-rulebook.yaml)"))
         # §11.7/D26: the disclosure, at the defined moment. It existed as a string generator
         # with no call sites — closed by dead code, which is worse than not done, because the
         # tracker said it was finished. A disclosure nobody is ever shown is not a disclosure,
