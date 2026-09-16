@@ -28,6 +28,7 @@ one, so an upgrade replacing the product's own rules cannot take theirs with it.
 from __future__ import annotations
 
 import functools
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -89,6 +90,54 @@ def is_the_editable_copy() -> bool:
     return _bundled() == config.app_dir() / BUNDLED_NAME
 
 
+OVERLAY_NAME = "rulebook.yaml"
+
+
+def _no_duplicate_keys():
+    """A YAML loader that refuses a repeated mapping key.
+
+    PyYAML keeps the LAST of duplicate keys and says nothing, so an overlay with two `rules:`
+    blocks loses the first one entirely — and the customer cannot notice, because the count
+    they would check it against comes from the same list that dropped it. Every other way of
+    writing this file wrong is refused with a message naming the file; this one defeated all
+    of that at the parse step, before any of it ran.
+    """
+    import yaml
+
+    class Loader(yaml.SafeLoader):
+        def construct_mapping(self, node, deep=False):
+            seen = set()
+            for key_node, _ in node.value:
+                key = self.construct_object(key_node, deep=deep)
+                if key in seen:
+                    raise yaml.constructor.ConstructorError(
+                        None, None,
+                        f"duplicate key {key!r} — the second one silently replaces the first, "
+                        f"so everything under the first is lost", key_node.start_mark)
+                seen.add(key)
+            return super().construct_mapping(node, deep=deep)
+
+    return Loader
+
+
+_NoDuplicateKeys = _no_duplicate_keys()
+
+
+def overlay_path() -> Path:
+    """Where the CUSTOMER's rulebook lives (§12.2).
+
+    The DATA directory, beside the database — not the install directory beside the product's
+    own. The install directory is Program Files on Windows and is replaced wholesale by the
+    next installer, so telling a customer to write their rules there would be telling them to
+    write in the file an upgrade overwrites. That is a worse trap than not offering the file:
+    they would lose work they had been told was safe.
+
+    The data directory is the one this product already promises to keep. It holds the
+    database, the install disclosure names it, and nothing in an upgrade touches it.
+    """
+    return Path(config.DATA_DIR) / OVERLAY_NAME
+
+
 def _read(path: Path) -> dict:
     """Parse one rulebook file, or say what is wrong with it in terms of that file.
 
@@ -97,6 +146,17 @@ def _read(path: Path) -> dict:
     a tidier sentence that loses it.
     """
     import yaml
+
+    if path.is_symlink() and not path.exists():
+        # Every other unreadable shape refuses loudly — a directory, a mode-000 file, a bad
+        # tag. A symlink whose target has moved returns False from `exists()` and fell into
+        # the "no overlay" branch, so a customer whose checkout moved had every judgment
+        # stamped as though they had never written any rules, silently.
+        raise ValueError(
+            f"the rulebook at {path} is a symlink whose target is missing "
+            f"({os.readlink(path)}). It is NOT treated as 'no rules': a broken link is a "
+            f"rulebook you meant to have, and running without it would stamp every judgment "
+            f"as though you had never written one.")
 
     try:
         text = path.read_text(encoding="utf-8")
@@ -110,7 +170,7 @@ def _read(path: Path) -> dict:
         raise ValueError(f"the rulebook at {path} could not be read: {bad}") from None
 
     try:
-        loaded = yaml.safe_load(text)
+        loaded = yaml.load(text, _NoDuplicateKeys)
     except yaml.YAMLError as bad:
         # `yaml.YAMLError` stringifies with the line and column already in it.
         raise ValueError(
@@ -127,14 +187,221 @@ def _read(path: Path) -> dict:
     return loaded
 
 
-def _checked(loaded: dict, *, path: Path, require_rules: bool = True) -> dict:
+# What a customer may declare, and what they may not. The split is D36's and it is an
+# epistemic one rather than a matter of taste.
+#
+# A STAGE NAME is the customer's vocabulary: an agency that says `shipped` or `in_the_wild` is
+# describing their own process, and a product refusing it is a product telling them how to
+# talk about their work.
+#
+# `verified`, `actual`, `reference` are THIS LIBRARY'S CLAIMS ABOUT EVIDENCE. `verified` has a
+# hard definition — backed by a `metric_type='actual'` row, enforced on write — and every
+# judgment that weighs verified evidence more heavily depends on it. A customer mapping
+# "confirmed" onto it would make "the client confirmed it worked" outweigh a measured result,
+# silently, in every comparison this product makes.
+_MAY_DECLARE = ("statuses", "markets", "collections", "tags", "channels")
+_MAY_NOT_DECLARE = {
+    "tag_sources": ("`verified` and `stated` are this library's claim about EVIDENCE, not "
+                    "words for a stage. `verified` means a metric_type='actual' row exists "
+                    "and is enforced on write; mapping another word onto it would make a "
+                    "stated impression outweigh a measured result in every comparison this "
+                    "product makes."),
+    "metric_types": ("`actual`, `predicted` and `target` are what a number IS. Redefining "
+                     "them would change what every reconciliation compares against."),
+    "record_types": ("`campaign`, `reference` and `stub` are storage classes this product "
+                     "reasons about — a `reference` record is excluded from precedent, for "
+                     "one. They are not a way of describing your work."),
+}
+
+
+def _checked_vocabulary(loaded: dict, *, path: Path) -> dict:
+    """The declared vocabulary, refused loudly where it is not the customer's to declare."""
+    declared = loaded.get("vocabulary")
+    if declared is None:
+        return {key: {} for key in _MAY_DECLARE}
+    if not isinstance(declared, dict):
+        raise ValueError(f"the rulebook at {path}: `vocabulary` must be a mapping, not a "
+                         f"{type(declared).__name__}.")
+    out = {key: {} for key in _MAY_DECLARE}
+    for key, value in declared.items():
+        if key in _MAY_NOT_DECLARE:
+            raise ValueError(
+                f"the rulebook at {path}: `vocabulary.{key}` cannot be declared. "
+                f"{_MAY_NOT_DECLARE[key]}")
+        if key not in _MAY_DECLARE:
+            # Refused rather than ignored: a typo in a config file is the commonest way a
+            # declared rule silently does not apply, and nothing the customer can see would
+            # say the key was never read.
+            near = _closest(key, _MAY_DECLARE)
+            raise ValueError(
+                f"the rulebook at {path}: `vocabulary.{key}` is not something this product "
+                f"reads. It reads {', '.join(_MAY_DECLARE)}."
+                + (f" Did you mean `{near}`?" if near else ""))
+        if not isinstance(value, dict):
+            raise ValueError(f"the rulebook at {path}: `vocabulary.{key}` must be a mapping, "
+                             f"not a {type(value).__name__}.")
+        out[key] = _checked_entries(key, value, path=path)
+    return out
+
+
+def _closest(word: str, among) -> Optional[str]:
+    import difflib
+
+    near = difflib.get_close_matches(word, list(among), n=1, cutoff=0.6)
+    return near[0] if near else None
+
+
+def _canonical_must_be(key: str):
+    """The values a customer may map their words ONTO, for the vocabularies that have a set.
+
+    D36 is "a customer can add spellings for the stages this product has", not "a customer can
+    invent stages": every gap check, every reconciliation and every "has this concluded"
+    question is written against the three. Accepted at load, an invented stage refused every
+    WRITE instead — `ingest_campaign` mapped the customer's word onto it and `insert_campaign`
+    then refused, citing a word the caller never sent. A configuration error has to surface
+    when the configuration is read.
+    """
+    import store
+
+    return {"statuses": store.VALID_STATUSES}.get(key)
+
+
+def _checked_entries(key: str, value: dict, *, path: Path) -> dict:
+    """One vocabulary section, normalised into {canonical: {...}}.
+
+    Two shapes are accepted because two are natural: `channels` is a list of words per
+    channel, and `markets` carries a region as well. Both end up as a mapping so every reader
+    has one shape to handle.
+    """
+    import store
+
+    allowed = _canonical_must_be(key)
+    out = {}
+    spellings: dict = {}
+    for canonical, detail in value.items():
+        name = str(canonical).strip()
+        if not name:
+            raise ValueError(f"the rulebook at {path}: `vocabulary.{key}` has an empty name.")
+        if allowed is not None and name not in allowed:
+            raise ValueError(
+                f"the rulebook at {path}: `vocabulary.{key}` cannot add {name!r}. These are "
+                f"the stages this product reasons about — {', '.join(allowed)} — and every "
+                f"gap check and reconciliation is written against them. What you CAN do is "
+                f"give one of them your own words: `{allowed[-1]}: ['{name}']`.")
+        if isinstance(detail, list):
+            detail = {"also": detail}
+        if detail is None:
+            detail = {}
+        if not isinstance(detail, dict):
+            raise ValueError(
+                f"the rulebook at {path}: `vocabulary.{key}.{name}` must be a list of other "
+                f"spellings or a mapping, not a {type(detail).__name__}.")
+        also = detail.get("also") or []
+        if not isinstance(also, list) or not all(isinstance(w, str) for w in also):
+            raise ValueError(f"the rulebook at {path}: `vocabulary.{key}.{name}.also` must "
+                             f"be a list of strings.")
+        folded = [_folded_word(w) for w in also if str(w).strip()]
+        for word in folded:
+            if word in spellings and spellings[word] != name:
+                # The loader refuses two rules with one id "because nobody reading it could
+                # tell which was breached". Two canonicals with one spelling is the same
+                # defect, and it resolved DIFFERENTLY in two places — one took the first
+                # match, the other built a dict where the last won.
+                raise ValueError(
+                    f"the rulebook at {path}: `vocabulary.{key}` gives {word!r} to both "
+                    f"{spellings[word]!r} and {name!r}. One spelling cannot mean two things, "
+                    f"and which one won would depend on where it was read.")
+            spellings[word] = name
+        if key == "tags":
+            # The seven reaction axes decide the `axis` column on the append-only record and
+            # drive every quadrant query. `tags` could remap them freely, including inverting
+            # them: `not_liked: ['liked']` made a liked campaign read as disliked, and
+            # `performed_well: ['client loved it']` put a stated opinion on the PERFORMANCE
+            # axis, where it answers "what performed well". That is the reasoning the
+            # epistemic guard gives for `tag_sources`, word for word.
+            #
+            # Only the SPELLINGS are restricted. `not_liked: ['went down badly']` is the whole
+            # point of D73, so a canonical that is an axis word stays allowed.
+            for word in folded:
+                axis = word.replace(" ", "_")
+                if axis in store.REACTION_AXES and axis != name:
+                    raise ValueError(
+                        f"the rulebook at {path}: `vocabulary.tags` gives {word!r} to "
+                        f"{name!r}, and {axis!r} is one of this product's own reaction "
+                        f"words. Remapping it would change which axis an opinion lands on "
+                        f"and could invert it — a liked campaign reading as disliked. Give "
+                        f"{name!r} words of your own instead.")
+        entry = {"also": folded}
+        region = detail.get("region")
+        if region is not None:
+            if key != "markets":
+                raise ValueError(f"the rulebook at {path}: `region` means nothing under "
+                                 f"`vocabulary.{key}` — only a market is in a region.")
+            entry["region"] = str(region).strip()
+        out[name] = entry
+    return out
+
+
+def _folded_word(word: str) -> str:
+    """One spelling, for comparison only. Case, spacing and punctuation are not meaning —
+    `enums`' first layer, applied to the declared vocabulary so the two agree."""
+    import re as _re
+
+    return _re.sub(r"[\s_\-]+", " ", str(word or "").strip()).casefold()
+
+
+def _checked_scorecard(loaded: dict, *, path: Path) -> list:
+    """The customer's scorecard criteria (D101).
+
+    §7.4 asks for them in the shared procedure and the product cannot ship them: they are one
+    customer's rubric, and hard-coding it into a product that ships generic is what the
+    product-owner decision rules out. Declared, they reach the model the same way the rules
+    do — in full, on every judgment.
+    """
+    declared = loaded.get("scorecard")
+    if declared is None:
+        return []
+    if not isinstance(declared, list):
+        raise ValueError(f"the rulebook at {path}: `scorecard` must be a list, not a "
+                         f"{type(declared).__name__}.")
+    out = []
+    for position, entry in enumerate(declared, 1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"the rulebook at {path}: scorecard entry {position} is a "
+                             f"{type(entry).__name__}, not a mapping.")
+        name = str(entry.get("name") or "").strip()
+        asks = " ".join(str(entry.get("asks") or "").split())
+        if not name or not asks:
+            # A name with no question is a heading. The model would have to invent what
+            # "Brand fit" means, which is the variance a shared procedure exists to remove.
+            raise ValueError(
+                f"the rulebook at {path}: scorecard entry {position} "
+                f"({name or 'with no name'}) needs both a `name` and what it `asks`. A "
+                f"criterion with no question is a heading, and the model would have to "
+                f"invent what it means.")
+        out.append({"name": name, "asks": asks})
+    return out
+
+
+def _checked(loaded: dict, *, path: Path, default_source: str = "product") -> dict:
     """The shape, refused loudly rather than repaired quietly.
 
     Every refusal here is a rule that would otherwise have silently not applied — and the
     reader could not have noticed, because the count they would check it against comes from
     the same list that dropped it.
     """
-    version = str(loaded.get("version") or "").strip()
+    raw_version = loaded.get("version")
+    if raw_version is not None and not isinstance(raw_version, str):
+        # `version: 1.10` is a YAML FLOAT, and stamps `1.1`. A customer bumping 1.1 to 1.10
+        # would move their rules under a stamp that did not move — the exact failure this
+        # file's own VERSIONS note warns about, produced by writing the version the way
+        # versions are normally written.
+        raise ValueError(
+            f"the rulebook at {path}: `version` must be quoted. {raw_version!r} is a "
+            f"{type(raw_version).__name__} to YAML, so `1.10` becomes `1.1` and a version "
+            f"bump can leave the stamp unchanged while the rules move. Write "
+            f"`version: \"{raw_version}\"`.")
+    version = str(raw_version or "").strip()
     if not version:
         raise ValueError(
             f"the rulebook at {path} has no `version`. Every judgment is stamped with it so "
@@ -195,13 +462,23 @@ def _checked(loaded: dict, *, path: Path, require_rules: bool = True) -> dict:
                         "severity": severity, "why": " ".join(str(rule["why"]).split()),
                         # Where this rule came from, carried on the rule itself so a judgment
                         # can say whether a breach was of the product's rule or the
-                        # customer's. §12.2 sets it to the overlay's own name.
-                        "source": str(rule.get("source") or "").strip() or "product"})
+                        # customer's. Defaulted by the FILE it was read from — an overlay's
+                        # rules are the overlay's unless they say otherwise — because
+                        # defaulting to "product" here made every customer rule claim to be
+                        # the product's, which is the one thing this field exists to tell
+                        # apart.
+                        "source": str(rule.get("source") or "").strip() or default_source})
 
     return {"version": version,
             "describes": " ".join(str(loaded.get("describes") or "").split()),
             "rules": checked,
-            "expects": _checked_expectations(loaded, path=path)}
+            "expects": _checked_expectations(loaded, path=path),
+            "vocabulary": _checked_vocabulary(loaded, path=path),
+            "scorecard": _checked_scorecard(loaded, path=path),
+            # D23: who to contact here. One line of free text: it goes into a remedy a person
+            # reads, so validating its shape would be the product having opinions about the
+            # customer's own support arrangements.
+            "support": " ".join(str(loaded.get("support") or "").split())}
 
 
 # D50. What a brief is expected to CARRY, as opposed to what a judgment must do. The rubric in
@@ -265,17 +542,100 @@ def _checked_expectations(loaded: dict, *, path: Path) -> list:
     return out
 
 
+def _layered(product: dict, overlay: dict) -> dict:
+    """The customer's rulebook over the product's (§12.2).
+
+    Rules ADD, and a rule whose id the product also uses REPLACES it. Both halves matter.
+    Adding is what stops writing one rule from costing you every shipped one — and the
+    customer could not notice that loss, because the count they would check it against comes
+    from the same list. Replacing is what makes the overlay worth having: an overlay exists so
+    a customer can DISAGREE with the product, and one who cannot turn a shipped rule off has
+    to work around it instead.
+
+    Replacing is also the only layering that does not create, through the back door, the thing
+    a single file already refuses: two rules under one id, where a finding citing it names two
+    different rules and nobody reading it can tell which was breached.
+    """
+    by_id = {rule["id"]: rule for rule in product["rules"]}
+    for rule in overlay["rules"]:
+        by_id[rule["id"]] = rule
+    expects = {entry["id"]: entry for entry in product["expects"]}
+    for entry in overlay["expects"]:
+        expects[entry["id"]] = entry
+    # EVERY section layers, not only the rules. The first version replaced `vocabulary` and
+    # `scorecard` wholesale, so an overlay declaring only `tags` erased a product `statuses`
+    # declaration and the contract announced "no scorecard is declared" while one sat in the
+    # file it had just read — the silent non-application this loader refuses loudly everywhere
+    # else. It matters now rather than later: D36's row says `STATUS_SYNONYMS` MOVES INTO the
+    # bundled rulebook, and this branch would have thrown it away on arrival.
+    #
+    # Per key, with the same rule as rules: the customer's declaration of `statuses` replaces
+    # the product's `statuses` and leaves `markets` alone.
+    vocabulary = {key: dict(product["vocabulary"].get(key) or {})
+                  for key in _MAY_DECLARE}
+    for key, declared in overlay["vocabulary"].items():
+        if declared:
+            vocabulary[key] = declared
+    return {"rules": list(by_id.values()), "expects": list(expects.values()),
+            "vocabulary": vocabulary,
+            # A scorecard is a whole rubric rather than a set of independent entries — half
+            # the product's criteria and half the customer's is a rubric nobody wrote — so an
+            # overlay that declares one replaces it, and one that does not keeps the
+            # product's.
+            "scorecard": overlay["scorecard"] or product["scorecard"],
+            "support": overlay["support"] or product["support"]}
+
+
 @functools.lru_cache(maxsize=1)
 def load() -> dict:
     """The rulebook in force, parsed once per process.
 
-    Cached because it is read on every `prepare_evaluation` and the file does not change under
-    a running server — and because a parse error must be the same error every time rather than
-    an intermittent one depending on who touched the file mid-session. `load.cache_clear()` is
+    Cached because it is read on every `prepare_evaluation` and neither file changes under a
+    running server — and because a parse error must be the same error every time rather than
+    an intermittent one depending on who touched a file mid-session. `load.cache_clear()` is
     what tests and a future reload command use.
     """
     path = _bundled()
-    return _checked(_read(path), path=path)
+    product = _checked(_read(path), path=path)
+
+    overlay_file = overlay_path()
+    # THE SAME FILE. On a normal install these are two directories, but the data directory is
+    # configurable and a customer who points it at the install directory would otherwise have
+    # one file layered with itself: every rule replacing its own twin, and a version stamp
+    # reading `acme-3+acme-3`. Nonsense, and silent — the judgment would carry it.
+    same = False
+    try:
+        same = overlay_file.exists() and overlay_file.samefile(path)
+    except OSError:
+        same = False
+    # A dangling symlink is not "no overlay" — see `_read`, which says why. It is checked
+    # here as well because `exists()` is what decides whether `_read` is called at all.
+    dangling = overlay_file.is_symlink() and not overlay_file.exists()
+    if not dangling and (same or not overlay_file.exists()):
+        # The product's own declarations, kept. Returning the empty defaults here discarded
+        # anything the bundled file declared, which is the same silent loss as above with
+        # nobody's overlay involved at all.
+        return {**product, "product_version": product["version"], "overlay_version": None}
+
+    # Read once to learn its version, then checked with that version as the default source —
+    # a rule in the customer's file is the customer's unless it says otherwise.
+    raw = _read(overlay_file)
+    overlay = _checked(raw, path=overlay_file,
+                       default_source=str(raw.get("version") or "").strip() or "overlay")
+    merged = _layered(product, overlay)
+    return {
+        # ONE scalar carrying both, so every existing reader stays correct. `compare_provenance`
+        # diffs `rulebook_version` and concludes two judgments were made "under the same
+        # conditions, so an agreement between them is evidence rather than luck" — with the
+        # overlay unnamed, two judgments under two different sets of the customer's own rules
+        # would both stamp `core-1.0` and be called comparable. That is a false statement in
+        # the tool whose whole purpose is explaining disagreement.
+        "version": f"{product['version']}+{overlay['version']}",
+        "product_version": product["version"],
+        "overlay_version": overlay["version"],
+        "describes": overlay["describes"] or product["describes"],
+        **merged,
+    }
 
 
 def version() -> str:
@@ -291,6 +651,59 @@ def rules() -> list:
 def expects() -> list:
     """What a brief is declared to have to carry (D50). Empty until a customer declares one."""
     return list(load()["expects"])
+
+
+def overlay() -> Optional[str]:
+    """The customer's rulebook version, or None if they have not written one (§12.2)."""
+    return load()["overlay_version"]
+
+
+def vocabulary(key: str) -> dict:
+    """One declared section, as {canonical: {"also": [...], ...}}. Empty when undeclared."""
+    return load()["vocabulary"].get(key) or {}
+
+
+def canonical(key: str, value: str) -> Optional[str]:
+    """The declared spelling of this value, or None if nothing declares it.
+
+    None rather than the input, deliberately: "the customer calls this LATAM" and "nobody has
+    said" are different answers, and a caller that cannot tell them apart would report a
+    folded guess as a declared vocabulary.
+    """
+    wanted = _folded_word(value)
+    if not wanted:
+        return None
+    for name, entry in vocabulary(key).items():
+        if wanted == _folded_word(name) or wanted in entry["also"]:
+            return name
+    return None
+
+
+def region_of(market: str) -> Optional[str]:
+    """Which region a declared market is in (D71).
+
+    D71 asks "whether `region` should feed the market grouping at all, or is a different
+    axis". It is a different axis: a region is a GROUPING of markets, so it belongs beside the
+    market list rather than in a free-text field that means a continent on one record and a
+    country on the next.
+    """
+    name = canonical("markets", market)
+    return (vocabulary("markets").get(name) or {}).get("region") if name else None
+
+
+def support() -> Optional[str]:
+    """Who IT is, here (D23).
+
+    `notices` tells somebody to "ask whoever installed this", which is the best a product that
+    ships to strangers can do — and the customer knows the answer. Declared, a remedy can name
+    them, which is the difference between a remedy and a shrug.
+    """
+    return load()["support"] or None
+
+
+def scorecard() -> list:
+    """The customer's scorecard criteria (D101). Empty until they declare some."""
+    return list(load()["scorecard"])
 
 
 def by_id(rule_id: str) -> Optional[dict]:
@@ -312,6 +725,27 @@ def as_contract() -> str:
     for rule in loaded["rules"]:
         lines.append(f"  [{rule['id']}] ({rule['severity']}) {rule['rule']}")
         lines.append(f"      Why: {rule['why']}")
+    # D101: the customer's scorecard, which §7.4 asks for in the shared procedure and the
+    # product cannot ship — it is one customer's rubric. Declared, it reaches the model the
+    # same way the rules do: in full, on every judgment, not retrieved by similarity. It is
+    # NOT a list of findings to produce; it is what this customer looks at, so a judgment that
+    # ignores half of it is answering a different question from the one they asked.
+    if loaded["scorecard"]:
+        lines.append("THE SCORECARD THIS CUSTOMER JUDGES AGAINST. Cover each one or say why "
+                     "it does not apply to this brief; do not invent a score.")
+        for entry in loaded["scorecard"]:
+            lines.append(f"  {entry['name']}: {entry['asks']}")
+    else:
+        # The gap, NAMED — "so a reader is not left thinking the step was judged
+        # unnecessary". It moved here from `EVALUATION_PROCEDURE` because it is a fact about
+        # THIS library rather than a universal statement of procedure: once a customer has
+        # declared a scorecard, still saying it is outstanding is the same defect the other
+        # way round, and a constant cannot tell the two apart.
+        lines.append(
+            f"NO SCORECARD IS DECLARED. This customer has not written down the criteria they "
+            f"judge against, so judge on the evidence and the rules and do not invent a "
+            f"rubric for them. If they ask for one, it goes in {overlay_path()} under "
+            f"`scorecard:`, each criterion a `name` and what it `asks`.")
     return "\n".join(lines)
 
 
@@ -325,7 +759,13 @@ def applied() -> dict:
     loaded = load()
     return {
         "version": loaded["version"],
+        # The parts, readable without splitting the scalar on `+` — which would be a second
+        # parser of this product's own field, in every caller that wanted to know whose rules
+        # were in force.
+        "product": loaded["product_version"],
+        "overlay": loaded["overlay_version"],
         "rules_applied": len(loaded["rules"]),
+        "scorecard": len(loaded["scorecard"]),
         "basis": "computed",
         "what_it_means": (
             f"All {len(loaded['rules'])} rule(s) in rulebook {loaded['version']} were put in "

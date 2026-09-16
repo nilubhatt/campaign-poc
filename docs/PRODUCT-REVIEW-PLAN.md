@@ -2917,8 +2917,35 @@ with nothing to notice because each half works perfectly alone:
       with no rules written; and every frozen install would have failed to start, because
       PyInstaller puts `datas` under `_internal/` while `config.app_dir()` looks beside the
       executable.
-- [ ] **12.2 Customer overlay file** layering on the default, with the version stamped onto
-      every saved judgment (pairs with 7.6).
+- [x] **12.2 Customer overlay file** layering on the default, with the version stamped onto
+      every saved judgment (pairs with 7.6). *Closes D36, D71, D72, D73, D93, D101.*
+      In the DATA directory beside the database, not beside the executable: the install
+      directory is Program Files on Windows and an installer replaces it wholesale, so
+      "write your rules in rulebook.yaml" would have meant "write them in the file the next
+      upgrade overwrites" — a worse trap than not offering the file at all.
+      **The stamp could not be deferred.** `compare_provenance` diffs `rulebook_version` and
+      concludes two judgments were made "under the same conditions, so an agreement between
+      them is evidence rather than luck". With one scalar, two judgments under two different
+      sets of the customer's own rules both stamped `core-1.0` and were called comparable —
+      false, in the tool whose purpose is explaining disagreement. Widening the field now was
+      a field; after rows are in the field it is a migration.
+      **A vocabulary is a SYNONYM, not a rewrite** — D72's own words. The first version
+      canonicalised on write, and review showed that made declaring one actively harmful:
+      rows written before kept the old spelling, rows after got the new one, and a query in
+      either found half of them. Two spellings that had at least folded to one cell became
+      two cells with thin evidence each — the precise harm the feature exists to remove,
+      inflicted by the feature, on exactly the libraries that already had data. Resolved when
+      two values are COMPARED, a declaration reaches every row ever written, rows added
+      tomorrow from a spreadsheet that still says the old word are found too, and withdrawing
+      it puts everything back.
+      *D36's line:* stage names are the customer's and `verified`/`actual`/`reference` are
+      not. A customer mapping "confirmed" onto `verified` would make a stated impression
+      outweigh a measured result in every comparison this product makes, silently.
+      *D71 was a question* — "whether `region` should feed the market grouping at all, or is a
+      different axis" — and it is a different axis. A campaign in Peru whose region is LATAM
+      counted as TWO markets and satisfied §8.3's "seen in at least two markets" gate alone.
+      Only where the rulebook declares the region: undeclared, `region` means a continent on
+      one record and a country on the next, which is why the row was a question.
 - [ ] **12.3 Fabletics example config** — the full transcribed content (guardrails, tag
       taxonomy, influencer criteria + red flags, partner feedback, 360 checklist, scorecard)
       and the ten standing corrections with provenance, shipped as an **example/customer**

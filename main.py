@@ -102,8 +102,17 @@ def main() -> int:
         import store
         config.ensure_dirs()
         store.init_db()
+        import rulebook
+
         print(f"Data directory: {config.DATA_DIR}")
         print(f"Database:       {config.DB_PATH}")
+        # §12.2: where the customer's own rules go, said at the moment somebody is setting
+        # this up. §12.1 ships the rulebook EMPTY on purpose — the product owns its judgment
+        # discipline and the customer owns the rules about their briefs — and that decision is
+        # worth nothing if nobody is ever told where their half lives. §10.6's rule, applied
+        # to a file rather than a tool: a capability nobody is told about is one nobody uses.
+        print(f"Your rulebook:  {rulebook.overlay_path()}"
+              + ("" if rulebook.overlay_path().exists() else "   (not written yet)"))
         # §11.7/D26: the disclosure, at the defined moment. It existed as a string generator
         # with no call sites — closed by dead code, which is worse than not done, because the
         # tracker said it was finished. A disclosure nobody is ever shown is not a disclosure,

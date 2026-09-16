@@ -115,11 +115,20 @@ def test_it_says_what_the_product_cannot_yet_do():
     forbids — and a procedure that silently omits a step the review asked for reads as though
     the step is not needed.
 
-    §12.1 built the file and shipped it empty, so the outstanding half moved to §12.2; the
-    section number changed and the obligation to SAY SO did not."""
+    §12.2 moved the scorecard sentence OUT of this constant and into the per-brief contract,
+    and that is the point rather than an exception to it: whether a scorecard is declared is a
+    fact about one library, and a constant shipped to every customer cannot tell the declared
+    case from the undeclared one. Saying "still outstanding" to somebody who has just written
+    theirs is the same defect the other way round.
+
+    What this constant still owes is the rulebook itself, and the honest statement of what an
+    empty one means."""
     assert "rulebook" in PROCEDURE.lower()
-    assert "scorecard" in PROCEDURE.lower()
-    assert "12.2" in PROCEDURE or "outstanding" in PROCEDURE.lower()
+    # Flattened: the procedure is wrapped for reading, and a phrase split across a line break
+    # is still the sentence the model receives.
+    flat = " ".join(PROCEDURE.lower().split())
+    assert "ships empty" in flat
+    assert "no rule was checked" in flat
 
 
 # ── it has to survive the transport ─────────────────────────────────────────

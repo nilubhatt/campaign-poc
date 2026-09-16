@@ -1005,9 +1005,35 @@ def _normalise_record_type(value):
                            synonyms=enums.RECORD_TYPE_SYNONYMS, allow_none=False)
 
 
+def _declared(key: str) -> dict:
+    """The customer's spellings for one vocabulary, as a synonym table (§12.2/D36).
+
+    Built from the rulebook rather than kept here, so there is one place a spelling is
+    declared. `enums.normalise` already takes `synonyms=` as a parameter, which is why this
+    reaches the whole product by changing two wrappers — the note in `enums` said so.
+    """
+    import rulebook
+
+    out = {}
+    for canonical, entry in rulebook.vocabulary(key).items():
+        for spelling in entry["also"]:
+            # `enums.canonical_shape`, because `enums.normalise` looks the value up in THAT
+            # shape. Keyed by the rulebook's own fold (spaces) every multi-word spelling a
+            # customer declared sat in the table unreachable: "out the door" was declared and
+            # "out_the_door" was looked up. Two folds for one lookup, which is this codebase's
+            # signature defect arriving inside the fix for it.
+            out[enums.canonical_shape(spelling)] = canonical
+    return out
+
+
 def _normalise_status(value):
+    # D36: a stage name is CUSTOMER vocabulary. An agency that says `shipped` or `in_the_wild`
+    # is describing their own process, and the product refusing it is the product telling them
+    # how to talk about their work. `verified` and `actual` stay product-owned, because those
+    # are this library's claims about evidence rather than words for a stage — the rulebook
+    # loader refuses an overlay that tries to declare them.
     return enums.normalise(value, field="status", valid=VALID_STATUSES,
-                           synonyms=enums.STATUS_SYNONYMS)
+                           synonyms={**enums.STATUS_SYNONYMS, **_declared("statuses")})
 
 
 def _folded_name(name: str) -> str:
@@ -1181,6 +1207,37 @@ def normalize_tags(tags, *, has_actual_metrics: bool = False,
     return list(deduped.values())
 
 
+def fold_vocabulary(key: str, value):
+    """The declared spelling of a value, for COMPARISON only (D72/D73).
+
+    **Resolved when two values are compared, never written to the row.** D72 asks for
+    "canonical market names from the rulebook, so `latam` is a SYNONYM rather than a fold",
+    and a synonym is a statement about when two words mean the same thing — not an
+    instruction to rewrite one into the other.
+
+    The first version canonicalised on write, and it made a declaration actively harmful: rows
+    written before it kept the old spelling, rows after got the new one, and a query in either
+    found half of them. Two spellings that had at least folded to one cell became two cells,
+    each with its own thin evidence — the precise harm the feature exists to remove, inflicted
+    by the feature, on the libraries that already had data. Nothing migrated and nothing said
+    so.
+
+    Resolving on comparison has none of that. Every row ever written joins its cell the moment
+    the declaration lands, rows added tomorrow from a spreadsheet that still says the old word
+    are found too, and withdrawing the declaration puts everything back. Nothing a customer
+    exported yesterday disagrees with what the product holds today.
+    """
+    import rulebook
+
+    if not isinstance(value, str) or not value.strip():
+        return (value or "").strip().lower() if isinstance(value, str) else value
+    try:
+        declared = rulebook.canonical(key, value)
+    except ValueError:
+        declared = None
+    return (declared or value).strip().lower()
+
+
 def normalize_markets(markets) -> list[str]:
     """Normalize markets to a deduped list of stripped strings. Mirrors tags' list-not-a-
     single-value philosophy but with no provenance concept - this is a plain membership list
@@ -1196,7 +1253,10 @@ def normalize_markets(markets) -> list[str]:
         if not isinstance(m, str) or not m.strip():
             raise ValueError(f"each market must be a non-empty string, got {m!r}")
         value = m.strip()
-        key = value.lower()
+        # D72: two spellings of one market dedupe to a single entry, WITHOUT the stored
+        # spelling changing — the caller's own words go in the row, and the declaration says
+        # which of them mean the same thing.
+        key = fold_vocabulary("markets", value)
         if key not in seen:
             seen.add(key)
             out.append(value)
@@ -1483,6 +1543,35 @@ def list_campaigns(conn, *, record_type: Optional[str] = None,
     return out
 
 
+def spellings_of(key: str, value: str) -> list:
+    """Every declared spelling of one value, folded — itself included.
+
+    What makes a comparison see a synonym. With nothing declared this is just the folded
+    value, which is what every comparison did before.
+    """
+    import rulebook
+
+    folded = fold_vocabulary(key, value)
+    try:
+        name = rulebook.canonical(key, value)
+        entry = rulebook.vocabulary(key).get(name) if name else None
+    except ValueError:
+        name, entry = None, None
+    if not entry:
+        return [folded]
+    return sorted({folded, (name or "").strip().lower(),
+                   *(w.strip().lower() for w in entry["also"] if w.strip())})
+
+
+def _any_spelling(column: str, value: str, params: list) -> str:
+    """A WHERE clause matching any declared spelling of `value` in `column`."""
+    key = {"market": "markets", "region": "markets",
+           "collection": "collections"}.get(column, column)
+    words = spellings_of(key, value)
+    params.extend(words)
+    return "(" + " OR ".join(f"LOWER({column}) = ?" for _ in words) + ")"   # noqa: S608
+
+
 def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Optional[str] = None,
                         tags: Optional[Union[str, dict, list]] = None, match_all_tags: bool = False,
                         region: Optional[str] = None, market: Optional[str] = None,
@@ -1524,15 +1613,16 @@ def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Opti
     if status:
         clauses.append("status = ?")
         params.append(_normalise_status(status))
+    # D72/D73: the DECLARED spellings of what was asked for, so a query in any of them finds
+    # every row in any of them — including rows written before the declaration existed. The
+    # first version canonicalised on write instead, which found only the rows written since
+    # and split the library in two without saying so.
     if region:
-        clauses.append("LOWER(region) = LOWER(?)")
-        params.append(region)
+        clauses.append(_any_spelling("region", region, params))
     if market:
-        clauses.append("LOWER(market) = LOWER(?)")
-        params.append(market)
+        clauses.append(_any_spelling("market", market, params))
     if collection:
-        clauses.append("LOWER(collection) = LOWER(?)")
-        params.append(collection)
+        clauses.append(_any_spelling("collection", collection, params))
     if exclude_campaign_id:
         clauses.append("id != ?")
         params.append(exclude_campaign_id)
@@ -1543,7 +1633,13 @@ def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Opti
 
     if wanted:
         def one_matches(stored_pairs, value, source) -> bool:
-            return any(v == value and (source is None or s == source) for v, s in stored_pairs)
+            # D73: the stored spelling and the queried one are compared through the declared
+            # vocabulary, so "went down badly" and `not_liked` are one value — including on
+            # rows written before anybody declared them. The first version rewrote the value
+            # on WRITE instead, which reached only rows written since.
+            spellings = set(spellings_of("tags", value))
+            return any((v in spellings or fold_vocabulary("tags", v) in spellings)
+                       and (source is None or s == source) for v, s in stored_pairs)
 
         def campaign_matches(row) -> bool:
             stored_pairs = [(e["value"].lower(), e["source"]) for e in _parse_stored_tags(row["tags"])]
@@ -1554,9 +1650,11 @@ def filter_campaign_ids(conn, *, record_type: Optional[str] = None, status: Opti
 
     if markets:
         query_values = [markets] if isinstance(markets, str) else markets
-        wanted_markets = {v.strip().lower() for v in query_values}
+        # Through the declared vocabulary on both sides, for the same reason as `market`.
+        wanted_markets = {word for v in query_values for word in spellings_of("markets", v)}
         rows = [r for r in rows
-                if wanted_markets & {m.lower() for m in _parse_stored_markets(r["markets"])}]
+                if wanted_markets & {word for m in _parse_stored_markets(r["markets"])
+                                     for word in spellings_of("markets", m)}]
 
     return [r["id"] for r in rows]
 
@@ -3922,14 +4020,37 @@ def markets_of(campaign: dict) -> list:
     so ignoring it reports a real LATAM campaign as covering nothing; a record with no market
     at all is most of a young library, so dropping those describes a library nobody has. Case
     is folded WITHIN a record here — folding it across records is the caller's job, and §5.3
-    is where that was got wrong before (D71).
+    is where that was got wrong before.
+
+    **D71 asked whether `region` should feed this at all, or is a different axis.** It is a
+    different axis, and now the rulebook can say so: a region is a GROUPING of markets, so a
+    campaign whose market is Peru and whose region is LATAM is in ONE market, not two. Counted
+    as two it satisfied §8.3's "seen in at least two markets" gate on its own — a gate whose
+    entire purpose is that breadth has to be earned — and inflated every coverage cell.
+
+    Only where the rulebook DECLARES the region. Undeclared, this product cannot tell a
+    region from a country: `region` is a free-text column that means a continent on one record
+    and a country on the next, which is why the row was a question rather than a bug. Guessing
+    would drop a real market from a library that never declared anything.
     """
+    declared_regions = set()
+    try:
+        import rulebook
+
+        declared_regions = {(entry.get("region") or "").strip().lower()
+                            for entry in rulebook.vocabulary("markets").values()
+                            if (entry.get("region") or "").strip()}
+    except ValueError:
+        declared_regions = set()
+
     named = []
     for raw in (campaign.get("market"), campaign.get("region"),
                 *(campaign.get("markets") or [])):
         if raw and str(raw).strip():
             value = str(raw).strip()
-            if value.lower() not in {m.lower() for m in named}:
+            if value.strip().lower() in declared_regions:
+                continue
+            if fold_market(value) not in {fold_market(m) for m in named}:
                 named.append(value)
     return named or [None]
 
@@ -3940,8 +4061,16 @@ def fold_market(name: Optional[str]) -> Optional[str]:
     "LATAM" and "latam" are one market. C16 established the fold after exactly this bug, and
     §8.3 reintroduced it in the one place it does the most damage: three spellings of one
     market satisfied a gate whose entire purpose is "seen in at least two markets".
+
+    D72: and "Latin America" is that market too, if the customer's rulebook says so. Case
+    folding could never reach that — it is the same stopgap C16 installed, and the row asks
+    for a SYNONYM instead. Because it resolves here, in the one comparison key every reader
+    already goes through, a declaration reaches rows written years before it and nothing has
+    to be rewritten.
     """
-    return name.strip().lower() if name and name.strip() else None
+    if not name or not str(name).strip():
+        return None
+    return fold_vocabulary("markets", str(name))
 
 
 def graduate_metric(conn, canonical: str, *, markets: list, confirmed_by: str) -> None:

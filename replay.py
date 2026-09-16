@@ -59,14 +59,35 @@ def run(conn, *, market: Optional[str] = None) -> dict:
     # populations — "0 stored campaigns, 1 saved judgment" from a report asked about one
     # market.
     judgments = _judgments(conn, market=market)
+    # D115: whether THE RULES THEMSELVES changed under these judgments.
+    #
+    # The replay is built from `confirmed_at` on registry and correction rows, which is the
+    # right way to ask "what was known on the day" — but a rulebook's rules carry no
+    # `confirmed_at`, so a v1→v2 rulebook change produced a replay reporting that nothing had
+    # changed. A silent false negative on precisely the axis §8.7 exists for.
+    #
+    # It could not be built until there were rulebook versions to compare, and §12.2's stamp
+    # is what makes them comparable: before it, every judgment carried one literal string.
+    stamps = [row["v"] for row in conn.execute(
+        "SELECT DISTINCT json_extract(provenance, '$.rulebook_version') AS v "
+        "FROM evaluations WHERE provenance IS NOT NULL "
+        "AND json_extract(provenance, '$.rulebook_version') IS NOT NULL ORDER BY v")]
     return {
         "rulebook_version": core.rulebook_version(),
+        "rulebooks_seen": stamps,
+        "rulebook_changed": len(stamps) > 1,
         "rulebook_note": (
-            "A judgment's stamp says which rulebook was in force, and it is the same on "
-            "every judgment made between two edits of that file — so this report is built "
-            "from WHEN each measure and rule was confirmed, not from the stamp. That does "
-            "not change when the rulebook does: the stamp tells two rulebooks apart, and "
-            "this report is about what was known on a given day."),
+            ("The rules THEMSELVES changed under these judgments — they were made under "
+             f"{len(stamps)} different rulebooks ({', '.join(stamps)}), so a judgment that "
+             "reads differently from a later one may be answering a different rulebook "
+             "rather than a different library. That is a bigger difference than anything "
+             "below and nothing else here can see it."
+             if len(stamps) > 1 else
+             "One rulebook throughout, so nothing below is explained by the rules having "
+             "moved.")
+            + " Everything else in this report is built from WHEN each measure and rule was "
+              "confirmed rather than from the stamp, because that is what says what was "
+              "known on a given day."),
         "basis": "computed",
         "backlog": backlog,
         "judgments": judgments[:_MAX_JUDGMENTS],

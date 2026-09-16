@@ -378,9 +378,67 @@ def _named_here(text: str, m) -> bool:
     return not (_NEGATION.search(before) or _NEGATED_AFTER.match(after))
 
 
+def _channel_checklist() -> tuple:
+    """The channels a brief is measured against, and whose list it is (D93).
+
+    "Fixed is the point" was the right call while nobody could declare one: two people judging
+    the same brief must not disagree about which channels it covers. A DECLARED list keeps
+    that property exactly — it is fixed per library and per rulebook version, and the version
+    is stamped on the judgment — while letting an agency whose work is retail media and CTV
+    stop being told every brief is missing cinema.
+
+    Declared words are matched whole and case-insensitively rather than as regexes: a
+    customer writing a channel list is not writing patterns, and a stray `(` in "TV (linear)"
+    would otherwise fail to compile inside a computed fact.
+    """
+    import re as _re
+
+    import rulebook
+
+    try:
+        declared = rulebook.vocabulary("channels")
+        source = rulebook.overlay() or "product"
+    except ValueError:
+        # A broken rulebook is `health_check`'s finding and every write path's refusal. This
+        # one swallowed it and reported `checklist_source: "product"` — a false statement when
+        # a customer's rulebook exists and could not be read. The product list is still the
+        # only one available so the check runs; what it may not do is claim that list was the
+        # intended one.
+        return _CHANNELS, "product (your rulebook could not be read)"
+    if not declared:
+        return _CHANNELS, "product"
+    # The canonical name AND its other spellings. It was `entry["also"] or [name]`, so giving
+    # a channel any other spelling EXCLUDED its own name — the product telling a customer
+    # their brief is missing a channel the brief names. `rulebook.canonical` matched
+    # name-or-spelling, which made two implementations of "which spellings count".
+    return ({name: tuple(rf"(?<!\w){_re.escape(word)}(?!\w)"
+                         for word in sorted({_folded_for_match(name)}
+                                            | {_folded_for_match(w) for w in entry["also"]})
+                         if word)
+             for name, entry in declared.items()}, source)
+
+
+def _folded_for_match(word: str) -> str:
+    """One spelling, folded the way the rulebook folded the declaration.
+
+    The declared words have had case, spacing and punctuation folded out already; the brief
+    has not. Folding both sides is what lets a declared "out-of-home" match a brief that says
+    "out of home" — otherwise the brief had to spell it the way the fold happened to leave it,
+    which nobody can predict.
+    """
+    import re as _re
+
+    return _re.sub(r"[\s_\-]+", " ", str(word or "").strip()).casefold()
+
+
 def _channels(text: str) -> dict:
+    checklist, checklist_source = _channel_checklist()
+    # The brief folded the same way, for a DECLARED list only — the product's own patterns are
+    # regexes written against the brief as written, and folding it would break them.
+    if not checklist_source.startswith("product"):
+        text = _folded_for_match(text)
     present, evidence, ruled_out = [], {}, []
-    for channel, patterns in _CHANNELS.items():
+    for channel, patterns in checklist.items():
         for pattern in patterns:
             for m in re.finditer(pattern, text, re.IGNORECASE):
                 if _named_here(text, m):
@@ -393,24 +451,27 @@ def _channels(text: str) -> dict:
                     ruled_out.append(channel)
             if channel in present:
                 break
-    missing = [c for c in _CHANNELS if c not in present]
+    missing = [c for c in checklist if c not in present]
     ruled_out = [c for c in ruled_out if c not in present]
     if not present:
         return _fact("channels", "absent",
                      "No channel from the checklist is named in this brief.",
                      present=[], missing=missing, ruled_out=ruled_out,
-                     checklist=list(_CHANNELS))
+                     checklist=list(checklist), checklist_source=checklist_source)
     status = "present" if not missing else "partial"
     return _fact("channels", status,
                  # "named", not "covered": the check reads words, and whether a channel that
                  # is named is actually planned is a judgment. Saying "covered" would be the
                  # server claiming something it did not establish.
-                 f"{len(present)} of {len(_CHANNELS)} checklist channels are NAMED in the "
+                 f"{len(present)} of {len(checklist)} checklist channels are NAMED in the "
                  f"brief (named, not necessarily planned)"
                  + (f"; not named: {', '.join(missing)}." if missing else "."),
                  evidence=list(evidence.values()), evidence_by_channel=evidence,
                  present=present, missing=missing, ruled_out=ruled_out,
-                 checklist=list(_CHANNELS))
+                 # `checklist` already named which list was used "so a reader is never
+                 # guessing what missing was measured against". With two possible lists that
+                 # stops being a nicety, so it says WHOSE as well as which.
+                 checklist=list(checklist), checklist_source=checklist_source)
 
 
 # D94: the commonest words in the languages this library's markets actually use. Stopwords,

@@ -266,6 +266,25 @@ def remedy_for(code: str) -> str:
     return _entry(code)[_FIELDS.index("remedy")]
 
 
+def _named_support(remedy: str) -> str:
+    """"Ask whoever installed this" — with a name, where the customer has given one (D23).
+
+    That phrase is the best a product shipping to strangers can do, and it is a shrug: the
+    person reading it usually cannot act on it. The customer knows who IT is, and §12.2 gives
+    them somewhere to say so. Appended rather than substituted, because the rest of the remedy
+    is the part that says WHAT to ask for.
+    """
+    if not remedy or "whoever installed this" not in remedy:
+        return remedy
+    try:
+        import rulebook
+
+        who = rulebook.support()
+    except ValueError:
+        who = None
+    return f"{remedy} (Here, that is: {who}.)" if who else remedy
+
+
 def notice(code: str, *, detail: str, affects: Optional[str] = None,
            remedy: Optional[str] = None, next_step: Optional[str] = None,
            next_actions: Optional[list] = None, count: int = 1, **extra) -> dict:
@@ -281,7 +300,7 @@ def notice(code: str, *, detail: str, affects: Optional[str] = None,
         "severity": severity,
         "scope": scope,
         "affects": affects or reg_affects,
-        "remedy": remedy or reg_remedy,
+        "remedy": _named_support(remedy or reg_remedy),
         # D22/§11.7: `detail` interpolates exception text and asset paths, and this field is
         # explicitly the one this product tells people to send to support. On Windows those
         # paths embed `C:\Users\<name>\` and on macOS `/Users/<name>/` — a filesystem path

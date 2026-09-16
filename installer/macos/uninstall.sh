@@ -24,6 +24,10 @@ if [ "$PURGE" = 1 ]; then
   if [ -d "$DATA" ]; then
     echo "About to delete the campaign library at $DATA:"
     du -sh "$DATA" 2>/dev/null || true
+    # D28: the rulebook, named separately. It is the one file in there the customer WROTE
+    # rather than accumulated — a library of campaigns can be re-uploaded from the decks, and
+    # a set of rules somebody sat down and agreed cannot be.
+    [ -f "$DATA/rulebook.yaml" ] && echo "  ...including your rulebook ($DATA/rulebook.yaml), which is not rebuildable from your decks. Copy it out first if you want to keep it."
     printf "Type DELETE to confirm: "
     read -r answer
     if [ "$answer" = "DELETE" ]; then rm -rf "$DATA"; echo "Library deleted."
@@ -31,6 +35,7 @@ if [ "$PURGE" = 1 ]; then
   fi
 else
   [ -d "$DATA" ] && echo "Your campaign library is still at $DATA (use --purge to remove it)."
+  [ -f "$DATA/rulebook.yaml" ] && echo "Your rulebook is still at $DATA/rulebook.yaml."
 fi
 
 CFG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"

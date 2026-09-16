@@ -76,12 +76,17 @@ def canonical_shape(value: str) -> str:
 # handing it a severity downgrade path, which is precisely what the golden set in §7.7 exists
 # to detect.
 #
-# The tables below are hard-coded today. §12.1/12.2 move `STATUS_SYNONYMS` into the bundled
-# rulebook with a customer overlay, because a stage name is customer vocabulary. The others
-# stay product-owned: `verified`/`stated` and `actual`/`predicted` are this library's
-# epistemics, and a customer redefining "confirmed" as measured would corrupt every judgment
-# that weighs verified evidence more heavily. `normalise()` already takes `synonyms=` as a
-# parameter, so that change touches store.py's two wrappers and nothing else.
+# The tables below are the PRODUCT's, and they stay. §12.2 lets a customer ADD to the status
+# table from their own rulebook — `store._declared("statuses")` is merged into the synonyms
+# passed here — because a stage name is customer vocabulary and an agency that says "shipped"
+# is describing their own process. What they may not do is invent a stage: the three canonical
+# values are what every gap check and reconciliation is written against, so the rulebook
+# loader refuses a mapping onto anything else.
+#
+# The others stay product-owned and non-overridable, and the rulebook refuses them by name:
+# `verified`/`stated` and `actual`/`predicted` are this library's EPISTEMICS, and a customer
+# redefining "confirmed" as measured would corrupt every judgment that weighs verified
+# evidence more heavily.
 
 # ── vocabulary. Explicit, so a person can read and disagree with it ─────────
 

@@ -267,7 +267,10 @@ def test_the_file_is_read_from_beside_an_installed_binary(monkeypatch, tmp_path)
     a frozen app `__file__` points inside the bundle, where an administrator can neither see
     nor replace a file — and §12.2's whole premise is that a customer edits this."""
     monkeypatch.setattr(config, "app_dir", lambda: tmp_path)
-    (tmp_path / "rulebook.yaml").write_text(
+    installed = tmp_path / "installed"
+    installed.mkdir(exist_ok=True)
+    monkeypatch.setattr(config, "app_dir", lambda: installed)
+    (installed / "rulebook.yaml").write_text(
         "version: 'from-the-install-dir'\nrules:\n"
         "  - id: one\n    rule: A rule.\n    severity: should_fix\n    why: Because.\n")
     rulebook.load.cache_clear()
@@ -759,18 +762,20 @@ def test_the_visible_copy_wins_and_the_health_check_says_which_is_in_force(
     nothing — which is worse than either half alone, because it looks like it worked."""
     import sys
 
-    bundle = tmp_path / "_internal"
+    installed = tmp_path / "installed"
+    installed.mkdir(exist_ok=True)
+    bundle = installed / "_internal"
     bundle.mkdir()
     (bundle / "rulebook.yaml").write_text("version: 'from-the-bundle'\nrules: []\n")
-    (tmp_path / "rulebook.yaml").write_text("version: 'the-one-you-can-edit'\nrules: []\n")
-    monkeypatch.setattr(config, "app_dir", lambda: tmp_path)
+    (installed / "rulebook.yaml").write_text("version: 'the-one-you-can-edit'\nrules: []\n")
+    monkeypatch.setattr(config, "app_dir", lambda: installed)
     monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
     rulebook.load.cache_clear()
     try:
         assert rulebook.version() == "the-one-you-can-edit"
         assert rulebook.is_the_editable_copy() is True
 
-        (tmp_path / "rulebook.yaml").unlink()
+        (installed / "rulebook.yaml").unlink()
         rulebook.load.cache_clear()
         component = core.health_check(conn, probe=False)["components"]["rulebook"]
         assert component["ok"] is True, "it works, so it is not a failure"
