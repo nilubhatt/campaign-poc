@@ -3055,10 +3055,90 @@ with an item to close them against — rather than because a phase number makes 
 Every one is either a cost that is fine at the sizes anyone has today and will not stay fine,
 or a second copy of something that already exists once.
 
-- [ ] **13.1 One definition of "measured"** — `readiness`, `gaps`, `coverage` and
+- [x] **13.1 One definition of "measured"** — `readiness`, `gaps`, `coverage` and
       `disconfirming` each decide separately what a measured library is, and two of them now
       disagree OUT LOUD: a library can be told all its campaigns have measured results and, in
       the next response, that nothing in it has a measured verdict. *Closes D75, D88.*
+
+      **The fix is not one predicate, and that is the whole finding.** Reproduced first, over
+      stdio, before anything changed — and read closely the two sentences are not one claim
+      made twice. They are two different claims wearing one word: `with_results` is numbers on
+      file, `with_verdicts` is somebody having said whether those numbers were good and stood
+      behind it (a `performed_well` / `underperformed` tag, `source: verified`). A campaign can
+      have every number anybody asked for and no verdict at all — that is the ordinary state of
+      a library nobody has been back to — so collapsing them would make the product either
+      claim a verdict it does not have or deny results it does. §6.6 had worked this out for
+      the evidence ladder and written it down; the other three surfaces never got it.
+
+      **That distinction is not the unification the rows asked for, and the first round of
+      this item stopped there.** D75 asks for "one shared library-state helper"; D88 says four
+      surfaces "decide separately what measured means". Neither is about how many PREDICATES
+      exist — they are about four surfaces applying four different record lines and status
+      tests to one word. Naming two facts explains why there are two names; it does not touch
+      membership. Review caught it, and caught that giving `coverage` a status test while
+      leaving `readiness` without one had produced a SECOND out-loud contradiction where the
+      first had been: *"all 3 campaign(s) here have measured results"* beside *"none with
+      results on file"*, both halves now about the same fact.
+
+      So membership is decided once: `measured = with_results & ran`, and `readiness`, `gaps`
+      and `coverage` all read it — they agree by construction rather than by three status
+      tests somebody has to keep in step. `with_results` stays beside it as a fact about DATA,
+      because `_evidence_strength` weighs the records a judgment CITED and a citation of a
+      superseded version is still a citation of something with numbers on it. `has_results`
+      and `has_a_verdict` are the per-record predicates for exactly that case.
+
+      **The regression the adversarial pass caught, which both the design review and I
+      missed.** `has_a_verdict` matched the tag value as an exact string, and §12.2 settled
+      that a declared vocabulary is a synonym resolved WHEN TWO VALUES ARE COMPARED. An agency
+      that declares `underperformed: ['flopped']` and tags a record `flopped` has recorded a
+      verdict — `store.filter_campaign_ids` says so, because retrieval folds tags at read
+      time — and `core` said it had not. This was not cosmetic: the disconfirming search HID a
+      contradicting precedent that the code before §13.1 found, and reported "no verdict
+      recorded against them" about a record whose verdict was written in the customer's own
+      word. §13.1 made the product worse than it was until this was fixed. Both predicates
+      fold through `store.fold_vocabulary` now, and `carries_verdict` exists because the
+      narrower "does this record carry THIS verdict" was written out inline in the one place
+      where getting it wrong cost a precedent.
+
+      Three further findings from the same pass: a `performed_as_expected` tag is an ANSWER,
+      so naming that record in `could_be_checked_if` as having "no verdict recorded" invited
+      somebody to contradict what was already recorded — `with_neutral_verdicts` is the third
+      bucket that fixes it. A verdict on a CANCELLED campaign was counted as precedent while
+      the same helper said it never ran; `with_verdicts` applies the status rule too. And the
+      remedy list was sorted by uuid and then truncated, so which three records it named was
+      arbitrary and unstable — oldest first now, which is also the honest order. The disconfirming search
+      now reads *"3 campaign(s) here have measured results and no verdict recorded against
+      them"* instead of *"no campaign in the library is tagged X with measured results behind
+      it"* — the same fact, said in a way that does not contradict the sentence before it, and
+      naming the records that are one `update_campaign` away from lifting it — the full count,
+      not the length of the capped list, which said "3 campaign(s)" about seven.
+
+      It distinguishes the THREE states it can be in — verdicts exist but none of this kind,
+      results with no verdict recorded, nothing measured at all — because the first round
+      collapsed them into one sentence that was false in two of them: on a library where every
+      campaign was tagged `performed_well`, a search for `underperformed` reported that
+      nothing carried a verdict, and the string it replaced had been TRUE there. A fix that
+      makes a sentence false where it used to be true is worse than the defect. The state is
+      decided once as `why_not` and rendered twice — in `what_it_means` and in
+      `_say_the_disconfirming_check`, which is the sentence the model says ALOUD and which the
+      first round left on the old wording entirely.
+
+      **What the inventory turned up beyond the two rows**, none of which the item names:
+      `readiness` had no status test at all, so a `proposed` campaign with numbers counted as
+      measured — named as a finding in the first round and not actually fixed until the
+      second, which is a row closed with its own statement still true, this project's most
+      repeated defect; `gaps` counted stubs and the other two did not; `_campaigns_that_could_be_tagged`
+      offered SUPERSEDED records as the remedy, which tagging would never make reachable;
+      `missing_input_for_citations` computed a measured set and never used it; `coverage` held
+      two answers, reporting zero measured cells while refusing to say the library was
+      unmeasured; and `store.list_campaigns` carried `has_metrics` (any row, a forecast
+      included) with no `has_actual_metrics` beside it — published raw to clients, so a campaign
+      holding nothing but what somebody HOPED for reported as having metrics. The listing also had no
+      legacy-schema guard. §13.1 put it on the save path and it was added there — but review
+      established that the claim first written here, "the fourth function to crash on an
+      upgraded v0.2.0 database", overstates it: `upgrade()` creates every missing TABLE before
+      anything else, so a live install cannot reach that state, and what actually breaks an
+      upgraded database is missing COLUMNS (D89). The guard is defensive and now says so.
 - [ ] **13.2 Computed facts cached rather than recomputed** — `gaps()` recomputes every
       campaign's facts on every call (500 decks ≈ 40 s, dominated by the channel regexes) and
       does it before the empty-library early return. Facts are deterministic on body text, so

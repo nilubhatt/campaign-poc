@@ -99,7 +99,12 @@ def classify(conn, *, campaign_id: str, subject: str, classification: str, why: 
 
     # Stamped at the moment of the judgment, not read back later — the point is to record what
     # the person could see when they said it.
-    outcome_known = bool(record.get("has_actual_metrics"))
+    # §13.1: the shared predicate, not a byte-identical copy of it. This line stood in two
+    # files and `core.has_results` is the same test a third time — three expressions of one
+    # rule is how they drift, which is the whole of D75.
+    import core
+
+    outcome_known = core.has_results(record)
     store.insert_drift_classification(
         conn, campaign_id=campaign_id, subject=subject.strip(), item=about,
         classification=classification, why=why.strip(),

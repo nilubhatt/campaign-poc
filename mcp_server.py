@@ -1148,6 +1148,12 @@ def list_campaigns(record_type: Optional[RecordType] = None, status: Optional[St
     show whether a record has been replaced by a corrected/later one (and by what) — check
     these before treating two similarly-titled records as both live.
 
+    `has_metrics` and `has_actual_metrics` are DIFFERENT claims (§13.1). The first counts any
+    measurement row, a target or a forecast included; the second means somebody recorded what
+    actually happened. A campaign carrying nothing but what its brief HOPED for has the first
+    and not the second, and only the second is evidence of how anything went — so never
+    report "this campaign has results" from `has_metrics`.
+
     `embedded` means FULLY searchable. When it is false, chunks_embedded/chunks_total (and
     assets_embedded/assets_total) say how much of the record search can actually find —
     "stored" and "searchable" are different states, and an upload that ran out of time sits
@@ -1163,7 +1169,16 @@ def list_campaigns(record_type: Optional[RecordType] = None, status: Optional[St
              "market": r["market"], "collection": r["collection"], "embedded": r["embedded"],
              "chunks_total": r["chunks_total"], "chunks_embedded": r["chunks_embedded"],
              "assets_total": r["assets_total"], "assets_embedded": r["assets_embedded"],
-             "has_metrics": r["has_metrics"], "has_evaluations": r["has_evaluations"],
+             # BOTH, because they are different claims and only the looser one was published
+             # (§13.1). `has_metrics` counts any row — a target or a forecast included — so a
+             # campaign carrying nothing but what somebody HOPED for reported `has_metrics:
+             # true` to the client, and §5.3 spent an item establishing that a forecast is the
+             # opposite of a measured outcome. `has_actual_metrics` is the one that means it
+             # was measured. The DOCSTRING says so too: a field whose meaning lives only in a
+             # Python comment is a field the model reading this tool never learns.
+             "has_metrics": r["has_metrics"],
+             "has_actual_metrics": r["has_actual_metrics"],
+             "has_evaluations": r["has_evaluations"],
              "supersedes": r["supersedes"], "is_superseded": r["is_superseded"]}
             for r in rows]}
         # §5.6: eight rows with nothing to say whether eight is enough was the review's own
@@ -1532,9 +1547,12 @@ def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
 
     **The server checks your verdict against the other side.** After you save, it searches
     for precedent that CONTRADICTS the verdict — campaigns resembling this one that worked
-    anyway when you said revise, or that failed when you said approve, counting only measured
-    results rather than impressions. It comes back as `disconfirming`, with the measured line
-    behind each. Read it before you speak: if it found something the judgment did not cite,
+    anyway when you said revise, or that failed when you said approve. What it counts is a
+    measured VERDICT: somebody recorded whether the campaign worked and stood behind it, which
+    is a stricter thing than having numbers on file (§13.1). A library full of measured
+    campaigns that nobody has judged has nothing here to argue with, and `disconfirming.why_not`
+    says which of those two is missing. It comes back as `disconfirming`, with the measured
+    line behind each. Read it before you speak: if it found something the judgment did not cite,
     say so before you give the verdict. And read the `code` rather than the absence of rows —
     "could not be checked" and "nothing came back" are opposite conclusions. You cannot write
     this field; a check you report on yourself is not a check.

@@ -1133,7 +1133,12 @@ def attribute(conn, *, campaign_id: str, event_id: str, note: str, stated_by: st
     # §9.4's stamp: what the person could see when they said it. An account given before the
     # numbers arrived and one given after are two judgments, and which was which is the thing
     # a later reader most needs.
-    outcome_known = bool(record.get("has_actual_metrics"))
+    # §13.1: the shared predicate, not a byte-identical copy of it. This line stood in two
+    # files and `core.has_results` is the same test a third time — three expressions of one
+    # rule is how they drift, which is the whole of D75.
+    import core
+
+    outcome_known = core.has_results(record)
     store.insert_attribution(conn, campaign_id=campaign_id, event_id=event_id,
                              note=note.strip(), stated_by=stated_by.strip(),
                              outcome_known=outcome_known, bears_on=bears_on)

@@ -1649,12 +1649,34 @@ def list_campaigns(conn, *, record_type: Optional[str] = None,
 
     ids = [r["id"] for r in rows]
     with_metrics: set[str] = set()
+    with_actuals: set[str] = set()
     with_evaluations: set[str] = set()
-    if ids:
+    # The `metrics` table may not exist, and this guard is DEFENSIVE rather than a fix for a
+    # reachable crash — the distinction matters, because an overstated one is the kind of
+    # claim this project keeps finding in its own comments. `upgrade()` runs `_SCHEMA`'s
+    # `CREATE TABLE IF NOT EXISTS` for every table before anything else, and every entry
+    # point calls `init_db()`, so a live install cannot reach here without the table; review
+    # drove a v0.2.0 fixture through `init_db` → `save_evaluation` and it was fine. What
+    # actually breaks an upgraded database is missing COLUMNS (D89), which this does not
+    # touch. It is kept because `campaigns_with_actual_metrics` carries the same guard for
+    # the same reason — a shared reader is the right place to stop a shared failure — and
+    # because §13.1 put this function on the save path, where a raise is unrecoverable.
+    if ids and _columns(conn, "metrics"):
         placeholders = ",".join("?" * len(ids))
         with_metrics = {r["campaign_id"] for r in conn.execute(
             f"SELECT DISTINCT campaign_id FROM metrics WHERE campaign_id IN ({placeholders})", ids
         ).fetchall()}
+        # §13.1: MEASURED rows, separately. `get_campaign` carries both flags and this
+        # carried only the first, so a record read through the listing had no
+        # `has_actual_metrics` key at all — and `core.has_results`, reading it with `.get`,
+        # answered False for every campaign in the library without erroring. Two shapes of one
+        # record, one of them missing the field the shared predicate reads, is how a shared
+        # predicate becomes a silent wrong answer rather than a shared one.
+        with_actuals = {r["campaign_id"] for r in conn.execute(
+            f"SELECT DISTINCT campaign_id FROM metrics WHERE metric_type = 'actual' "
+            f"AND campaign_id IN ({placeholders})", ids).fetchall()}
+    if ids and _columns(conn, "evaluations"):
+        placeholders = ",".join("?" * len(ids))
         with_evaluations = {r["campaign_id"] for r in conn.execute(
             f"SELECT DISTINCT campaign_id FROM evaluations WHERE campaign_id IN ({placeholders})", ids
         ).fetchall()}
@@ -1669,6 +1691,12 @@ def list_campaigns(conn, *, record_type: Optional[str] = None,
     if ids:
         placeholders = ",".join("?" * len(ids))
         for table, sink in (("campaign_chunks", chunk_counts), ("assets", asset_counts)):
+            # Same guard, same reason: every table this function reaches for is one an
+            # upgraded database may not have, and a listing that raises is a listing no
+            # migration can be run from. A missing table means "nothing recorded", which is
+            # the truth about a database that never had it.
+            if not _columns(conn, table):
+                continue
             for row in conn.execute(
                 f"""SELECT campaign_id, COUNT(*) AS total,
                            SUM(CASE WHEN embedded THEN 1 ELSE 0 END) AS done
@@ -1683,7 +1711,11 @@ def list_campaigns(conn, *, record_type: Optional[str] = None,
         d["markets"] = _parse_stored_markets(d["markets"])
         d["chunks_total"], d["chunks_embedded"] = chunk_counts.get(d["id"], (0, 0))
         d["assets_total"], d["assets_embedded"] = asset_counts.get(d["id"], (0, 0))
+        # `has_metrics` counts ANY row, a forecast or a target included, and is published
+        # raw to clients. `has_actual_metrics` is the one that means "this was measured" —
+        # §5.3 spent an item on the distinction and the listing carried only the looser half.
         d["has_metrics"] = d["id"] in with_metrics
+        d["has_actual_metrics"] = d["id"] in with_actuals
         d["is_superseded"] = d["id"] in superseded_ids
         d["has_evaluations"] = d["id"] in with_evaluations
         out.append(d)

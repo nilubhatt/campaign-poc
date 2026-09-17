@@ -329,7 +329,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         # A record being ingested has no metrics yet, so this is always False here — it
         # reads `has_actual_metrics` anyway so the two call sites cannot answer the same
         # question two ways, which is how they drift.
-        has_metrics=current["has_actual_metrics"],
+        has_metrics=has_results(current),
         earlier_judgment=earlier_judgment,
         # §8.6: a tracked client comment IS client feedback, and it arrives with its
         # provenance already assembled. Without this the correction loop had no input at
@@ -1928,17 +1928,16 @@ def _evidence_strength(conn, *, cited_ids: Optional[list], text: str) -> dict:
     # mean by measured. `verified` is a performance VERDICT somebody stood behind, which is
     # what the review means by "verified rather than stated performance". Five concluded
     # campaigns with metrics and no performance tags were reported as "none of them has
-    # measured results" while `coverage` called the same five `measured` — D88's drift, and
-    # the strength ladder is now built on the first while still reporting the second.
-    # `campaigns_with_actual_metrics` returns an empty set on a database with no `metrics`
-    # table. Guarded there rather than here: this is the THIRD save-path function to crash on
-    # an upgraded v0.2.0 database, and §5.3 was doing it too — unnoticed, because the legacy
-    # tests happened to cite nothing.
-    measured_ids = store.campaigns_with_actual_metrics(conn)
-    with_results = [r for r in records if r["id"] in measured_ids]
-    verified = [r for r in records
-                if {t.get("value") for t in (r.get("tags") or [])
-                    if t.get("source") == "verified"} & {"performed_well", "underperformed"}]
+    # measured results" while `coverage` called the same five `measured` — D88's drift. §13.1
+    # made that distinction the product's, in `has_results` and `has_a_verdict`; this is where
+    # it was first written down and it is now one implementation rather than this one.
+    #
+    # The PER-RECORD predicates, not `library_state`'s sets: these are the records a judgment
+    # CITED, and a citation of a superseded version is still a citation of something with
+    # numbers on it. The library-wide sets drop superseded records by design, so asking them
+    # here would answer a question about the library when the question is about the citations.
+    with_results = [r for r in records if has_results(r)]
+    verified = [r for r in records if has_a_verdict(r)]
 
     dominated_by, top_similarity, similarity_checked = None, None, True
     if records:
@@ -2089,10 +2088,27 @@ def _say_the_disconfirming_check(check: dict) -> str:
         return (" The search for contradicting precedent COULD NOT RUN. Do not report this "
                 "verdict as unchallenged — nothing was checked.")
     if code == "nothing_to_check_against":
-        return (" This verdict could not be checked against the other side: no campaign in "
-                "the library carries a measured performance verdict. Say the check was not "
-                "possible — do NOT say nothing contradicted it. `could_be_checked_if` names "
-                "the campaigns that would make it possible.")
+        # §13.1 round 2: the SAME three states the check itself distinguishes, rendered for
+        # the model rather than re-decided here. This said "no campaign in the library
+        # carries a measured performance verdict" in all three — false in two of them, and
+        # it is the sentence the model says aloud, so it was the one that mattered most and
+        # the one the first round left untouched. It also pointed at
+        # `could_be_checked_if` when that list was empty.
+        why_not = check.get("why_not")
+        if why_not == "none_of_this_kind":
+            return (" This verdict could not be checked against the other side: the library "
+                    "carries measured verdicts, and none of them is the kind that would "
+                    "contradict this one. Say the check was not possible — do NOT say "
+                    "nothing contradicted it.")
+        if why_not == "nothing_measured_at_all":
+            return (" This verdict could not be checked against the other side: nothing in "
+                    "this library has been measured, so nothing can carry a verdict. Say the "
+                    "check was not possible — do NOT say nothing contradicted it.")
+        return (" This verdict could not be checked against the other side: campaigns here "
+                "have measured results and nobody has recorded whether they worked, so there "
+                "is no verdict to argue with. Say the check was not possible — do NOT say "
+                "nothing contradicted it. `could_be_checked_if` names the campaigns that "
+                "would make it possible.")
     if code == "verdict_rests_on_a_rule":
         return (" No disconfirming search was run: this verdict rests only on rules that were "
                 "broken, and a rule is not a matter of precedent.")
@@ -2263,7 +2279,8 @@ def _add_vector(conn, vector_id: str, vec: list, *, space: str = "campaign") -> 
     store.record_vector_model(conn, vector_id, embedding_model_id(space), space=space)
 
 
-def _pole_search(conn, *, tag: str, text: Optional[str] = None,
+def _pole_search(conn, *, tag: str, state: Optional[dict] = None,
+                 text: Optional[str] = None,
                  campaign_id: Optional[str] = None, top_k: int,
                  exclude: Optional[set] = None) -> list:
     """The most similar records with a MEASURED verdict of one kind, above the floor.
@@ -2282,9 +2299,17 @@ def _pole_search(conn, *, tag: str, text: Optional[str] = None,
         raise
     except ValueError:
         return []
+    # §13.1 round 2: which campaigns HAVE a verdict is the helper's decision. `find_similar`'s
+    # own tag filter and record line happen to agree with `with_verdicts` on every input the
+    # schema can currently produce — verified, no observed defect here — so this intersection
+    # fixes nothing today. It is kept because the two were arriving at one answer by two
+    # routes, which is the arrangement D75 is about, and
+    # `test_the_pole_search_and_the_helper_cannot_disagree` proves the agreement rather than
+    # assuming it. The SEARCH still decides what is SIMILAR; that is what it is for.
+    holds_a_verdict = (state or library_state(conn))["with_verdicts"]
     kept = [m for m in matches
             if m["campaign_id"] not in exclude
-            and m.get("record_type") != "reference"
+            and m["campaign_id"] in holds_a_verdict
             and (m.get("similarity") or 0) >= _DISCONFIRMING_FLOOR]
     return kept[:top_k]
 
@@ -2343,16 +2368,63 @@ def _disconfirming_search(conn, *, verdict: str, subject_text: str, query_basis:
             "check this judgment passed.")
     # Whether the library COULD argue back, asked before whether it did. An empty shelf
     # reported as a clean check turns an absence of evidence into a supporting vote.
-    possible = [cid for cid in store.filter_campaign_ids(
-        conn, tags=[{"value": tag, "source": "verified"}])
-        if (store.get_campaign(conn, cid) or {}).get("record_type") != "reference"]
+    # §13.1/D88: through the shared state, not a fourth way of asking. This read the STORE
+    # for verdict-tagged records while `readiness` counted metric rows, `coverage` counted
+    # them again and `_evidence_strength` did both — and because it asked differently it
+    # applied a different record line, so `could_be_checked_if` could name a SUPERSEDED
+    # record that tagging would never make reachable: a remedy that does not remedy anything.
+    state = library_state(conn)
+    # From the records already in hand. This re-fetched each one with `store.get_campaign`,
+    # an N+1 introduced inside the fix — and `library_state`'s records carry `tags` already.
+    possible = sorted(c["id"] for c in state["records"]
+                      if c["id"] in state["with_verdicts"] and carries_verdict(c, tag))
     if not possible:
+        waiting, waiting_total = _campaigns_that_could_be_tagged(conn, state)
+        # WHICH of the three states this is, decided once (§13.1 round 2). There are three
+        # genuinely different reasons the check cannot run and the first version collapsed
+        # them into one sentence that was false in two of them: on a library where every
+        # campaign was tagged `performed_well`, a search for `underperformed` reported
+        # "nothing in the library carries a measured verdict" — while two campaigns carried
+        # one. The string it replaced was TRUE in that state, so the fix made the product
+        # less honest in the function the item exists to make honest.
+        #
+        # A code rather than a sentence, because `_say_the_disconfirming_check` renders this
+        # too — and it was left on the old wording, which is the sentence the model actually
+        # says aloud. Two renderings of one decision; not two decisions.
+        why_not = ("none_of_this_kind" if state["with_verdicts"]
+                   else "results_without_verdicts" if waiting
+                   else "nothing_measured_at_all")
         return outcome(
             "nothing_to_check_against",
-            f"No campaign in the library is tagged {tag!r} with measured results behind it, "
-            f"so there is no precedent that could contradict this verdict. That is a fact "
-            f"about the library, NOT a check this judgment passed.",
-            could_be_checked_if=_campaigns_that_could_be_tagged(conn))
+            {
+                "none_of_this_kind": (
+                    f"{len(state['with_verdicts'])} campaign(s) here carry a measured "
+                    f"verdict and none of them is {tag!r}, so there is no precedent that "
+                    f"could contradict this one. That is a fact about the library, NOT a "
+                    f"check this judgment passed."),
+                # The two facts, said apart. This is the state that used to read "no campaign
+                # is tagged X with measured results behind it" on a library that had just
+                # been told all its campaigns HAVE measured results — one word doing two
+                # jobs, and the product appearing to contradict itself in consecutive
+                # responses. What is missing is the VERDICT; the results are on file.
+                "results_without_verdicts": (
+                    f"{waiting_total} campaign(s) here have measured results and no verdict "
+                    f"recorded against them, so none is tagged {tag!r} yet and there is no "
+                    f"precedent that could contradict this one. That is a fact about the "
+                    f"library, NOT a check this judgment passed — and it is one "
+                    f"`update_campaign` away from not being true."),
+                "nothing_measured_at_all": (
+                    f"Nothing in this library has been measured, so nothing can carry a "
+                    f"verdict and there is no precedent that could contradict this one. "
+                    f"That is a fact about the library, NOT a check this judgment passed."),
+            }[why_not],
+            why_not=why_not,
+            # The FULL count beside the capped list. `_campaigns_that_could_be_tagged` shows
+            # at most `_MAX_DISCONFIRMING`, and reading the count off the truncated list said
+            # "3 campaign(s)" about seven — the rule `coverage` states in writing: the list
+            # can lose detail, the shape of the library must not depend on where the cut fell.
+            waiting_total=waiting_total,
+            could_be_checked_if=waiting)
     already = set(cited_ids or [])
     try:
         # The cited ones are excluded from the CANDIDATES, not filtered out afterwards.
@@ -2360,7 +2432,8 @@ def _disconfirming_search(conn, *, verdict: str, subject_text: str, query_basis:
         # genuinely uncited and contradicting, was never looked at — and the answer came back
         # "nothing contradicted it".
         uncited_matches = _pole_search(
-            conn, tag=tag, top_k=_MAX_DISCONFIRMING, exclude=already | {subject_campaign_id},
+            conn, tag=tag, state=state,
+            top_k=_MAX_DISCONFIRMING, exclude=already | {subject_campaign_id},
             **({"campaign_id": subject_campaign_id} if subject_campaign_id
                else {"text": subject_text}))
     except embedding.Unavailable as exc:
@@ -2412,9 +2485,13 @@ def _both_poles(conn, *, evidence: list, text: Optional[str],
     """
     ranked = {row["campaign_id"] for row in evidence}
     poles: dict = {}
+    # Once for both poles: the library does not change between them, and `library_state`
+    # reads the whole campaigns table.
+    state = library_state(conn)
     for pole, tag in (("worked", "performed_well"), ("did_not_work", "underperformed")):
         try:
-            matches = _pole_search(conn, tag=tag, text=text, campaign_id=campaign_id,
+            matches = _pole_search(conn, tag=tag, state=state, text=text,
+                                  campaign_id=campaign_id,
                                    top_k=_MAX_DISCONFIRMING,
                                    exclude={campaign_id} if campaign_id else set())
         except embedding.Unavailable:
@@ -2508,7 +2585,7 @@ def _why_it_contradicts(conn, campaign_id: str, tag: str) -> Optional[str]:
     return None
 
 
-def _campaigns_that_could_be_tagged(conn) -> list:
+def _campaigns_that_could_be_tagged(conn, state: Optional[dict] = None) -> tuple:
     """Which records would make the check possible, when it is not (§6.4 / §5.6's rule).
 
     Every other `cannot` in this codebase names the record that would lift it, because a
@@ -2516,17 +2593,25 @@ def _campaigns_that_could_be_tagged(conn) -> list:
     measured verdict" and stopped — while the library may be full of concluded campaigns with
     real metrics that nobody has tagged. That is one `update_campaign` away.
     """
-    measured = store.campaigns_with_actual_metrics(conn)
-    waiting = []
-    for cid in measured:
-        record = store.get_campaign(conn, cid)
-        if not record or record.get("record_type") == "reference":
-            continue
-        verified = {t.get("value") for t in (record.get("tags") or [])
-                    if t.get("source") == "verified"}
-        if not verified & {"performed_well", "underperformed"}:
-            waiting.append({"campaign_id": cid, "title": record["title"]})
-    return waiting[:_MAX_DISCONFIRMING]
+    # §13.1: `without_verdicts` IS this list — measured, and nobody's judgment about it — and
+    # it applies the shared record line rather than a fourth one, which is how the first
+    # version came to offer SUPERSEDED records as the remedy: tagging one would never have
+    # made the check possible. Stubs ARE in it — a stub is a row of results, and a verdict on
+    # one is as good a precedent as any. An earlier draft of this comment claimed they were
+    # excluded, which they never were.
+    #
+    # `(shown, total)`. The caller reported `len()` of the CAPPED list as the number of
+    # campaigns waiting, so a library with seven said three — `coverage` states the rule this
+    # breaks in writing: the list can lose detail, the shape of the library must not.
+    state = state or library_state(conn)
+    # OLDEST FIRST, not sorted by id. The ids are uuids, so `sorted()` then truncated to
+    # `_MAX_DISCONFIRMING` named three campaigns chosen at random with respect to anything a
+    # reader cares about — and which three changes if the same records are re-imported. The
+    # oldest unjudged results are also the ones somebody is least likely to remember, which
+    # is the honest order for "go and record what these did".
+    waiting = [{"campaign_id": c["id"], "title": c["title"]}
+               for c in state["records"] if c["id"] in state["without_verdicts"]]
+    return waiting[:_MAX_DISCONFIRMING], len(waiting)
 
 
 def _clean_closest_precedent(conn, value) -> Optional[dict]:
@@ -4418,15 +4503,19 @@ def coverage_offer(conn) -> list[dict]:
 
 def _ranked_gaps(conn) -> dict:
     """The ranked gaps alone: everything that can decide `most_valuable`."""
-    # Superseded records are excluded from every search, so counting one as the library's
-    # measured evidence describes something no judgment can reach.
-    superseded = store.get_superseded_campaign_ids(conn)
-    campaigns = [c for c in store.list_campaigns(conn)
-                 if c.get("record_type") != "reference" and c["id"] not in superseded]
+    # ONE read, and the shared record line. Superseded records are excluded from every
+    # search, so counting one as the library's measured evidence describes something no
+    # judgment can reach; a `stub` IS results and belongs in the denominator of "finished
+    # campaigns with nothing measured", which is why this population is wider than the one
+    # `coverage` and `readiness` describe. `library_state` holds both and says which is which.
+    state = library_state(conn)
+    campaigns = [c for c in state["records"] if c.get("record_type") != "reference"]
     # A campaign that has not run cannot be missing its results, and asking for them is a
     # request nobody can satisfy — the permanent-complaint failure, on the highest-ranked
-    # gap. `after_upload` already drew this line; this did not.
-    ran = [c for c in campaigns if c.get("status") == "concluded"]
+    # gap. `after_upload` already drew this line; this did not. Taken from the shared state
+    # rather than recomputed: it was worked out here AND in `library_state`, where the
+    # docstring claimed nothing had to subtract it by hand.
+    ran = [c for c in campaigns if c["id"] in state["ran"]]
     found: list[dict] = []
 
     if not campaigns:
@@ -4451,7 +4540,7 @@ def _ranked_gaps(conn) -> dict:
     # `has_metrics` counts any metric row, so a PREDICTED figure silenced this gap — and a
     # forecast is the opposite of a measured outcome; it is the thing reconciliation later
     # scores against the actuals.
-    measured_ids = store.campaigns_with_actual_metrics(conn)
+    measured_ids = state["measured"]
     with_outcomes = [c for c in ran if c["id"] in measured_ids]
     if ran and len(with_outcomes) < len(ran):
         found.append({
@@ -4914,7 +5003,11 @@ def missing_input_for_citations(conn, cited_ids: Optional[list]) -> Optional[dic
     """
     if not cited_ids:
         return most_valuable_missing_input([])
-    measured = store.campaigns_with_actual_metrics(conn)
+    # No library-wide read here. A `measured` set was computed on this line and never used —
+    # the per-record `metric_type == "actual"` filter four lines down is the real predicate,
+    # and it is about the CITED records rather than the library. A dead call to a shared
+    # helper reads as though this surface agrees with the others about something it never
+    # asks. (§13.1 review.)
     cited = [store.get_campaign(conn, cid) for cid in cited_ids]
     cited = [c for c in cited if c]
     if not cited:
@@ -5809,14 +5902,16 @@ def coverage(conn) -> dict:
     to the number of campaigns, and `campaigns_total` plus the note say so rather than
     leaving somebody to add them up.
     """
-    superseded = store.get_superseded_campaign_ids(conn)
-    # A `stub` is "a placeholder record" by the product's own definition, so counting one as
-    # evidence a judgment can lean on describes content that is not there — and it arrives
-    # with no status, producing a cell whose stage nothing could explain.
-    campaigns = [c for c in store.list_campaigns(conn)
-                 if c.get("record_type") not in ("reference", "stub")
-                 and c["id"] not in superseded]
-    measured = store.campaigns_with_actual_metrics(conn)
+    # ONE read of the library, and the population is the shared one. A `stub` is "a
+    # placeholder record" by the product's own definition, so counting one as evidence a
+    # judgment can lean on describes content that is not there — and it arrives with no
+    # status, producing a cell whose stage nothing could explain. `library_state["campaigns"]`
+    # is exactly that set, and taking it from there rather than rebuilding it is what stops a
+    # fifth record line appearing the next time somebody edits one of the two.
+    state = library_state(conn)
+    campaigns = state["campaigns"]
+    measured = state["measured"]
+    with_results = state["with_results"]
 
     if not campaigns:
         return {
@@ -5896,7 +5991,21 @@ def coverage(conn) -> dict:
     # cells of one measured campaign each read `single_example` rather than `measured`, and
     # that is a library with real evidence in it, not one to hand back to the first-run
     # guidance.
-    everything_is_thin = bool(campaigns) and not measured
+    # §13.1: measured AND RUN. The comment above is right that a cell of one measured campaign
+    # is a library with real evidence in it — so this is not "no cell reads `measured`", which
+    # would hand those five cells back to the first-run guidance. What it was missing is the
+    # status test the CELLS apply and this did not: a campaign still `proposed` puts its id in
+    # the library-wide measured set and its cell reads `not_yet_run`, so nothing was measured,
+    # nothing was thin either, and coverage reported zero measured cells while refusing to say
+    # the library was unmeasured — `thin: []`, `thin_total: 0`, no offer, nothing to act on.
+    everything_is_thin = bool(campaigns) and not any(
+        c["id"] in measured for c in campaigns)
+    # The campaigns that have NUMBERS and have not finished. Nothing is measured either way,
+    # but "go and collect results" is the wrong thing to say about them — they have results —
+    # and `_offer_to_measure` would offer exactly that, or fall through to the first-run path
+    # ("add one campaign you were happy with") on a library that is not new.
+    with_results_but_unfinished = [c for c in campaigns
+                                   if c["id"] in with_results and c["id"] not in measured]
 
     # D68: the same campaign sits in one cell per market, so a campaign that ran in three
     # markets had the same fix offered three times. The grid is right for "what do I have in
@@ -5933,17 +6042,40 @@ def coverage(conn) -> dict:
         # Not the total of a list that is not being shown: `thin: []` beside
         # `thin_total: 3` is an inconsistent pair for a reader.
         "thin_total": 0 if everything_is_thin else len(thin),
-        "thin_summary": (f"Nothing in this library is measured yet: {len(campaigns)} "
-                         f"campaign(s) across {len({c['market'] for c in cells})} cell(s), "
-                         f"none with results on file. The place to start is not a "
-                         f"particular market."
-                         if everything_is_thin else None),
+        # WHY nothing is measured, because the two reasons want different things done about
+        # them (§13.1 round 2). "None with results on file" was said of a library whose
+        # campaigns all HAD results and simply had not concluded — false, and it sent the
+        # reader off to collect numbers that were already there.
+        "thin_summary": (
+            (f"Nothing in this library is measured yet: {len(campaigns)} campaign(s) across "
+             f"{len({c['market'] for c in cells})} cell(s), none with results on file. The "
+             f"place to start is not a particular market."
+             if not with_results_but_unfinished else
+             f"Nothing in this library counts as measured yet: {len(campaigns)} campaign(s) "
+             f"across {len({c['market'] for c in cells})} cell(s), and "
+             f"{len(with_results_but_unfinished)} of them already carry results but have not "
+             f"concluded. Results on a campaign that is still running are not an outcome to "
+             f"learn from; marking it concluded is what makes them one.")
+            if everything_is_thin else None),
         "unmeasured_campaigns": sorted(unmeasured.values(),
                                        key=lambda c: (-len(c["markets"]), c["title"]))[:10],
         # The measurement offer, not the first-run path: the path never mentions results, so
         # once liked/not_liked/rulebook existed the summary named measurement as the problem
         # and offered nothing at all — while `gaps()` on the same library offered add_metrics.
-        "next_actions": (_offer_to_measure(conn, unmeasured) if everything_is_thin else []),
+        "next_actions": ([] if not everything_is_thin else
+                         actions.trim([actions.action(
+                             f"Mark \u201c{with_results_but_unfinished[0]['title']}\u201d as "
+                             f"concluded if it has finished",
+                             "update_campaign",
+                             why="It already has results on file. A campaign that has not "
+                                 "concluded is not counted as measured, because results "
+                                 "part-way through are not an outcome to learn from — so "
+                                 "this library reads as having no evidence at all.",
+                             consent="ask",
+                             campaign_id=with_results_but_unfinished[0]["id"],
+                             status="concluded")])
+                         if with_results_but_unfinished else
+                         _offer_to_measure(conn, unmeasured)),
         "campaigns_total": len(campaigns),
         "markets": sorted({c["market"] for c in cells if c["market"]}),
         "collections": sorted({c["collection"] for c in cells if c["collection"]}),
@@ -6124,7 +6256,13 @@ def readiness(conn) -> dict:
     facts_about_the_axis = _axis_facts(conn)
     records = facts_about_the_axis["records"]
     campaigns = facts_about_the_axis["campaigns"]
-    measured = store.campaigns_with_actual_metrics(conn)
+    # §13.1 round 2: `measured`, not `with_results`. With the looser set this said "all 3
+    # campaign(s) here have measured results" about three campaigns that had not run, while
+    # `coverage` — reading the same library through a status test — said none of them had
+    # results on file.
+    # The facts this function already fetched, rather than a second full read of the library
+    # — routing six surfaces through `library_state` gave every one of them two.
+    measured = library_state(conn, facts_about_the_axis)["measured"]
 
     has_reference_material = facts_about_the_axis["has_reference_material"]
     liked_records = facts_about_the_axis["liked_records"]
@@ -6307,6 +6445,186 @@ def readiness(conn) -> dict:
                  + (f" {waiting} campaign(s) are waiting on feedback; say so and offer the "
                     f"queue rather than waiting to be asked for it."
                     if waiting else "")),
+    }
+
+
+# §13.1/D75+D88: the performance verdicts. A tag with one of these values and
+# `source: verified` is somebody saying the numbers were good or bad AND standing behind it;
+# `store.normalize_tags` will not accept `verified` on a record with no actual metrics, so a
+# verdict cannot exist without results underneath it.
+#
+# A SUBSET of `feedback.PERFORMANCE`, and the difference is deliberate rather than a fourth
+# vocabulary. `feedback` asks "has anybody answered the performance question yet", so its
+# four include `performed_as_expected` and `no_data_yet` — both of which answer it. This asks
+# "is there a verdict that could CONTRADICT a judgment", and only a directional one can:
+# `performed_as_expected` points nowhere and `no_data_yet` is an explicit absence. The two
+# questions are different; what would be a defect is the two drifting apart without either
+# saying so, which `test_one_definition_of_measured` now refuses to allow.
+_A_PERFORMANCE_VERDICT = ("performed_well", "underperformed")
+
+
+def has_results(record: dict) -> bool:
+    """Whether this campaign has measured numbers on file.
+
+    Reads the flag `store.get_campaign` derives, which is `any(m["metric_type"] == "actual")`
+    over the record's own metric rows. `store.campaigns_with_actual_metrics` is the SAME
+    predicate written as one query for the library-wide case — two expressions of one rule,
+    which is the shape this codebase keeps getting wrong, so `test_one_definition_of_measured`
+    pins that they cannot disagree rather than trusting that they do not.
+
+    A PER-RECORD predicate and not a lookup in `library_state`, because the callers that need
+    it are looking at records the library-wide sets deliberately exclude: `_evidence_strength`
+    weighs the records a judgment CITED, and a citation of a superseded version is still a
+    citation of something with numbers on it. Asking the library set would have reported those
+    as unmeasured — the library's record line answering a question about somebody's citations.
+    """
+    return bool(record.get("has_actual_metrics"))
+
+
+def has_a_neutral_verdict(record: dict) -> bool:
+    """Whether somebody answered the performance question with a verdict that points NOWHERE.
+
+    `performed_as_expected` and `no_data_yet` are answers — the feedback queue wrote them as
+    `source: verified` and stops asking — and they are not precedent against anything, so they
+    are rightly out of `with_verdicts`. What is NOT right is calling such a record one with
+    "no verdict recorded against it" and offering it as the remedy: somebody recorded one, and
+    tagging it `underperformed` on the strength of that offer would contradict the record.
+
+    A third bucket rather than a fourth definition: `_A_PERFORMANCE_VERDICT` and
+    `feedback.PERFORMANCE` still hold the two lists, and this is their difference.
+    """
+    import feedback
+
+    neutral = set(feedback.PERFORMANCE.values()) - set(_A_PERFORMANCE_VERDICT)
+    mine = {store.fold_vocabulary("tags", t.get("value"))
+            for t in (record.get("tags") or []) if t.get("source") == "verified"}
+    return bool(mine & {store.fold_vocabulary("tags", v) for v in neutral})
+
+
+def carries_verdict(record: dict, tag: str) -> bool:
+    """Whether this record carries one SPECIFIC verdict — `performed_well` or `underperformed`.
+
+    Narrower than `has_a_verdict`, and folded through the vocabulary for the same reason: an
+    agency's declared word for `underperformed` is that verdict. Written out inline in
+    `_disconfirming_search`, it was the exact-match bug in the one place where the cost was a
+    contradicting precedent going unfound.
+    """
+    wanted = store.fold_vocabulary("tags", tag)
+    return any(store.fold_vocabulary("tags", t.get("value")) == wanted
+               for t in (record.get("tags") or []) if t.get("source") == "verified")
+
+
+def has_a_verdict(record: dict) -> bool:
+    """Whether somebody has said, on the record, whether this campaign worked.
+
+    The one implementation. There were three, and naming them exactly matters because the
+    first version of this docstring got the list wrong: a set intersection written out twice
+    in this file (`_evidence_strength` and `_campaigns_that_could_be_tagged`), and a
+    `store.filter_campaign_ids(tags=[{"source": "verified"}])` reached through `find_similar`
+    in `_pole_search`. `readiness` never had one — it asks the other question. Three
+    implementations of one question is how they drift; C16 was that failure once already.
+
+    `_pole_search` now intersects its ranked results with `library_state["with_verdicts"]`
+    rather than deciding membership from a tag filter, so the SEARCH says what is similar and
+    this says who has a verdict. Asked both ways in one function, they applied different
+    record lines: a superseded version could be ranked as contradicting precedent while the
+    same response said it could not be tagged.
+    """
+    # Through the customer's declared VOCABULARY, not by exact string (§12.2/D73). An agency
+    # that declares `underperformed: ['flopped']` and tags a record `flopped` has recorded a
+    # verdict — `store.filter_campaign_ids` says so, because retrieval folds tags at
+    # comparison time, and §12.2 settled that a vocabulary is a synonym resolved when two
+    # values are compared and never a rewrite of what was stored. An exact match here made
+    # `core` and the store disagree about the same record, and the cost was not cosmetic: the
+    # disconfirming search HID a contradicting precedent that the code before §13.1 found,
+    # and reported "no verdict recorded against them" about a record whose verdict was
+    # written in the customer's own word.
+    mine = {store.fold_vocabulary("tags", t.get("value"))
+            for t in (record.get("tags") or []) if t.get("source") == "verified"}
+    return bool(mine & {store.fold_vocabulary("tags", v)
+                        for v in _A_PERFORMANCE_VERDICT})
+
+
+def library_state(conn, facts: Optional[dict] = None) -> dict:
+    """The two facts this product kept calling "measured", computed once (§13.1/D75+D88).
+
+    **They are two facts, and that is the finding.** `readiness`, `gaps`, `coverage` and
+    `disconfirming` each worked one out privately, and by the fourth implementation two of
+    them disagreed out loud: the product said *"all 3 campaigns here have measured results"*
+    and, in the next response, *"no campaign in the library is tagged 'underperformed' with
+    measured results behind it"*. Read closely those are not one claim made twice —
+
+      `with_results`   numbers are on file. `add_metrics` put them there.
+      `with_verdicts`  somebody has said whether those numbers were good, and stood behind
+                       it. A `performed_well` / `underperformed` tag, `source: verified`.
+
+    A campaign can have every number anybody asked for and no verdict at all; that is the
+    ordinary state of a library nobody has been back to. So collapsing the two into one
+    predicate would make the product either claim a verdict it does not have or deny results
+    it does — §6.6 worked this out for the evidence ladder and wrote it down, and the other
+    surfaces never got it. What this removes is the four private implementations and the
+    shared WORD: one helper answers both, and each surface says which it means.
+
+    **Which records count is decided here too**, and that is the other half of the drift.
+    Coverage excluded superseded records and `readiness` did not; `_campaigns_that_could_be_tagged`
+    excluded `reference` and the gap did not. A replaced version is the same campaign counted
+    twice, brand guidelines have no results, and a campaign that was CANCELLED never ran — so
+    it is never a library missing its outcome, which would be a gap nobody can close (§12.4/D38).
+    `_axis_facts` already draws the record line for the two surfaces that share it; this uses
+    the same one rather than a fifth.
+    """
+    facts = facts or _axis_facts(conn)
+    # NOT `facts["campaigns"]`, which drops stubs — and a stub is "a placeholder with results
+    # but no brief, e.g. a row imported from a KPI workbook", so it is the one record type
+    # that is results by definition. `readiness` and `coverage` exclude stubs from what they
+    # DESCRIBE, which is right (a stub is not a campaign anybody can learn a brief from), and
+    # `gaps` counts them among the finished campaigns that owe an outcome, which is also
+    # right. Both intersect against this set and both stay correct; what they no longer do is
+    # each decide separately what having results means.
+    holds_results = [c for c in facts["records"] if c.get("record_type") != "reference"]
+    measured_ids = store.campaigns_with_actual_metrics(conn)
+    with_results = {c["id"] for c in holds_results if c["id"] in measured_ids}
+    verdict_tagged = {c["id"] for c in holds_results if has_a_verdict(c)}
+    # Answered, but with a verdict that points nowhere. Neither precedent nor a hole.
+    neutral_verdicts = {c["id"] for c in holds_results if has_a_neutral_verdict(c)}
+    # `concluded` alone. `cancelled` did not run and `paused` has not finished, and neither is
+    # a campaign whose results are missing.
+    ran = {c["id"] for c in holds_results if c.get("status") == "concluded"}
+    # **`measured` is the one every "is this library measured" surface reads**, and it is the
+    # half of this the first round got wrong. Exposing `with_results` and letting each surface
+    # add its own status test left the four membership rules exactly where D75 found them —
+    # and made it worse: `coverage` gained a `concluded` test, `readiness` did not, and the
+    # two then said of one library "all 3 campaigns here have measured results" and "none with
+    # results on file". That is D88's sentence again, with both halves about the SAME fact, so
+    # the two-facts distinction below cannot excuse it. Membership is decided here or it is
+    # decided four times.
+    measured = with_results & ran
+    # A verdict is only precedent about something that RAN. `ran` excluded a cancelled
+    # campaign and a status-less stub while `with_verdicts` counted their tags, so the helper
+    # said in one field that a record never ran and in the next that its verdict could
+    # contradict a judgment. One status rule, applied to both.
+    with_verdicts = verdict_tagged & ran
+    return {
+        # What the surfaces DESCRIBE: non-reference, non-stub, not superseded.
+        "campaigns": facts["campaigns"],
+        "records": facts["records"],
+        "ran": ran,
+        # A fact about DATA: numbers are on file, whatever state the campaign is in. Kept
+        # separate because `_evidence_strength` weighs cited records and a citation of a
+        # proposed brief with numbers on it is still a citation of something with numbers.
+        "with_results": with_results,
+        "measured": measured,
+        "with_verdicts": with_verdicts,
+        "with_neutral_verdicts": neutral_verdicts,
+        # The gap-shaped views, so nothing has to subtract these by hand and get the status
+        # test subtly different while doing it.
+        "without_results": ran - with_results,
+        # Nobody has answered AT ALL — not "nobody answered the way the search wanted".
+        # A record tagged `performed_as_expected` was named here and offered as one
+        # `update_campaign` away from supplying a verdict, which would have meant tagging it
+        # `underperformed` against what somebody had already recorded.
+        "without_verdicts": measured - with_verdicts - neutral_verdicts,
+        "basis": "computed",
     }
 
 
@@ -7557,7 +7875,7 @@ def update_campaign(conn, campaign_id: str, **fields) -> dict:
                 # the offer this gates is "record what this campaign actually achieved" — §8.8
                 # made a target storable, so "has a row" and "has a result" became different
                 # questions on the one path that can see both.
-                has_metrics=record["has_actual_metrics"],
+                has_metrics=has_results(record),
                 has_window=bool(record.get("starts_on")),
                 earlier_judgment=earlier_judgment))}
 
@@ -9120,7 +9438,7 @@ def _snapshot_execution_drift(conn, campaign_id: str) -> None:
     # Nothing to say until there is a result for the drift to qualify. This also keeps a bulk
     # import of five hundred rows from running five hundred comparisons: the campaigns in a KPI
     # workbook almost never have delivered photographs.
-    if not record or not record.get("has_actual_metrics"):
+    if not record or not has_results(record):
         return
     try:
         out = compare_execution(conn, campaign_id=campaign_id)

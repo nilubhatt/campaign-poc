@@ -65,6 +65,11 @@ _ENOUGH_TO_COMPARE = 4
 # What each answer means, as the tag vocabulary this library already uses. Numbered because the
 # whole point is that nobody has to recall a word, and closed because these ARE closed sets.
 REACTIONS = {1: "liked", 2: "not_liked", 3: "mixed_reaction"}
+# All four ANSWER the performance question, which is what this queue is asking. The first
+# two are also `core._A_PERFORMANCE_VERDICT` — the directional ones, the only kind that can
+# serve as precedent contradicting a judgment (§13.1). A fifth word added here must be
+# considered against that: `test_one_definition_of_measured` fails if the two lists drift
+# without somebody deciding which kind the new word is.
 PERFORMANCE = {1: "performed_well", 2: "underperformed", 3: "performed_as_expected",
                4: "no_data_yet"}
 
