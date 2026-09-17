@@ -168,14 +168,32 @@ def _looks_like(conn, text: str, *, exclude: Optional[str] = None) -> Optional[d
     import store
 
     mine = _reading(text)
+    candidates = [row for row in store.corrections(conn)
+                  if row["id"] != exclude and row["status"] not in ("merged", "ignored")]
     best, score = None, 0.0
-    for row in store.corrections(conn):
-        if row["id"] == exclude or row["status"] in ("merged", "ignored"):
-            continue
+    for row in candidates:
         overlap = resembles(mine, _reading(row["text"]))
         if overlap > score:
             best, score = row, overlap
-    return best if is_close(score) else None
+    # §13.4/D109 was attempted here and REVERTED. The row asks for a semantic fallback so a
+    # paraphrase sharing no vocabulary is noticed, and the measurement says cosine similarity
+    # on the shipped embedder cannot do it. Against `nomic-embed-text`, over five pairs that
+    # ARE one rule and six that are not:
+    #
+    #     one rule      0.651  0.771  0.872  0.880  0.896
+    #     different     0.378  0.391  0.418  0.446  0.495  0.695
+    #
+    # The populations OVERLAP — no threshold separates them. Worse, the row's own motivating
+    # pair ("photography before training" / "shoot before the workout") scores 0.771, and a
+    # pair that differs ONLY by negation ("Always show the logo" / "Never show the logo")
+    # scores 0.933: a threshold catching the first fires on the second, which is the
+    # prohibition-merged-with-its-permission that `negated()` exists to prevent. The
+    # instrument measures topical similarity, and two rules about one subject are topically
+    # similar whether or not they say the same thing.
+    #
+    # So the honest state is that D109 is open with a measurement it did not have, which says
+    # what the next attempt must not be. See the row for where it goes.
+    return {**best, "how": "wording"} if is_close(score) else None
 
 
 # Every other model-authored field in this codebase is measured. A 400 KB rule and a 200 KB
@@ -395,12 +413,20 @@ def note(conn, *, text: str, campaign_id: Optional[str], provenance: str) -> dic
             "correction_id": correction_id,
             "text": entry["text"],
             "provenance": provenance.strip(),
-            "looks_like": ({"correction_id": similar["id"], "text": similar["text"]}
+            # §13.4/D109: HOW it was matched, and `basis` because a resemblance is a
+            # reading either way. "These share words" and "a model thinks these mean the same
+            # thing" are different claims, and somebody deciding whether to fold two rules
+            # together needs to know which — only one of them can be checked by looking.
+            "looks_like": ({"correction_id": similar["id"], "text": similar["text"],
+                            "how": similar["how"], "basis": "heuristic"}
                            if similar else None),
             "what_it_means": (
                 "Recorded as a provisional correction. It is not applied to any brief yet — "
                 "that takes it recurring across markets and somebody confirming it."
-                + (f" It closely resembles one already on file: “{similar['text']}”. If they "
+                + (f" It closely resembles one already on file"
+                   + (" in what it MEANS rather than in its words"
+                      if similar["how"] == "meaning" else "")
+                   + f": “{similar['text']}”. If they "
                    f"are the same rule, say so — a rule stated three ways in three markets "
                    f"counts as three separate rules until somebody folds them together, and "
                    f"then none of them ever recurs."

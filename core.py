@@ -7670,7 +7670,7 @@ def _warm_the_facts(conn, campaign_id: str) -> None:
         return
 
 
-def _rebuild_body_index(conn, campaign_id: str) -> dict:
+def _rebuild_body_index(conn, campaign_id: str, *, deadline: Optional[float] = None) -> dict:
     """Re-chunk and re-embed a record's BODY from what is stored on the row.
 
     One implementation, used by an edit that changed the text (D80) and by a deck attached to
@@ -7749,10 +7749,31 @@ def _rebuild_body_index(conn, campaign_id: str) -> dict:
     # PASS TWO — the vectors. Everything not in `to_embed` kept a vector it already had; a
     # chunk whose words did not change but which never got one is in the list, because
     # `embedded` is the count of chunks that ARE searchable and an unembedded survivor is not.
+    #
+    # §13.4/D99: AGAINST A DEADLINE, like every other embed path in this product. Ingest
+    # passes `timeout=remaining` and `finish_indexing` passes `timeout=remaining_time`; this
+    # one passed nothing, so a hung embedder hung the handler once per chunk — on the path
+    # that runs over every chunk of a deck, which is the worst place for it. Passing the
+    # REMAINING budget rather than a fixed per-call timeout is what bounds when the handler
+    # ENDS: a fixed one bounds when each call starts, and the last can begin just inside the
+    # budget and run the full timeout on top.
+    # The CALLER's deadline where there is one. `attach_deck` rebuilds the body, embeds the
+    # commentary and indexes the images in one tool call, and three independent budgets meant
+    # one call could spend three times the number the config names. `ingest_campaign` already
+    # threads a single deadline through exactly these three phases — so the answer to "whose
+    # budget is it" was settled, and this had quietly decided otherwise. Both reviewers
+    # measured it.
+    deadline = deadline if deadline is not None else (
+        time.monotonic() + config.TOOL_TIME_BUDGET_SECONDS)
     embedded = len(kept) - len(to_embed)
     for chunk_id, text in to_embed:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # Out of time rather than broken. Same partial state, reached a different way, and
+            # `finish_indexing` closes it either way.
+            break
         try:
-            _add_vector(conn, chunk_id, embedding.embed_once(text))
+            _add_vector(conn, chunk_id, embedding.embed_once(text, timeout=remaining))
             store.set_chunk_embedded(conn, chunk_id)
             embedded += 1
         except Exception:                      # noqa: BLE001
@@ -7766,14 +7787,24 @@ def _rebuild_body_index(conn, campaign_id: str) -> dict:
     return {"chunks": len(texts), "embedded": embedded}
 
 
-def _reindex(conn, campaign_id: str, *, commentary: list) -> dict:
+def _reindex(conn, campaign_id: str, *, commentary: list,
+             deadline: Optional[float] = None) -> dict:
     """The body, plus commentary chunks that arrived with a newly attached deck (§12.4/D39).
 
     The commentary half is `ingest_campaign`'s, kept in the same shape: one chunk per comment,
     never merged, each keeping its author and anchor — two notes packed together would share
     one attribution, and the anchor is half of what makes a comment worth keeping.
     """
-    built = _rebuild_body_index(conn, campaign_id)
+    # §13.4/D99: ONE deadline across both layers, taken from the caller. An earlier version
+    # gave each half its own on the reasoning that the commentary's share should not depend on
+    # how long the deck is — but `ingest_campaign` threads a single deadline through chunks,
+    # commentary and images, so that decision was already made the other way, and two budgets
+    # meant one tool call could outlast the number the config names. The cost of one budget is
+    # that a very long deck leaves the commentary less time; the cost of two was a handler
+    # with no bound anybody had agreed to.
+    deadline = deadline if deadline is not None else (
+        time.monotonic() + config.TOOL_TIME_BUDGET_SECONDS)
+    built = _rebuild_body_index(conn, campaign_id, deadline=deadline)
     embedded = built["embedded"]
     for item in commentary:
         source = {k: item.get(k) for k in
@@ -7783,8 +7814,11 @@ def _reindex(conn, campaign_id: str, *, commentary: list) -> dict:
         ids = store.insert_chunks(conn, campaign_id, pieces, kind="commentary",
                                   sources=[source] * len(pieces))
         for chunk_id, text in zip(ids, pieces):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             try:
-                _add_vector(conn, chunk_id, embedding.embed_once(text))
+                _add_vector(conn, chunk_id, embedding.embed_once(text, timeout=remaining))
                 store.set_chunk_embedded(conn, chunk_id)
                 embedded += 1
             except Exception:                  # noqa: BLE001
@@ -7935,7 +7969,10 @@ def attach_deck(conn, *, campaign_id: str, asset_ref: dict) -> dict:
     # Re-chunked and re-embedded through the SAME path an edit takes, because a deck attached
     # and not indexed is a file on disk: the point of attaching it is that the record can then
     # be found by what the deck says.
-    indexed = _reindex(conn, campaign_id, commentary=commentary)
+    # ONE budget for this whole tool call — body, commentary and the images below — which is
+    # what `ingest_campaign` does and what `TOOL_TIME_BUDGET_SECONDS` names.
+    deadline = time.monotonic() + config.TOOL_TIME_BUDGET_SECONDS
+    indexed = _reindex(conn, campaign_id, commentary=commentary, deadline=deadline)
 
     # §9.3, and the same rule the EDIT path applies: a deck that arrives is a deck whose
     # promises this library has not read. Omitted here, a record repaired exactly as
@@ -7951,8 +7988,7 @@ def attach_deck(conn, *, campaign_id: str, asset_ref: dict) -> dict:
     # §9.1: the images inside the deck, through `ingest_campaign`'s own helper rather than a
     # second copy of it. Without this the briefed side of every execution comparison was empty
     # on an attached deck, which is the half of Phase 9 that says what was MEANT to run.
-    found = _index_deck_images(conn, campaign_id, path,
-                               deadline=time.monotonic() + config.TOOL_TIME_BUDGET_SECONDS)
+    found = _index_deck_images(conn, campaign_id, path, deadline=deadline)
     warnings += found["warnings"]
 
     out = {

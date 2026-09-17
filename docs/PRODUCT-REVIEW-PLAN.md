@@ -3301,7 +3301,7 @@ or a second copy of something that already exists once.
       a full rebuild, which no longer happens. Its intent is unchanged and the partial state
       is now a smaller one — the changed chunk failing while the deck's sections stay
       embedded from before.
-- [ ] **13.4 The re-index's three loose ends** — `embedding.embed` called with no timeout on
+- [x] **13.4 The re-index's three loose ends** — `embedding.embed` called with no timeout on
       the re-index path alone, so a hung embedder hangs the handler per chunk; chunk ordering
       after a re-index, which silently broke "chunk 0 is the summary"; and D109, re-pointed
       here from §12.4 because the thing it is blocked on is D99's missing timeout and fixing
@@ -3318,10 +3318,86 @@ or a second copy of something that already exists once.
       no longer trips `insert_chunks`' `MAX(chunk_index) + 1` allocation across ALL kinds. A
       body that GAINS a position still does, so the allocation is still the thing to fix — and
       it now has two callers to keep consistent.
+
+      **D99 — the one embed path without a deadline.** Ingest passes `timeout=remaining` and
+      `finish_indexing` passes `timeout=remaining_time`; the re-index passed nothing, so a
+      hung embedder hung the handler once per chunk — on the path that runs over every chunk
+      of a deck, which is the worst place for it. It now embeds against the remaining budget
+      rather than a fixed per-call timeout, which is what bounds when the handler ENDS: a
+      fixed one bounds when each call starts, and the last can begin just inside the budget
+      and run the full timeout on top. The commentary half of `_reindex` gets its own budget
+      rather than the body's leftovers, because sharing one would make the commentary's share
+      depend on how long the deck happened to be, which is nobody's decision.
+
+      **D100 — measured before the change, and worse than the row says.** A three-section deck
+      with one comment, grown to six sections, came back as `body 0-6, commentary 7, body
+      8-13`: one layer's sequence interrupted by another's, not merely commentary before body.
+      And a record that gained its commentary BEFORE its body — which is what attaching a deck
+      to something somebody had already annotated looks like — put a client's remark at index
+      0, which is the invariant the row says was silently lost. `insert_chunks` now allocates
+      per KIND. Safe because every reader orders within a kind and nothing treats the index as
+      unique across them, so an existing database whose numbering overlaps between layers
+      reads exactly as before — and §13.3's positional rebuild keeps working by construction
+      rather than by accident.
+
+      **D109 — attempted, measured, and left OPEN. The row was right and I read it wrong.**
+      It defers a semantic match because `note` is a WRITE path, and I treated "blocked on
+      D99" as permission: fixing the timeout removes *hung*, and the objection was *a model
+      call on a write*. Both reviewers said so independently, and the codebase had already
+      settled it — `feedback.py` moved this very pairing OFF the per-write path into
+      `waiting()`, with measurements, for exactly this reason. What I built embedded every
+      correction on file per write: 205 calls on a library of 204, each with its own timeout,
+      which is the "bounds when each call starts, not when the handler ends" pattern this same
+      item fixes in `core`.
+
+      **And it does not work.** Measured against `nomic-embed-text`, the embedder this product
+      ships, over five pairs that ARE one rule and six that are not:
+
+      | | scores |
+      |---|---|
+      | one rule | 0.651 · 0.771 · 0.872 · 0.880 · 0.896 |
+      | different rules | 0.378 · 0.391 · 0.418 · 0.446 · 0.495 · 0.695 |
+
+      The populations OVERLAP, so no threshold separates them. The row's own motivating pair —
+      "photography before training" / "shoot before the workout" — scores 0.771, under the
+      0.86 I had picked; and a pair differing ONLY by negation, "Always show the logo" /
+      "Never show the logo", scores 0.933, over it. A threshold catching the first fires on
+      the second, which is the prohibition merged with its permission that `negated()` exists
+      to prevent. Cosine on this model measures topical similarity, and two rules about one
+      subject are topically similar whether or not they say the same thing.
+
+      Two guards were also half-carried, which the measurement makes moot but which say
+      something about how the attempt was made: the negation half of `_reading` was dropped
+      entirely, and `_MIN_CONTENT` was applied to the incoming text and not to the candidates,
+      so a fragment already on file was offered as the rule it came from.
+
+      So the fallback is reverted and **D109 stays open, with a measurement it did not have** —
+      one that says what the next attempt must not be: not a cosine threshold on this embedder,
+      and not on the write path. What is kept is the label: a resemblance now says
+      `basis: heuristic` and `how: wording`, because the only matcher this product ships reads
+      words and should say so.
+
+      **One budget per tool call.** `attach_deck` rebuilds the body, embeds the commentary and
+      indexes the images; each had its own deadline, so one call could spend three times the
+      number `TOOL_TIME_BUDGET_SECONDS` names. `ingest_campaign` already threads a single
+      deadline through exactly those three phases — the question was settled and this had
+      quietly answered it differently. Both reviewers measured it.
 - [ ] **13.5 The remaining two-copy helpers** — `_newly_eligible`/`graduate`, the offered-once
       flags, `touch_metric`/`touch_correction` (byte-identical market-fold loops) and
       `campaigns_that_skipped`/`campaigns_that_skipped_correction`. "One mechanism" is true of
       the decisions and not of the code under them. *Closes D114.*
+- [ ] **13.7 Is this the same rule?** — D109, re-opened by §13.4 with a measurement rather
+      than a guess. The lexical matcher misses a paraphrase sharing no vocabulary, and the
+      obvious fix does not work: cosine on the shipped `nomic-embed-text` scores one-rule
+      pairs 0.651–0.896 and different-rule pairs 0.378–0.695 — overlapping — while a pair
+      differing only by NEGATION scores 0.933, so any threshold catching a paraphrase merges
+      a prohibition with its permission. Two things the next attempt must respect, both paid
+      for: it does not belong on the write path (`feedback.py` already moved this pairing into
+      `waiting()`, with measurements), and it needs an instrument that is not a single cosine
+      threshold — asking the model the QUESTION rather than measuring the distance, or a
+      person's answer, or nothing at all. "Nothing at all" is a legitimate outcome: §5.1
+      settled that a wrong suggestion here is worse than none, and this one silently folds two
+      rules into one so neither ever recurs. *Closes D109.*
 - [ ] **13.6 Two gaps that cannot see the record they are about** —
       `execution_never_checked` fires only where briefed creative already exists, so a
       concluded campaign uploaded as text with no assets is invisible to it; and commitment

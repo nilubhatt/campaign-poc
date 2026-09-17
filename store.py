@@ -2593,9 +2593,21 @@ def insert_chunks(conn, campaign_id: str, texts: list[str], *, kind: str = "body
     match can say who said it and where, rather than only that the deck mentions it."""
     now = _now()
     ids = []
+    # §13.4/D100: PER KIND. Allocated across the whole campaign, a body that gained a
+    # position landed after the commentary — measured as `body 0-6, commentary 7, body 8-13`,
+    # one layer's sequence interrupted by another's — and a record that gained its commentary
+    # BEFORE its body, which is what attaching a deck to something somebody had already
+    # annotated looks like, put a client's remark at index 0. "Chunk 0 is the summary" was
+    # the invariant, and it was silently gone.
+    #
+    # Safe to change because every reader orders WITHIN a kind (`body_chunks`,
+    # `get_commentary`, `text_on_file`) and nothing treats the index as unique across kinds —
+    # so an existing database whose numbering overlaps between layers reads exactly as before.
+    # §13.3 depends on the body's RELATIVE order, which per-kind allocation preserves by
+    # construction rather than by accident.
     start = conn.execute(
-        "SELECT COALESCE(MAX(chunk_index), -1) + 1 FROM campaign_chunks WHERE campaign_id = ?",
-        (campaign_id,)).fetchone()[0]
+        "SELECT COALESCE(MAX(chunk_index), -1) + 1 FROM campaign_chunks "
+        "WHERE campaign_id = ? AND kind = ?", (campaign_id, kind)).fetchone()[0]
     for i, text in enumerate(texts):
         chid = _id("chunk")
         source = (sources or [None] * len(texts))[i]
