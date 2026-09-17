@@ -11,7 +11,9 @@ Embeddings for semantic search live alongside campaigns (JSON-encoded float list
 """
 from __future__ import annotations
 
+import functools
 import json
+import pathlib
 import re
 import sqlite3
 import time
@@ -81,6 +83,26 @@ CREATE TABLE IF NOT EXISTS campaigns (
     -- §12.4: WHERE THE WORK LIVES, which `asset_path` is not. That is a file this product
     -- copied; this is the Figma board, the Drive folder, the DAM record — what somebody
     -- reading a judgment six months later opens to look at the thing being judged.
+    -- §13.2/D95: `facts.compute` over this record's body, as JSON, with the key it was
+    -- computed under. Reading the library re-scanned every deck's text on every call —
+    -- measured at 2.41s per `gaps()` over 200 decks of 38,000 characters, essentially all of
+    -- it inside the channel regexes — and the answer does not change between two reads.
+    --
+    -- **The key is the body AND the rulebook**, which is where D95's own premise is wrong.
+    -- The row says facts are "deterministic on body text"; they are not. `facts.compute`
+    -- reads `rulebook.vocabulary("channels")` for the checklist and `rulebook.rules()` for
+    -- the guardrail `watch_for` words, so one unchanged string computes different facts
+    -- before and after a customer writes their rules. Keyed on the text alone, every record
+    -- stored before the rulebook existed would go on reporting `guardrails: nothing_to_check`
+    -- — the product saying there are no rules to check about a library whose rules were just
+    -- written, with `nothing_to_check` doing the work of a pass.
+    --
+    -- A READ-THROUGH cache: the key is checked on every read and a miss recomputes and
+    -- rewrites. So it cannot go stale even if a write path forgets to refresh it, which is
+    -- this codebase's most repeated defect and not something to leave to having found every
+    -- one of them.
+    computed_facts      TEXT,
+    computed_facts_key  TEXT,
     asset_link    TEXT,
     -- §12.4/D102: what KIND of campaign this is. The review asks for "the checklist for a
     -- campaign TYPE" and renders it "Expected for a store launch"; nothing carried that, so
@@ -4276,6 +4298,172 @@ def campaigns_that_skipped_correction(conn, correction_id: str, *, since: Option
             params += [f, f, f'%"{f}"%']
     row = conn.execute(sql, params).fetchone()
     return int(row["n"] or 0)
+
+
+# SQLite's default, restored after the cache write drops it. Named rather than spelled twice,
+# so the two cannot drift into a read that waits longer than the caller expected.
+_BUSY_TIMEOUT_MS = 5000
+
+
+def facts_key(body: str) -> str:
+    """What a stored `facts.compute` result was computed UNDER (§13.2/D95).
+
+    THREE things, because the answer depends on all three, and the first version keyed on
+    only one and a half of them.
+
+      the BODY          the text the checks ran over.
+      the RULEBOOK's    CONTENT, not its self-declared `version:`. A customer who edits
+                        `watch_for` and does not bump the version — nothing enforces it, the
+                        README only asks — used to be saved by the next restart, because
+                        every read recomputed. Cached against their version string, the stale
+                        answer became PERMANENT: a `contradicted` guardrail surviving the
+                        deletion of the rule that raised it, which is this product asserting
+                        a breach that does not exist. Review found it.
+      the ALGORITHM     `facts.py` itself. `rulebook.version()`'s `core-1.0` half is the
+                        bundled YAML's version, not a code version — `facts.py` has changed
+                        six times while that string stood still — so a release that fixes a
+                        matcher would have left every stored row answering with the old one.
+                        Before this cache, an upgrade healed everything by recomputing; the
+                        cache is what made "it heals on restart" stop being true, so it owes
+                        the guard.
+
+    Content-addressed throughout, so nothing depends on somebody remembering to bump a
+    number — which is the discipline this codebase has watched fail most often.
+    """
+    import hashlib
+    import json as _json
+
+    import rulebook
+
+    body_digest = hashlib.sha256((body or "").encode("utf-8")).hexdigest()[:24]
+    try:
+        # `load()` is `lru_cache`d, so this is a dict lookup after the first call.
+        rules = _json.dumps(rulebook.load(), sort_keys=True, default=str)
+    except Exception:                      # noqa: BLE001
+        # An unreadable rulebook is `health_check`'s finding and every write path's refusal.
+        # Here it means "do not trust any cached answer", which a key nothing matches gives.
+        rules = f"unreadable:{_now()}"
+    rules_digest = hashlib.sha256(rules.encode("utf-8")).hexdigest()[:16]
+    return f"{body_digest}:{rules_digest}:{_facts_algorithm_stamp()}"
+
+
+@functools.lru_cache(maxsize=1)
+def _facts_algorithm_stamp() -> str:
+    """A stamp that moves when `facts.py` does (§13.2, round 2).
+
+    The source itself where it can be read, which needs no discipline from anybody. A frozen
+    build may have no `.py` to hash, so it falls back to the product version — which changes
+    every release, and a release is the only way the algorithm changes in a frozen build.
+    """
+    import hashlib
+
+    import version
+
+    try:
+        source = (pathlib.Path(__file__).parent / "facts.py").read_bytes()
+    except OSError:
+        return f"v{version.VERSION}"
+    return hashlib.sha256(source).hexdigest()[:12]
+
+
+def stored_facts(conn, campaign_id: str) -> Optional[dict]:
+    """The cached `facts.compute` result, or None if there is none for the CURRENT key."""
+    if "computed_facts" not in _columns(conn, "campaigns"):
+        return None
+    row = conn.execute(
+        "SELECT computed_facts, computed_facts_key FROM campaigns WHERE id = ?",
+        (campaign_id,)).fetchone()
+    if not row or not row["computed_facts"]:
+        return None
+    return _parsed_facts(row["computed_facts"])
+
+
+def stored_facts_stamp(conn, campaign_id: str) -> Optional[str]:
+    """The RULEBOOK half of the key the stored facts were computed under."""
+    if "computed_facts_key" not in _columns(conn, "campaigns"):
+        return None
+    row = conn.execute("SELECT computed_facts_key FROM campaigns WHERE id = ?",
+                       (campaign_id,)).fetchone()
+    key = (row["computed_facts_key"] if row else None) or ""
+    return key.split(":", 1)[1] if ":" in key else None
+
+
+def facts_if_current(conn, campaign_id: str, body: str) -> Optional[dict]:
+    """The stored facts if they were computed under the CURRENT key, else None (§13.2).
+
+    One statement. `stored_facts_are_current` followed by `stored_facts` asked the same row
+    twice and `_columns` twice on top — 22 statements per record per report, spent to avoid a
+    text scan. Both are kept because tests and `health_check` ask the two questions
+    separately; the read path asks them together because that is what it needs.
+    """
+    if "computed_facts" not in _columns(conn, "campaigns"):
+        return None
+    row = conn.execute(
+        "SELECT computed_facts, computed_facts_key FROM campaigns WHERE id = ?",
+        (campaign_id,)).fetchone()
+    if not row or row["computed_facts_key"] != facts_key(body):
+        return None
+    return _parsed_facts(row["computed_facts"])
+
+
+def _parsed_facts(raw) -> Optional[dict]:
+    """A stored fact set, or None if it is not one. SHAPE, not just valid JSON."""
+    try:
+        stored = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+    # A row holding `[]` or `"text"` parses and then fails in the caller with an
+    # `AttributeError`, and a row holding `{}` is returned as a record with no facts at all.
+    # The docstring promised a corrupt row costs a scan and never an answer, and checking
+    # only the syntax made that false.
+    if not isinstance(stored, dict) or "language" not in stored:
+        return None
+    return stored
+
+
+def stored_facts_are_current(conn, campaign_id: str, body: str) -> bool:
+    if "computed_facts_key" not in _columns(conn, "campaigns"):
+        return False
+    row = conn.execute("SELECT computed_facts_key FROM campaigns WHERE id = ?",
+                       (campaign_id,)).fetchone()
+    return bool(row) and row["computed_facts_key"] == facts_key(body)
+
+
+def keep_facts(conn, campaign_id: str, body: str, computed: dict) -> None:
+    """Store a computed result against the key it was computed under (§13.2/D95).
+
+    **Never raises, and never commits somebody else's transaction.** This is reached from a
+    READ — `facts.for_campaign` fills the cache on a miss — and a read that fails on a
+    read-only database, or that commits a half-finished write the caller meant to roll back,
+    is a far worse thing than a slow read. `store.py`'s metrics import documents this exact
+    shape ("a rollback after it had nothing left to undo"); review found this one.
+    """
+    if "computed_facts" not in _columns(conn, "campaigns"):
+        return
+    # Already inside somebody's transaction: write, and let THEM decide when it commits. The
+    # row is correct either way, and if their work is rolled back the cache entry goes with
+    # it — which is right, because the body it was computed from goes too.
+    theirs = conn.in_transaction
+    try:
+        # A SHORT wait for the lock, not the default five seconds. A rulebook edit makes every
+        # record cold at once, so the first report afterwards tries to fill the whole cache —
+        # and with another connection mid-write, each one sat out the full busy timeout inside
+        # a read somebody was waiting on. Review measured 5.49s for a single record. Filling a
+        # cache is never worth blocking on: if the database is busy, skip it and recompute
+        # next time.
+        conn.execute("PRAGMA busy_timeout = 50")
+        conn.execute("UPDATE campaigns SET computed_facts = ?, computed_facts_key = ? "
+                     "WHERE id = ?",
+                     (json.dumps(computed), facts_key(body), campaign_id))
+        if not theirs:
+            conn.commit()
+    except Exception:                      # noqa: BLE001 - a cache, never an answer
+        return
+    finally:
+        try:
+            conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+        except Exception:                  # noqa: BLE001
+            pass
 
 
 def breadth_of(conn, campaign_ids: list) -> dict:

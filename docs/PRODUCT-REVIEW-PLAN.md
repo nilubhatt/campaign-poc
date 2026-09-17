@@ -3139,10 +3139,72 @@ or a second copy of something that already exists once.
       upgraded v0.2.0 database", overstates it: `upgrade()` creates every missing TABLE before
       anything else, so a live install cannot reach that state, and what actually breaks an
       upgraded database is missing COLUMNS (D89). The guard is defensive and now says so.
-- [ ] **13.2 Computed facts cached rather than recomputed** — `gaps()` recomputes every
+- [x] **13.2 Computed facts cached rather than recomputed** — `gaps()` recomputes every
       campaign's facts on every call (500 decks ≈ 40 s, dominated by the channel regexes) and
       does it before the empty-library early return. Facts are deterministic on body text, so
       they belong beside the record, written at ingest and on edit. *Closes D95.*
+
+      **The cost is real and was measured first**, on 200 decks of ~38,000 characters:
+      **2.41 s per `gaps()` call, of which `facts.compute` is 2.3 s.** Warm afterwards:
+      **0.13 s and zero text scans**, and the same on `coverage`, `readiness` and
+      `diff_campaigns`, all of which walked the same path.
+
+      Two honest qualifications, both raised in review, because a performance item that
+      reports only its best case is advertised rather than measured. **This is not the
+      review's corpus.** D95's 500 decks ≈ 40 s implies 80 ms a deck; these measure 12 ms,
+      and a reviewer's own channel-dense deck measured 26 ms. Whatever the review's 500 were,
+      they were three times heavier than anything reproduced here — so the shape of the
+      finding is confirmed and its magnitude is not, and the earlier draft of this note
+      asserted the corpora matched while flagging a *different* D95 discrepancy one paragraph
+      later. **And the cold pass is now slower than before the change**: the same full scan
+      plus a write, measured at 2.86 s for 200 cold records against 2.41 s before. That is
+      paid once per (body, rulebook, release) and never inside a loop, but it is paid, and
+      two things cool the whole library at once — editing the rulebook, and importing metrics
+      whose `detail` is part of the body. Ingest, re-index and `add_metrics` all warm, so the
+      scan lands where somebody is already waiting for a file rather than inside a report.
+
+      **The row's premise is wrong, and building it as written would have shipped this
+      product's cardinal sin.** "Deterministic on body text" is false: `facts.compute` reads
+      the customer's rulebook twice — `rulebook.vocabulary("channels")` decides the channel
+      checklist and `rulebook.rules()` supplies the guardrail `watch_for` words. Verified on
+      one unchanged string: with no overlay it computes `channels: partial` and `guardrails:
+      nothing_to_check`; with a rulebook declared, `channels: present` and `guardrails:
+      contradicted`. Keyed on the text alone, every record stored before the rulebook existed
+      would go on reporting `guardrails: nothing_to_check` — the product saying there are no
+      rules to check about a library whose rules were just written, with `nothing_to_check`
+      doing the work of a pass. The key is (body, `rulebook.version()`), which §12.1 built as
+      a composite stamp that moves whenever either half does.
+
+      **The key is CONTENT, not a declared version — and the first attempt got that wrong in
+      exactly the way it was correcting.** Keyed on `rulebook.version()`, a customer who
+      edited a rule without bumping their version string kept the old answer forever:
+      reproduced, with the library reporting `contradicted` against a rule the customer had
+      just DELETED. Before the cache a restart healed that, because every read recomputed —
+      the cache is what removed the healing, so it owes the guard. Worse, `rulebook.version()`'s
+      `core-1.0` half is the bundled YAML's version and not a code version, and `facts.py`
+      has changed six times while that string stood still, so a release fixing a matcher would
+      have left every install answering with the old one. The key is now a digest of the body,
+      a digest of the rulebook's CONTENTS, and a stamp for `facts.py` itself — its source
+      hash, falling back to the product version in a frozen build. Content-addressed
+      throughout, so nothing rests on anybody remembering to bump a number.
+
+      **Read-through, and the read must never cost the reader anything.** The key is
+      re-checked on every read and a miss recomputes, so a body changed by a path that never
+      learned about the cache still reads correctly. But a read that WRITES brought three
+      hazards, none of which had a test until review found them: it committed a transaction
+      its caller meant to roll back, it raised on a read-only database, and it sat out the
+      full five-second busy timeout when another connection held a write — per record, and a
+      rulebook edit makes every record cold at once. Filling a cache is never worth any of
+      that: the write now never raises, never commits somebody else's transaction, and gives
+      up on a lock after 50 ms.
+
+      **`health_check` reports how warm the cache is and under which rulebook.** Under the
+      staleness the first attempt could produce, that stamp was the only thing that would let
+      anybody notice — and it was on disk, reachable from no surface at all.
+
+      One claim in the row I could not reproduce: `_fields_never_recorded` runs AFTER
+      `_ranked_gaps` and over an empty list on an empty library, so "before the empty-library
+      early return" describes an arrangement that is no longer there.
 - [ ] **13.3 The embedding and scan costs** — the same string embedded twice per save and
       three times per prepare; `store.citations` scanned once per coverage cell; quote
       verification re-reading every chunk per finding; a content edit re-embedding a whole

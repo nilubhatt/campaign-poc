@@ -705,7 +705,37 @@ def for_campaign(conn, campaign_id: str) -> dict:
     on_file = store.text_on_file(conn, campaign_id)
     if on_file is None:
         return {}
-    computed = compute("\n\n".join(on_file["body"]))
+    body = "\n\n".join(on_file["body"])
+    # §13.2/D95: computed once per (body, rulebook) rather than on every read. Reading the
+    # library re-scanned every deck — 2.41s per `gaps()` over 200 decks of 38,000 characters,
+    # essentially all of it in the channel regexes — for an answer that cannot have changed.
+    #
+    # READ-THROUGH, and checked against the key on every call. A cache the write paths have
+    # to remember to refresh is a cache that goes stale the first time somebody adds a
+    # seventh write path, which is this codebase's most repeated defect; this one cannot,
+    # because a body or a rulebook that does not match what the row was computed under is a
+    # miss. `store.keep_facts` is also called at ingest and on re-index, so the first read of
+    # a new record is warm rather than paying for the scan — but nothing depends on that
+    # having happened.
+    #
+    # Only `compute` is cached. The `date_coverage` overlay below reads `starts_on`, which
+    # `update_campaign` changes without touching a word of the body — cached with it, a
+    # window somebody entered would not show up until they edited the deck.
+    # ONE read of the row, not a key check and then a fetch. The two were two `PRAGMA
+    # table_info` calls and two `SELECT`s — 22 statements per `for_campaign`, per record, on
+    # every report, to avoid a text scan. `_columns` is not memoised, so the PRAGMA ran per
+    # record too.
+    computed = store.facts_if_current(conn, campaign_id, body)
+    if computed is None:
+        computed = compute(body)
+        store.keep_facts(conn, campaign_id, body, computed)
+    # The rulebook stamp is deliberately NOT added to this mapping. Every entry here is a
+    # fact — `_fact_changes` and `_fields_never_recorded` walk it by code — so a bare string
+    # beside them is a fact-shaped hole, which is how 24 tests found it. Where the stamp
+    # belongs is the DIAGNOSTIC surface: `health_check` reports how much of the cache is warm
+    # and under which rulebook, because "is this install answering from stale rows" is an
+    # operator's question, and §12.1 already stamps the rulebook onto every judgment where it
+    # is a reader's question.
     # §9.6/§9.7: a window somebody ENTERED is a date this record carries, and a stronger one
     # than any sentence — it is structured, and §9.7 names it twice in the adjacent line of
     # the same block. Reporting "no date appears anywhere in this brief" beside it faulted the

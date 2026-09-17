@@ -321,6 +321,12 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
             filter(None, [detail, deck_text])))
         promised = commitments.summary_for(conn, cid)
     current = store.get_campaign(conn, cid)
+    # §13.2/D95: the record's facts, computed once now rather than on the first read of the
+    # library. The read path re-checks the key and recomputes on a miss, so this is a WARM-UP
+    # and not the thing correctness rests on — but it is what the row asks for, and it means
+    # the scan is paid at upload, where somebody is already waiting for a file to be read,
+    # rather than inside a `gaps()` call that should be instant.
+    _warm_the_facts(conn, cid)
     earlier_judgment = _judgment_to_check(conn, supersedes)
     # §10.6/D54: computed before the offers so the result can be consulted after them.
     gap_moved = _gap_moved(conn)
@@ -509,6 +515,13 @@ def add_metrics(conn, campaign_id: str, *, detail: Optional[str] = None,
         }
     mid = store.add_metrics(conn, campaign_id, detail=detail, structured=structured,
                            metric_type=metric_type)
+    # §13.2/D95: a MEASURED metric's `detail` is part of the record's body — `text_on_file`
+    # says so in writing, because "CTR was 3.2 percent, well above the benchmark" is this
+    # product's most common real citation — so recording one changes what the checks read and
+    # cools the stored facts. The read path would recompute correctly either way; warming
+    # here is what stops a bulk import leaving the whole library cold for the next report.
+    if metric_type == "actual" and (detail or "").strip():
+        _warm_the_facts(conn, campaign_id)
     # §9.5: the drift, ON the outcome. `snapshot_drift=False` is for a bulk import, which
     # writes many rows against the same campaign and re-ran the whole comparison for each —
     # fifty workbook rows for one campaign meant fifty identical comparisons and forty-nine
@@ -3458,6 +3471,26 @@ class _NoDatabase:
         raise sqlite3.OperationalError("no usable database")
 
 
+def _how_warm_the_facts_are(conn, campaigns: int) -> dict:
+    """What `health_check` says about the fact cache (§13.2/D95). Never a failure."""
+    try:
+        warm = conn.execute(
+            "SELECT COUNT(*) AS n FROM campaigns WHERE computed_facts_key IS NOT NULL"
+        ).fetchone()["n"]
+    except Exception:                      # noqa: BLE001 - a database without the column
+        return {"ok": True, "detail": "this database predates the computed-fact cache; "
+                                      "every read recomputes, which is correct and slower."}
+    return {
+        "ok": True,
+        "warm": warm, "records": campaigns,
+        "checked_under": rulebook.version(),
+        "detail": (f"{warm} of {campaigns} records have their facts stored, computed under "
+                   f"rulebook {rulebook.version()}. A cold record is recomputed on the next "
+                   f"read — slower, never wrong — and editing the rulebook cools all of "
+                   f"them, by design."),
+    }
+
+
 def health_check(conn, *, probe: bool = True) -> dict:
     """Answer "is this thing actually working" in one call, in seconds (defect 06).
 
@@ -3494,6 +3527,13 @@ def health_check(conn, *, probe: bool = True) -> dict:
             "ok": True,
             "detail": f"{campaigns} records in {config.DB_PATH}; vector_index={backend}",
         }
+        # §13.2/D95: how much of the computed-fact cache is warm, and under which rulebook.
+        # NOT a health problem either way — a cold row is a slower read and never a wrong
+        # answer, because the key is re-checked on every read — so this reports rather than
+        # fails. It is here because "is this install answering from rows computed under an
+        # older rulebook" is an operator's question and nothing else could answer it: the
+        # stamp was on disk and reachable from no surface at all.
+        components["computed_facts"] = _how_warm_the_facts_are(conn, campaigns)
         stranded = vectorstore.count_unreadable_vectors(conn)
         if stranded:
             components["database"] = {
@@ -7526,6 +7566,22 @@ def _incompleteness_warnings(conn) -> list[dict]:
 _CONTENT_FIELDS = ("title", "detail")
 
 
+def _warm_the_facts(conn, campaign_id: str) -> None:
+    """Compute and store this record's facts now (§13.2/D95).
+
+    Never raises: a fact this product could not compute is one it recomputes on read, and an
+    upload must not fail because a cache could not be filled.
+    """
+    try:
+        on_file = store.text_on_file(conn, campaign_id)
+        if on_file is None:
+            return
+        body = "\n\n".join(on_file["body"])
+        store.keep_facts(conn, campaign_id, body, facts.compute(body))
+    except Exception:                      # noqa: BLE001 - a warm-up, never a failure
+        return
+
+
 def _rebuild_body_index(conn, campaign_id: str) -> dict:
     """Re-chunk and re-embed a record's BODY from what is stored on the row.
 
@@ -7538,6 +7594,10 @@ def _rebuild_body_index(conn, campaign_id: str) -> dict:
     columns, and its chunks carry an author and an anchor that nothing else can reconstruct.
     """
     record = store.get_campaign(conn, campaign_id)
+    # The body just changed, so the stored facts are for the old one. Refreshed here rather
+    # than at each of this function's callers, which is the point of there being one
+    # implementation of "rebuild the index" (§13.2/D95).
+    _warm_the_facts(conn, campaign_id)
     summary = "\n\n".join(p for p in (record["title"], record.get("detail")) if p)
     units = (record.get("deck_text") or "").split("\n\n")
     texts = chunking.pack(([summary] if summary else []) + [u for u in units if u.strip()])
