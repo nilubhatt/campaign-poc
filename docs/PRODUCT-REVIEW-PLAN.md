@@ -3205,16 +3205,119 @@ or a second copy of something that already exists once.
       One claim in the row I could not reproduce: `_fields_never_recorded` runs AFTER
       `_ranked_gaps` and over an empty list on an empty library, so "before the empty-library
       early return" describes an arrangement that is no longer there.
-- [ ] **13.3 The embedding and scan costs** — the same string embedded twice per save and
+- [x] **13.3 The embedding and scan costs** — the same string embedded twice per save and
       three times per prepare; `store.citations` scanned once per coverage cell; quote
       verification re-reading every chunk per finding; a content edit re-embedding a whole
       deck for a title change; `retire_stale` scanning the registry on every metric write.
       *Closes D79, D90, D91, D97, D107.*
+
+      **Measured before any of them was touched, and counted as CALLS rather than wall time**
+      — which is the part that does not depend on the provider: against the bundled hash
+      embedder a repeated embed is microseconds, and against Ollama it is a network
+      round-trip for a vector already in hand. Two of the five rows turned out to be wrong
+      about their own subject, in opposite directions, which is the argument both for the
+      rows existing and for measuring one before fixing it.
+
+      | | claimed | measured | now |
+      |---|---|---|---|
+      | D79 | one full read per finding | 12 findings, 12 reads | **1** |
+      | D90 | save 2×, prepare 3× | save already 1×; **prepare 4×** | **1** |
+      | D91 | one scan per cell | confirmed | **1** per report |
+      | D97 | re-embeds the summary chunk | **all 17 chunks**, on a TITLE edit | **1**† |
+      | D107 | a registry scan per metric write | 5 scans | **2**‡ |
+
+      † **One when the pack boundaries hold**, which a title edit guarantees and a detail
+      edit does not: `chunking.pack` merges adjacent units, so an edit that changes the
+      summary's LENGTH moves every boundary after it and the whole deck genuinely differs at
+      every position. Review measured a 200-short-section deck re-embedding all of it on a
+      detail edit. The comparison is doing the right thing; the deck really did change.
+
+      ‡ **Scans, not queries.** The five full registry reads become two full reads plus two
+      single-row lookups and one filtered read — the win is WIDTH, not round-trips. And it is
+      not the term that grows: `retire_stale` still calls `store.campaigns_that_skipped` once
+      per expected measure, so the real scaling cost of a metric write is the size of the
+      CHECKLIST, which this did not touch. Left as it is because the checklist is small by
+      construction — §8.3's gate is what keeps it so — and named here rather than left for
+      somebody to discover.
+
+      The unit is not the same for all five, and saying "calls" for all of them flatters three.
+      D90 and D97 count NETWORK round-trips to an embedder; D79, D91 and D107 count local
+      SQLite reads, which are sub-millisecond each. The first two are the real wins; the other
+      three are shape — work that grows with the library on every read — and D79's defence is
+      specifically that `text_on_file` reads every CHUNK, so twelve findings against a
+      200-chunk deck is some thousands of row reads rather than twelve.
+
+      **The mechanism is the same in three of the five: compute once, pass it down.** D91
+      fetches the citation list once per report; D79 reads each cited record once per save;
+      D107 gets a single-row `store.metric_entry` for what was a full table read per name,
+      and `retire_stale` asks the database for the `expected` rows instead of filtering them
+      in Python. D97 compares the new chunk texts to the stored ones POSITION BY POSITION and
+      rewrites only what differs — position rather than set, because §13.4/D100 is about
+      chunk order being load-bearing, and a set match would silently reorder a deck whose
+      paragraphs repeat. A rewritten chunk keeps its id, which is the half with a correctness
+      cost rather than a speed one: `finish_indexing` names chunk ids, and §6.1 verifies
+      quotes against the row's own columns precisely so that chunk ids need not be anchors.
+
+      **D90's memo is scoped to a call, and the first version of it was not.** A
+      process-lifetime LRU keyed on (model, text) is sound about vectors and wrong about
+      everything else: a vector computed in one call was served in another, so an embedder
+      that went down in between was never noticed. Eight tests of partial-failure and outage
+      behaviour failed, each of them describing a real thing this product is supposed to
+      report. The waste D90 names is INSIDE one call, so a call is the right scope; outside
+      one, `embed_once` is `embed`. Keyed on the model even within a scope, because §7.2
+      established that a model change is a visible migration rather than a silent re-ranking.
+      Ingest is scoped too: a deck repeats itself, and 7 of 17 embeds on a deck with repeated
+      sections were for a vector already in hand.
+
+      **Two defects of my own, found in review.** The first version wrote each chunk's text
+      and embedded it in the SAME loop and broke out on an embedder failure — so the positions
+      after the break kept the old deck's words while the row held the new ones, with their
+      `embedded` flag still set from before, and `finish_indexing` reported the record
+      complete. That is D80's defect reintroduced by the fix for D97, hidden behind a comment
+      claiming the row was correct and only the index behind. Text first, vectors second: a
+      partial failure now lands where §2.1 says it should. And both memos were module globals
+      while the MCP server runs sync tools on worker threads, so two overlapping calls shared
+      one — and interleaved, they left a dict behind after both scopes exited, turning a
+      call-scoped memo into exactly the process-lifetime cache it was written to avoid. Both
+      are `contextvars.ContextVar` now, and both are pinned.
+
+      **Two of the same shape that §13.3 had walked past.** `_expected_inputs_never_supplied`
+      read every record's whole text once PER EXPECTATION and re-folded each body on every
+      pass — D79's shape at a worse exponent, in the same file as the memo that fixes it. And
+      `coverage` hoisted its citation scan ABOVE the empty-library early return, making the
+      one path that previously did no work more expensive. `gaps()` now opens one read scope
+      for the whole report, which `facts.for_campaign` shares, so the two parts that each walk
+      every record read each one once between them rather than once apiece.
+
+      **Acknowledged debt.** `each_string_embedded_once` and `_each_record_read_once` are the
+      same mechanism written twice — a `ContextVar`, a context manager that installs a dict
+      only if none is installed, and a pass-through wrapper. Both had the same non-locality
+      bug and needed the same fix, which is that duplication made concrete. It is D114's
+      subject and §13.5's item, and it is named there rather than being made a third mechanism
+      here.
+
+      One test elsewhere had to be re-fixtured rather than fixed: `test_a_partial_reindex_
+      raises_a_notice` produced its partial state by letting an embedder die part-way through
+      a full rebuild, which no longer happens. Its intent is unchanged and the partial state
+      is now a smaller one — the changed chunk failing while the deck's sections stay
+      embedded from before.
 - [ ] **13.4 The re-index's three loose ends** — `embedding.embed` called with no timeout on
       the re-index path alone, so a hung embedder hangs the handler per chunk; chunk ordering
       after a re-index, which silently broke "chunk 0 is the summary"; and D109, re-pointed
       here from §12.4 because the thing it is blocked on is D99's missing timeout and fixing
       it anywhere else would be fixing the symptom. *Closes D99, D100, D109.*
+
+      **§13.3 made body `chunk_index` order load-bearing, and this item must not break it.**
+      `_rebuild_body_index` matches `store.body_chunks(... ORDER BY chunk_index)` positionally
+      against `chunking.pack`'s output to decide what to re-embed. Any renumbering here that
+      does not preserve the body's RELATIVE order makes every position mismatch — and the
+      failure is silent, because a total mismatch just re-embeds the whole deck, which is the
+      old behaviour. The only guard is a test asserting a title edit costs one embed.
+
+      §13.3 also narrowed D100 without closing it: the common edit no longer re-inserts, so it
+      no longer trips `insert_chunks`' `MAX(chunk_index) + 1` allocation across ALL kinds. A
+      body that GAINS a position still does, so the allocation is still the thing to fix — and
+      it now has two callers to keep consistent.
 - [ ] **13.5 The remaining two-copy helpers** — `_newly_eligible`/`graduate`, the offered-once
       flags, `touch_metric`/`touch_correction` (byte-identical market-fold loops) and
       `campaigns_that_skipped`/`campaigns_that_skipped_correction`. "One mechanism" is true of

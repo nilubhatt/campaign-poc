@@ -213,19 +213,22 @@ def test_a_partial_reindex_raises_a_notice(conn, monkeypatch):
                     deck_text="\n\n".join(f"Section {n}. " + ("words " * 400)
                                           for n in range(4)))
 
-    # Half the sections re-index and half do not, which is the state the field name
-    # `embedded` describes and nothing else reported.
+    # The CHANGED chunk does not re-index and the unchanged ones stay as they were, which is
+    # the state the field name `embedded` describes and nothing else reported.
+    #
+    # §13.3/D97 changed what makes this partial. A rebuild used to delete and re-embed every
+    # chunk, so an embedder failing part-way through left some done and some not; now only
+    # what actually changed is re-embedded — a detail edit touches the summary chunk alone —
+    # so the partial state is that ONE chunk failing while the deck's own sections remain
+    # embedded from before. Still `embedded < chunks`, still the thing the notice is for, and
+    # a much smaller hole than the old behaviour could produce.
     import embedding
-    calls = {"n": 0}
     real = embedding.embed
 
-    def flaky(text, *a, **kw):
-        calls["n"] += 1
-        if calls["n"] > 2:
-            raise RuntimeError("the embedding service went away mid-edit")
-        return real(text, *a, **kw)
+    def dead(text, *a, **kw):
+        raise RuntimeError("the embedding service went away mid-edit")
 
-    monkeypatch.setattr(embedding, "embed", flaky)
+    monkeypatch.setattr(embedding, "embed", dead)
     edited = core.update_campaign(conn, campaign_id=cid,
                                   detail="Entirely new wording for this brief.")
 

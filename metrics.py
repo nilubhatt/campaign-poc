@@ -210,7 +210,15 @@ def unit_of(conn, key: str) -> Optional[str]:
 
 
 def describe(conn, name: str) -> Optional[dict]:
-    return _registry(conn).get(name)
+    """One measure, read as one row (§13.3/D107).
+
+    This read the WHOLE registry and then `.get(name)` — a full table read for a single-name
+    lookup, and `metrics.record` did it twice. `store.metric_entry` parses through the same
+    `_as_metric` the full read uses, so a narrow read and a wide one cannot disagree.
+    """
+    import store
+
+    return store.metric_entry(conn, name)
 
 
 DECISIONS = ("same_thing", "different_measure", "ignore")
@@ -948,9 +956,9 @@ def retire_stale(conn) -> list:
     import store
 
     retired = []
-    for name, entry in _registry(conn).items():
-        if entry["status"] != "expected":
-            continue
+    # §13.3/D107: only the measures ON a checklist. This read every row and skipped all but
+    # the `expected` ones, on every metric write.
+    for name, entry in store.expected_metrics(conn).items():
         skipped = store.campaigns_that_skipped(conn, name, since=entry["last_seen"],
                                                markets=entry["expected_in"])
         if skipped >= RETIREMENT_AFTER:

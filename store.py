@@ -2706,6 +2706,38 @@ def text_on_file(conn, campaign_id: str) -> Optional[dict]:
             "brief": bool(body or commentary)}
 
 
+def body_chunks(conn, campaign_id: str) -> list[dict]:
+    """This record's BODY chunks, in order (§13.3/D97).
+
+    In `chunk_index` order because the order is load-bearing: chunk 0 is the title-and-detail
+    summary and the deck's sections follow it, which is what lets a rebuild compare position
+    by position and re-embed only what changed.
+    """
+    return [dict(r) for r in conn.execute(
+        "SELECT id, chunk_index, text, embedded FROM campaign_chunks "
+        "WHERE campaign_id = ? AND kind = 'body' ORDER BY chunk_index", (campaign_id,))]
+
+
+def set_chunk_text(conn, chunk_id: str, text: str) -> None:
+    """Replace one chunk's words, keeping its id and its position (§13.3/D97).
+
+    `embedded` goes back to 0: the words changed, so whatever vector was against this id is
+    for text this chunk no longer holds, and leaving the flag set would report the record as
+    fully searchable by wording that is not in it.
+    """
+    conn.execute("UPDATE campaign_chunks SET text = ?, embedded = 0 WHERE id = ?",
+                 (text, chunk_id))
+    conn.commit()
+
+
+def delete_chunks(conn, chunk_ids: list) -> None:
+    if not chunk_ids:
+        return
+    conn.execute(f"DELETE FROM campaign_chunks WHERE id IN "
+                 f"({','.join('?' * len(chunk_ids))})", list(chunk_ids))
+    conn.commit()
+
+
 def set_chunk_embedded(conn, chunk_id: str) -> None:
     conn.execute("UPDATE campaign_chunks SET embedded = 1 WHERE id = ?", (chunk_id,))
     conn.commit()
@@ -3663,18 +3695,54 @@ def metric_registry(conn) -> dict:
         return {}
     out = {}
     for row in conn.execute("SELECT * FROM metric_registry").fetchall():
-        d = dict(row)
-        d["aliases"] = json.loads(d["aliases"] or "[]")
-        d["markets"] = json.loads(d["markets"] or "[]")
-        d["expected_in"] = json.loads(d.get("expected_in") or "[]")
-        # §12.4/D102. `.get` because an upgraded database reaches this before
-        # `_add_missing_columns` has run on the process that opened it, and `[]` is the right
-        # answer there: keyed on market, which is what it was.
-        d["expected_for_types"] = json.loads(d.get("expected_for_types") or "[]")
-        d["answered"] = bool(d.get("answered"))
-        d["surfaced"] = bool(d.get("surfaced"))
+        d = _as_metric(row)
         out[d["canonical"]] = d
     return out
+
+
+def metric_entry(conn, name: str) -> Optional[dict]:
+    """ONE measure, read as one row (§13.3/D107).
+
+    `describe` asked for the whole registry and then `.get(name)` — a full table read for a
+    single-row lookup, twice inside one `metrics.record`. Parsed by the same `_as_metric` the
+    full read uses, so the two cannot disagree about what an entry is.
+    """
+    if not _columns(conn, "metric_registry"):
+        return None
+    row = conn.execute("SELECT * FROM metric_registry WHERE canonical = ?", (name,)).fetchone()
+    return _as_metric(row) if row else None
+
+
+def expected_metrics(conn) -> dict:
+    """Only the measures ON a checklist (§13.3/D107).
+
+    `retire_stale` reads the registry to find `expected` ones and skips every other row; the
+    database can do that filtering.
+    """
+    if not _columns(conn, "metric_registry"):
+        return {}
+    out = {}
+    for row in conn.execute(
+            "SELECT * FROM metric_registry WHERE status = 'expected'").fetchall():
+        d = _as_metric(row)
+        out[d["canonical"]] = d
+    return out
+
+
+def _as_metric(row) -> dict:
+    """One registry row, parsed. The one implementation, so a narrow read and a full one
+    cannot come back shaped differently."""
+    d = dict(row)
+    d["aliases"] = json.loads(d["aliases"] or "[]")
+    d["markets"] = json.loads(d["markets"] or "[]")
+    d["expected_in"] = json.loads(d.get("expected_in") or "[]")
+    # §12.4/D102. `.get` because an upgraded database reaches this before
+    # `_add_missing_columns` has run on the process that opened it, and `[]` is the right
+    # answer there: keyed on market, which is what it was.
+    d["expected_for_types"] = json.loads(d.get("expected_for_types") or "[]")
+    d["answered"] = bool(d.get("answered"))
+    d["surfaced"] = bool(d.get("surfaced"))
+    return d
 
 
 def register_metric(conn, *, canonical, display_name, unit, direction, aliases,

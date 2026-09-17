@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
+import contextvars
 import json
 import re
 import sqlite3
@@ -53,7 +55,18 @@ _SEARCH_OVERFETCH = 20
 
 # ── ingest ───────────────────────────────────────────────────────────────────
 
-def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
+def ingest_campaign(conn, **kwargs) -> dict:
+    """`_ingest_campaign`, embedding each distinct string once (§13.3/D90).
+
+    A deck repeats itself — a footer, a disclaimer, a boilerplate slide — and every identical
+    chunk was a separate network round-trip for a vector already in hand. Measured at 7 of 17
+    on a deck with repeated sections.
+    """
+    with embedding.each_string_embedded_once():
+        return _ingest_campaign(conn, **kwargs)
+
+
+def _ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
                     deck_text: Optional[str] = None, record_type: str = "campaign",
                     status: Optional[str] = None, tags: Optional[list] = None,
                     region: Optional[str] = None, market: Optional[str] = None,
@@ -287,7 +300,7 @@ def ingest_campaign(conn, *, title: str, detail: Optional[str] = None,
         try:
             # Only the time that is actually left, so no single call can push the handler
             # past its own deadline.
-            vec = embedding.embed(text, timeout=remaining)
+            vec = embedding.embed_once(text, timeout=remaining)
             _add_vector(conn, chunk_id, vec)
             store.set_chunk_embedded(conn, chunk_id)
             embedded_count += 1
@@ -1068,7 +1081,7 @@ def _verify_quote(conn, cited: str, segments: list, layer: str, where: str, *,
             + "A guardrail breach cites a rule somebody wrote, not a campaign that happened "
               "to do it that way.")
 
-    on_file = store.text_on_file(conn, cited)
+    on_file = _text_on_file(conn, cited)
     # What to say INSTEAD of quoting, which depends on the kind: a finding that is a claim
     # about another record cannot simply drop its citation, because `_CITING_KINDS` refuses
     # it a second time. Offering that exit to a precedent_departure sent the model round a
@@ -1110,6 +1123,45 @@ def _verify_quote(conn, cited: str, segments: list, layer: str, where: str, *,
         f"{where}that quote is not in {cited!r}. Quote the evidence you were given — the "
         f"words as they are written, an elision (…) for a short gap — {instead}. Do not "
         f"paraphrase into a quote.")
+
+
+# §13.3/D79: one read of a record per call, not one per finding. Quote verification reads
+# every chunk of the cited record, and twelve findings against one long deck was twelve full
+# reads of the same unchanged text, inside the call somebody is waiting on.
+#
+# Scoped to a call rather than to the process, and that is the whole of why it is safe:
+# nothing writes to a CITED record while its citations are being verified, so within the
+# block the answer cannot change. A process-lifetime memo would be the staleness §13.2 spent
+# an item removing, one table along.
+# A CONTEXTVAR for the same reason `embedding`'s is: the MCP server runs sync tools on worker
+# threads, so a module global is shared by overlapping tool calls — and interleaved, the
+# nesting logic left a dict behind after both scopes exited, turning a call-scoped memo into
+# the process-lifetime one this pattern exists to avoid.
+_reading_records_once: contextvars.ContextVar = contextvars.ContextVar(
+    "reading_records_once", default=None)
+
+
+@contextlib.contextmanager
+def _each_record_read_once():
+    """Read each cited record at most once for the duration of this block (§13.3/D79)."""
+    if _reading_records_once.get() is not None:
+        yield
+        return
+    token = _reading_records_once.set({})
+    try:
+        yield
+    finally:
+        _reading_records_once.reset(token)
+
+
+def _text_on_file(conn, campaign_id: str):
+    """`store.text_on_file`, memoised inside `_each_record_read_once` and nowhere else."""
+    memo = _reading_records_once.get()
+    if memo is None:
+        return store.text_on_file(conn, campaign_id)
+    if campaign_id not in memo:
+        memo[campaign_id] = store.text_on_file(conn, campaign_id)
+    return memo[campaign_id]
 
 
 def _clean_precedent(conn, value, where: str, *, kind=None) -> Optional[dict]:
@@ -2653,7 +2705,7 @@ def _clean_closest_precedent(conn, value) -> Optional[dict]:
     if not cited:
         raise ValueError("closest_precedent must name the campaign it points at "
                          "(campaign_id)")
-    if store.text_on_file(conn, cited) is None:
+    if _text_on_file(conn, cited) is None:
         raise ValueError(f"closest_precedent names {cited!r}, which is not a record in this "
                          f"library. It is the id a summary quotes first — an invented one "
                          f"there is the most visible wrong citation the product can make.")
@@ -2836,7 +2888,13 @@ def save_evaluation(conn, *args, **kwargs) -> dict:
     one that matters most is whichever one nobody thought to instrument.
     """
     try:
-        return _save_evaluation(conn, *args, **kwargs)
+        # §13.3/D79 and D90: each cited record read once for this whole save, and each
+        # distinct string embedded once. Nothing writes to a cited record while its citations
+        # are being verified, which is what makes a call-scoped memo safe where a
+        # process-lifetime one would not be — the first version of the embedding memo was
+        # process-lifetime, and it hid an embedder that had gone down between two calls.
+        with _each_record_read_once(), embedding.each_string_embedded_once():
+            return _save_evaluation(conn, *args, **kwargs)
     except ValueError as exc:
         _count_refusal(conn, str(exc))
         raise
@@ -3913,20 +3971,25 @@ def _expected_inputs_never_supplied(conn) -> list:
     if not records:
         return []
 
+    # §13.3: read each record ONCE, and fold its body once. This sat inside
+    # `for expected: for record:` — a full read of every record per expectation, and a
+    # re-join and re-lowercase of every body on each pass. That is D79's shape at a worse
+    # exponent, in the same file as the memo that fixes it, and §13.3 named five rows and
+    # walked past this one until review pointed at it.
+    #
+    # The BODY only, never the commentary — §7.1's rule, and it is the same reason here as
+    # there: a reviewer's note asking "where is the KPI workbook?" is not the workbook, and
+    # counting it would close the gap with the complaint about it.
+    bodies = []
+    for record in records:
+        on_file = _text_on_file(conn, record["id"]) or {}
+        bodies.append(" ".join(str(part) for part in (on_file.get("body") or [])).lower())
+
     found = []
     for expected in declared:
         if not expected["looks_like"]:
             continue
-        carrying = 0
-        for record in records:
-            # The BODY only, never the commentary — §7.1's rule, and it is the same reason
-            # here as there: a reviewer's note asking "where is the KPI workbook?" is not the
-            # workbook, and counting it would close the gap with the complaint about it.
-            on_file = store.text_on_file(conn, record["id"]) or {}
-            text = " ".join(str(part) for part in (on_file.get("body") or [])).lower()
-            if any(word in text for word in expected["looks_like"]):
-                carrying += 1
-        if carrying:
+        if any(word in text for text in bodies for word in expected["looks_like"]):
             continue
         found.append({
             "code": "expected_input_never_supplied",
@@ -3947,6 +4010,18 @@ def _expected_inputs_never_supplied(conn) -> list:
 
 
 def gaps(conn) -> dict:
+    """`_gaps`, reading each record at most once for the whole report (§13.3/D79).
+
+    Two of this report's parts read every record's text — the declared-expectation check and
+    the never-recorded-field walk, which reaches it through `facts.for_campaign` — so a
+    scope around each of them separately still read everything twice. The report is one
+    question about one library at one moment; a record's text cannot change inside it.
+    """
+    with _each_record_read_once():
+        return _gaps(conn)
+
+
+def _gaps(conn) -> dict:
     """What this library is missing, ranked, with what would close each one.
 
     The counterpart to `most_valuable_missing_input` on a judgment: this is about the
@@ -5907,7 +5982,7 @@ MAX_COVERAGE_CELLS = 25
 _EVIDENCE_ORDER = ("no_outcomes", "single_example", "measured", "not_yet_run", "never_ran")
 
 
-def _citation_concentration(conn, campaign_ids: list) -> dict:
+def _citation_concentration(conn, campaign_ids: list, cited_lists=None) -> dict:
     """How concentrated the citations across these records are (D65).
 
     `cited_share_top` is the share of citing judgments that named the single most-cited
@@ -5919,7 +5994,10 @@ def _citation_concentration(conn, campaign_ids: list) -> dict:
         return {"cited_share_top": None, "never_cited": []}
     citations: dict = {cid: 0 for cid in campaign_ids}
     total = 0
-    for cited_ids in store.citations(conn):
+    # §13.3/D91: the caller passes the list when it has one. `store.citations` is a full scan
+    # of `evaluations`, and `coverage` called this once per CELL — O(cells x evaluations) for
+    # a list that is identical on every call within one report.
+    for cited_ids in (store.citations(conn) if cited_lists is None else cited_lists):
         cited = set(cited_ids) & set(campaign_ids)
         if not cited:
             continue
@@ -5953,6 +6031,7 @@ def coverage(conn) -> dict:
     measured = state["measured"]
     with_results = state["with_results"]
 
+
     if not campaigns:
         return {
             "cells": [], "cells_total": 0, "thin": [], "campaigns_total": 0,
@@ -5960,6 +6039,11 @@ def coverage(conn) -> dict:
             "note": "The library is empty, so there is nothing to have coverage of.",
             "next_actions": actions.to_first_upload(),
         }
+
+    # §13.3/D91: read once for the whole report, not once per cell — and AFTER the
+    # empty-library return above, which previously did no scan at all. A performance item
+    # that makes the cheapest path more expensive has taken something from somebody.
+    every_citation = list(store.citations(conn))
 
     # Keyed case-insensitively, displayed as first seen. The bucket key used the raw
     # spelling while `_markets_of` folded case only WITHIN a record, so "LATAM" and "latam"
@@ -6011,7 +6095,8 @@ def coverage(conn) -> dict:
             # every verdict cites the same one reads `measured` and has a real depth of one —
             # "one example carrying the weight" is a fact about judgments, and the schema has
             # held it in `cited_ids` all along with nothing reading it.
-            **_citation_concentration(conn, [c["id"] for c in rows]),
+            **_citation_concentration(conn, [c["id"] for c in rows],
+                                      cited_lists=every_citation),
         })
 
     # `cells` is for BROWSING, so it is ordered the way somebody reads a table. `thin` below
@@ -6899,7 +6984,7 @@ def finish_indexing(conn, *, campaign_id: Optional[str] = None) -> dict:
             ran_out_of_time = True
             break
         try:
-            vec = embedding.embed(chunk["text"], timeout=remaining_time)
+            vec = embedding.embed_once(chunk["text"], timeout=remaining_time)
             _add_vector(conn, chunk["id"], vec)
             store.set_chunk_embedded(conn, chunk["id"])
             sections_indexed += 1
@@ -7128,7 +7213,10 @@ def find_similar(conn, *, text: Optional[str] = None, campaign_id: Optional[str]
     if not text or not text.strip():
         raise ValueError("provide text (or a campaign_id that has content) to search by")
 
-    qvec = embedding.embed(text)
+    # §13.3/D90: `embed_once`. `prepare_evaluation` reaches this four times with the SAME
+    # proposal text — one retrieval and three pole searches — and paid four network round
+    # trips for a vector that was in hand after the first.
+    qvec = embedding.embed_once(text)
     wanted_kinds = _wanted_commentary_kinds(include_commentary)
     filters_given = any([record_type, status, tags, region, market, markets, collection])
     superseded_ids = store.get_superseded_campaign_ids(conn)
@@ -7602,29 +7690,78 @@ def _rebuild_body_index(conn, campaign_id: str) -> dict:
     units = (record.get("deck_text") or "").split("\n\n")
     texts = chunking.pack(([summary] if summary else []) + [u for u in units if u.strip()])
 
-    old_ids = [r["id"] for r in conn.execute(
-        "SELECT id FROM campaign_chunks WHERE campaign_id = ? AND kind = 'body'",
-        (campaign_id,)).fetchall()]
-    vectorstore.delete_many(conn, old_ids)
-    store.forget_vector_models(conn, old_ids)
-    conn.execute("DELETE FROM campaign_chunks WHERE campaign_id = ? AND kind = 'body'",
-                 (campaign_id,))
-    conn.commit()
-    if not texts:
-        store.mark_embedded(conn, campaign_id, False)
-        return {"chunks": 0, "embedded": 0}
+    # §13.3/D97: only what actually CHANGED. This deleted every body chunk and rebuilt the
+    # lot, so editing a title re-embedded all seventeen chunks of an eight-section deck —
+    # seventeen network calls for one changed string — and gave every chunk a new id on the
+    # way, which is the half with a correctness cost rather than a speed one.
+    #
+    # Compared POSITION BY POSITION, not as a set. The summary is chunk 0 and the deck's
+    # sections follow it in order, so a title edit changes index 0 and leaves 1..n identical:
+    # matched by position, that is one re-embed. Matched as a set it would also work here and
+    # would silently reorder a deck whose paragraphs repeat, and §13.4/D100 is about chunk
+    # order being load-bearing ("chunk 0 is the summary").
+    existing = store.body_chunks(conn, campaign_id)
 
-    new_ids = store.insert_chunks(conn, campaign_id, texts)
-    embedded = 0
-    for chunk_id, text in zip(new_ids, texts):
+    # PASS ONE — every chunk's TEXT, before anything is embedded. The first version did both
+    # in one loop and broke out of it on an embedder failure, so the positions after the
+    # break kept the OLD deck's words while the row held the new ones — and their `embedded`
+    # flag was still 1 from before, so `finish_indexing` reported the record complete and
+    # search went on matching wording the brief no longer contained. That is D80's defect,
+    # reintroduced by the fix for D97, and the comment below it claiming "the row is correct
+    # and the index is behind" was the part that made it hard to see. Review found it.
+    #
+    # Text first means a partial failure lands where §2.1 says it should: the words are
+    # right, some vectors are missing, `finish_indexing` closes it.
+    kept, to_embed = [], []
+    for index, text in enumerate(texts):
+        row = existing[index] if index < len(existing) else None
+        if row is not None and row["text"] == text:
+            # Same words, same id, same vector. Nothing to do and nothing to churn — unless
+            # it never got a vector in the first place, in which case it is still owed one.
+            kept.append(row["id"])
+            if not row["embedded"]:
+                to_embed.append((row["id"], text))
+            continue
+        if row is not None:
+            # The id survives an edit to its text, which is safe because nothing anywhere
+            # stores a chunk id as a citation: §6.1 verifies quotes against the row's own
+            # columns, `insert_evaluation` keeps `cited_ids` and not chunk ids, and
+            # `finish_indexing` is offered per CAMPAIGN. What reuse buys is that the vector
+            # store and `vector_provenance` are re-keyed in place rather than accumulating a
+            # new id per edit.
+            vectorstore.delete_many(conn, [row["id"]])
+            store.forget_vector_models(conn, [row["id"]])
+            store.set_chunk_text(conn, row["id"], text)
+            chunk_id = row["id"]
+        else:
+            chunk_id = store.insert_chunks(conn, campaign_id, [text])[0]
+        kept.append(chunk_id)
+        to_embed.append((chunk_id, text))
+
+    # Anything the new text no longer has a position for — also before the embed loop, so a
+    # failure cannot leave a chunk of a deck that no longer exists behind.
+    surplus = [row["id"] for row in existing[len(texts):]]
+    if surplus:
+        vectorstore.delete_many(conn, surplus)
+        store.forget_vector_models(conn, surplus)
+        store.delete_chunks(conn, surplus)
+
+    # PASS TWO — the vectors. Everything not in `to_embed` kept a vector it already had; a
+    # chunk whose words did not change but which never got one is in the list, because
+    # `embedded` is the count of chunks that ARE searchable and an unembedded survivor is not.
+    embedded = len(kept) - len(to_embed)
+    for chunk_id, text in to_embed:
         try:
-            _add_vector(conn, chunk_id, embedding.embed(text))
+            _add_vector(conn, chunk_id, embedding.embed_once(text))
             store.set_chunk_embedded(conn, chunk_id)
             embedded += 1
         except Exception:                      # noqa: BLE001
-            # Partial state is a designed outcome here as everywhere else (§2.1): the row is
-            # correct, the index is behind, and `finish_indexing` closes it.
+            # Partial state is a designed outcome here as everywhere else (§2.1): the words
+            # are correct, the index is behind, and `finish_indexing` closes it.
             break
+    if not texts:
+        store.mark_embedded(conn, campaign_id, False)
+        return {"chunks": 0, "embedded": 0}
     store.mark_embedded(conn, campaign_id, embedded == len(texts))
     return {"chunks": len(texts), "embedded": embedded}
 
@@ -7647,7 +7784,7 @@ def _reindex(conn, campaign_id: str, *, commentary: list) -> dict:
                                   sources=[source] * len(pieces))
         for chunk_id, text in zip(ids, pieces):
             try:
-                _add_vector(conn, chunk_id, embedding.embed(text))
+                _add_vector(conn, chunk_id, embedding.embed_once(text))
                 store.set_chunk_embedded(conn, chunk_id)
                 embedded += 1
             except Exception:                  # noqa: BLE001
@@ -8173,7 +8310,20 @@ def _earlier_version_findings(conn, campaign_id: Optional[str]) -> Optional[dict
     }
 
 
-def prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: Optional[int] = None,
+def prepare_evaluation(conn, **kwargs) -> dict:
+    """`_prepare_evaluation`, embedding each distinct string once (§13.3/D90).
+
+    This reaches `find_similar` four times with the SAME proposal text — one retrieval and
+    three pole searches — and paid four network round-trips for a vector that was in hand
+    after the first. A wrapper rather than a memo inside `embedding`, because the scope is
+    what makes it safe: a process-lifetime cache served a vector computed in another call and
+    hid an embedder that had gone down in between.
+    """
+    with embedding.each_string_embedded_once():
+        return _prepare_evaluation(conn, **kwargs)
+
+
+def _prepare_evaluation(conn, *, subject_title: str, proposal_text: str, top_k: Optional[int] = None,
                        record_type: Optional[str] = None, status: Optional[str] = None,
                        tags: Optional[Union[str, dict, list]] = None, match_all_tags: bool = False,
                        region: Optional[str] = None, market: Optional[str] = None,

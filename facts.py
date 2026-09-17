@@ -702,7 +702,12 @@ def for_campaign(conn, campaign_id: str) -> dict:
     """
     import store
 
-    on_file = store.text_on_file(conn, campaign_id)
+    # §13.3/D79: through `core`'s call-scoped memo when one is open, so a report that reads
+    # every record's facts AND checks every record against the declared expectations reads
+    # each record once rather than twice. Plain `store.text_on_file` outside a scope.
+    import core
+
+    on_file = core._text_on_file(conn, campaign_id)
     if on_file is None:
         return {}
     body = "\n\n".join(on_file["body"])

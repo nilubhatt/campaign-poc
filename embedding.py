@@ -12,6 +12,9 @@ import math
 import sys
 from typing import Optional
 
+import contextlib
+import contextvars
+
 import config
 
 
@@ -44,6 +47,78 @@ def embed(text: str, timeout: Optional[float] = None) -> list[float]:
     if config.EMBED_PROVIDER == "hash":
         return _embed_hash(text)
     raise ValueError(f"unknown embed provider {config.EMBED_PROVIDER!r}")
+
+
+# §13.3/D90: the same string, embedded again. `prepare_evaluation` embedded the proposal text
+# FOUR times — the row says three, and it had grown — and an ingest embeds identical chunks
+# once each. Against the bundled hash provider that is microseconds; against Ollama it is a
+# network round-trip for a vector that was in hand after the first.
+#
+# SCOPED TO A CALL, not to the process, and that is the whole of what makes it safe. The
+# first version was a process-lifetime LRU keyed on (model, text) — which is sound about
+# vectors, since the same model and the same text give the same one, and wrong about
+# everything else. A vector computed in one call was served in another, so an embedder that
+# went down in between was never noticed: eight tests of partial-failure and outage behaviour
+# failed, and each of them was describing a real thing the product is supposed to report.
+#
+# The waste D90 names is INSIDE one call — `prepare_evaluation` embedding one proposal text
+# four times — so a call is the right scope. Outside a scope this is exactly `embed`.
+# A CONTEXTVAR, not a module global, and the difference is not theoretical: the MCP server
+# runs sync tools on worker threads (`anyio.to_thread.run_sync`), so two overlapping tool
+# calls shared one global. Interleaved, the nesting logic left a non-None dict behind after
+# both scopes exited — and from then on every embed in the process was memoised across calls,
+# which is precisely the process-lifetime cache this was rewritten to remove. `contextvars`
+# is what `anyio` propagates into a worker thread, so each call gets its own.
+_memo: contextvars.ContextVar = contextvars.ContextVar("embedding_memo", default=None)
+
+
+@contextlib.contextmanager
+def each_string_embedded_once():
+    """Embed each distinct string at most once for the duration of this block (§13.3/D90)."""
+    if _memo.get() is not None:
+        # Already inside one. Nesting keeps the outer dict rather than shadowing it, so an
+        # inner block does not throw away what the outer one has already paid for.
+        yield
+        return
+    token = _memo.set({})
+    try:
+        yield
+    finally:
+        _memo.reset(token)
+
+
+def embed_once(text: str, timeout: Optional[float] = None) -> list[float]:
+    """`embed`, without re-embedding a string already embedded in THIS block.
+
+    Deterministic by construction: the same text and the same model give the same vector, so
+    a hit is the answer the call would have produced. Keyed on the model as well as the text
+    even within a scope, because §7.2 established that a model change is "a visible migration
+    rather than a silent re-ranking" and a memo that ignored it would be that re-ranking with
+    a cache in front. Outside a scope this is `embed` — including for `health_check`, whose
+    probe must actually reach the embedder to mean anything.
+    """
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("cannot embed empty text")
+    memo = _memo.get()
+    if memo is None:
+        return embed(text, timeout=timeout)
+    key = (_model_id(), text)
+    if key not in memo:
+        memo[key] = embed(text, timeout=timeout)
+    return list(memo[key])
+
+
+def _model_id() -> str:
+    """Provider and model together — the pair that decides what a vector MEANS."""
+    if config.EMBED_PROVIDER == "ollama":
+        return f"ollama/{config.OLLAMA_EMBED_MODEL}"
+    if config.EMBED_PROVIDER == "voyage":
+        return f"voyage/{getattr(config, 'VOYAGE_EMBED_MODEL', 'default')}"
+    return str(config.EMBED_PROVIDER)
+
+
+
 
 
 class Unavailable(ValueError):
