@@ -1192,3 +1192,23 @@ def test_a_system_install_with_no_gui_session_falls_back_to_who_ran_it(tmp_path)
     assert code.index("no home directory to install into") > sudo_user, (
         "it still refuses before trying the fallback"
     )
+
+
+def test_the_refusal_check_reads_this_installs_behaviour_not_the_last_ones():
+    """A run measured it: the good-path step installs and wires Claude Desktop, then the
+    broken-bundle step asserts "the gate wired nothing" — and found the PREVIOUS install's
+    entry still sitting there. The gate had behaved perfectly, refusing and naming the corrupt
+    weights, and the assertion failed anyway.
+
+    Both platforms clear the config before the broken install now. The Windows half always
+    did; the macOS half did not, and that asymmetry was the whole bug."""
+    ci = _ci_code()
+
+    for platform, marker in (("macOS", "Library/Application Support/Claude"),
+                             ("Windows", "Claude\\claude_desktop_config.json")):
+        broken = ci.split("A broken bundle must fail", 1)[1] if platform == "macOS" else ci
+        assert marker in broken, f"the {platform} broken-bundle step never names the config"
+
+    # Removed, on both, before the install whose behaviour is being read.
+    assert ci.count('rm -f "$cfg"') >= 1, "the macOS step does not clear the config first"
+    assert "Remove-Item $cfg" in ci, "the Windows step does not clear the config first"

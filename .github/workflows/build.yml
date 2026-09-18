@@ -300,6 +300,12 @@ jobs:
           # had its gate exercised. Corrupt the weights the way an interrupted download does
           # and require the install to FAIL — a package that reports success here is the
           # original defect, delivered by a nicer wrapper.
+          # The GOOD install ran in the step above and wired Claude Desktop. Without clearing
+          # that, "the gate wired nothing" finds the previous install's entry and fails an
+          # install that behaved perfectly — which is what happened. The Windows half already
+          # cleared it; this one did not, and the asymmetry was the bug.
+          cfg="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+          rm -f "$cfg"
           rm -rf broken && cp -a dist/campaign-intelligence broken
           printf 'truncated' > broken/models/open_clip_model.safetensors
           cp installer/macos/install.sh installer/macos/uninstall.sh broken/
@@ -328,10 +334,13 @@ jobs:
           # could not fail, guarding the one step whose whole job is to prove a refusal.
           printf '%s' "$log" | grep -qi "weights are corrupt" \
             || { echo "it failed for some other reason than the corrupt weights" >&2; exit 1; }
-          # And the gate's actual promise: nothing it rejected gets wired.
-          test ! -f "$HOME/Library/Application Support/Claude/claude_desktop_config.json" \
-            || ! grep -q campaign "$HOME/Library/Application Support/Claude/claude_desktop_config.json" \
-            || { echo "a product the gate rejected was wired to Claude Desktop" >&2; exit 1; }
+          # And the gate's actual promise: nothing it rejected gets wired. Checked against a
+          # config this step removed first, so it is this install's behaviour being read and
+          # not the previous one's leftovers.
+          if [ -f "$cfg" ] && grep -q campaign "$cfg"; then
+            echo "a product the gate rejected was wired to Claude Desktop" >&2
+            exit 1
+          fi
           echo "refused, said why, and wired nothing"
 
       - name: Build Windows installer (Inno Setup)
