@@ -674,7 +674,7 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       which loads the vision model, and assert on `visual_search`; Linux uses `sudo unshare
       -n`, and Windows — the platform the review was written against, on a network that
       blocks huggingface.co — had no offline check at all and now has one.
-- [~] **4.4 macOS: sign, notarize, staple - and ship a `.pkg`** (raised by the Phase 4
+- [x] **4.4 macOS: sign, notarize, staple - and ship a `.pkg`** (raised by the Phase 4
       design review; not in the original review, and owed). Today the macOS archive is an
       unsigned binary whose quarantine flag the installer strips. That strip is a legitimate
       stopgap *inside an installer the user chose to run*, on the product's own directory —
@@ -720,10 +720,24 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       around a deliberately corrupted bundle, which must be REFUSED and must leave Claude
       Desktop unwired. The Inno script gained a `SourceDir` define so that second build is
       possible at all.
-      **Written and unit-asserted; first EXECUTED on the next tag build.** §13.1 settled one
-      definition of "measured" for this repository and these steps do not meet it yet: what is
-      tested today is that the workflow contains the steps. That is better than nothing and it
-      is not the same thing — which is D25's own sentence, and it applies to its fix.
+      **Measured, not merely written.** Five dispatched runs later, both installers install
+      end to end on a clean runner and both refuse a corrupted bundle:
+
+          installer: The install was successful.
+          installed and green: ['computed_facts','database','rulebook','text_search',
+                                'visual_search']
+          and wired to Claude Desktop
+          ...
+          FAILED: the CLIP weights are corrupt or incomplete. Visual search would be dead.
+          refused, said why, and wired nothing
+
+      That is §13.1's definition of measured, and D25's own sentence — "compiling it is new but
+      is not the same thing" — finally satisfied for its own fix. What the runs cost was five
+      defects, four of them mine: no diagnosis on failure; an expectation that Ollama could
+      install on a machine with no GUI session; a refusal check reading the previous install's
+      leftovers; and twice, an expected non-zero exit leaking out as the step's verdict. The
+      real one was the installer running a SECOND installer inside a silent install, which is
+      what hung the first dispatch for 99 minutes.
       What the first refusal check asserted could not have worked, and review caught both
       halves. On Windows a refused install exits ZERO by design: the `.iss` explains that Inno
       discards an exception at `ssPostInstall`, and that raising at `ssInstall` rolls back the
@@ -734,13 +748,16 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       actually makes: **never wire a product the self-test rejected**, with a positive control
       so an installer that wires nothing at all cannot pass either.
 
-      **What remains, and what it needs from you:** an Apple Developer ID. Until
-      `MACOS_SIGN_IDENTITY`, `MACOS_SIGN_IDENTITY_INSTALLER` and `AC_NOTARY_PROFILE` exist as
-      repository secrets the release ships an UNSIGNED `.pkg` — which still installs, and which
-      Installer.app lets the user proceed past, where the tarball never let them start. The
-      quarantine strip stays until signing is actually on: the plan says it "can go" after
-      signing, and removing it while the release is unsigned would take away the only thing
-      standing between a marketer and "the developer cannot be verified" **on the tarball
+      **Signing is an ACCEPTED LIMIT, not outstanding work (L11).** It needs an Apple
+      Developer Program membership and a certificate only the account holder can issue, and the
+      owner has decided not to buy one for now. Nothing is owed on the code side: `build-pkg.sh`
+      signs every Mach-O in the payload with the hardened runtime, notarizes and staples, each
+      step conditional on its own credential — set `MACOS_SIGN_IDENTITY`,
+      `MACOS_SIGN_IDENTITY_INSTALLER` and `AC_NOTARY_PROFILE` as repository secrets and the same
+      build signs with no code change. Until then the release ships an unsigned `.pkg`, which
+      installs, and README says what Gatekeeper shows and the three steps past it — strictly
+      more than the tarball allowed, since Finder opens a `.sh` in a text editor. The quarantine
+      strip stays while that holds; it is inert on the `.pkg` path either way" **on the tarball
       path**. On the `.pkg` path the strip is inert — a pkg payload is never quarantined, as
       the CI comment says — and the dialog a marketer meets there is on the package itself,
       before anything is installed, where no strip can reach. That is what D130 is for, and

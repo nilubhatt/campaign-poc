@@ -183,7 +183,14 @@ def test_the_plan_and_the_tracker_agree_on_what_is_done():
 
     assert len(items) > 40, f"only parsed {len(items)} plan items — has the format changed?"
     assert any(items.values()), "no completed items parsed"
-    assert not all(items.values()), "no outstanding items parsed"
+    # NOT "some item is outstanding". That read as a parse check and was really a claim that
+    # work is always owed, and it failed the moment the last item was ticked — which is the
+    # state the plan exists to reach. The same assumption was in the tracker's own row check
+    # and came out for the same reason. What this can honestly assert is that the markers are
+    # the legend's: anything else means the format moved under the parser.
+    markers = set(re.findall(r"^- \[([ x~])\] \*\*\d", PLAN.read_text(encoding="utf-8"),
+                             re.MULTILINE))
+    assert markers <= {" ", "x", "~"}, f"unknown plan markers: {markers}"
 
 
 def test_every_deferral_named_in_the_code_is_in_the_tracker():

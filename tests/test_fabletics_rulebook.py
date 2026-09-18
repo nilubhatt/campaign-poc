@@ -19,6 +19,7 @@ behaviour what it is, and 126 tests encode that.
 These tests exist for the reason the example's do: a file that ships and is never loaded rots,
 and the first anybody knows is a customer whose rules do nothing.
 """
+import os
 from pathlib import Path
 
 import pytest
@@ -170,3 +171,74 @@ def test_the_build_ships_it_beside_the_binary():
     spec = (root / "campaign-poc.spec").read_text(encoding="utf-8")
 
     assert "fabletics-rulebook.yaml" in spec, "the build does not collect it"
+
+
+# ── put in force by `init`, which is what every installer runs ──────────────────
+
+def _init_into(tmp_path, *, shipped: bool, existing: str | None = None):
+    """Run `init` with a bundle dir that may or may not carry the customer rulebook."""
+    import shutil
+    import subprocess
+    import sys
+
+    app = tmp_path / "app"
+    data = tmp_path / "data"
+    app.mkdir(parents=True, exist_ok=True)
+    if shipped:
+        shutil.copyfile(FABLETICS, app / "fabletics-rulebook.yaml")
+    if existing is not None:
+        data.mkdir(parents=True, exist_ok=True)
+        (data / "rulebook.yaml").write_text(existing, encoding="utf-8")
+
+    script = (
+        "import pathlib, sys\n"
+        "sys.argv = ['campaign-intelligence', 'init']\n"
+        "import config\n"
+        f"config.app_dir = lambda: pathlib.Path({str(app)!r})\n"
+        "import main\n"
+        "main.main()\n"
+    )
+    out = subprocess.run([sys.executable, "-c", script],
+                         cwd=Path(__file__).resolve().parent.parent,
+                         capture_output=True, text=True, timeout=180,
+                         env={**os.environ, "CAMPAIGN_POC_DATA": str(data),
+                              "CAMPAIGN_POC_DB": str(data / "c.db")})
+    assert out.returncode == 0, out.stdout + out.stderr
+    return data / "rulebook.yaml", out.stdout
+
+
+def test_a_fresh_install_puts_the_shipped_rulebook_in_force(tmp_path):
+    """The review's P1 in one line: "fresh installations do not enforce the customer's rules —
+    the exact failure the rulebook requirement was intended to solve". A file sitting beside
+    the binary that nobody copies is a rulebook nobody has.
+
+    `init` is where it happens because `init` is what all three installers run, before the
+    gate — so this is one implementation rather than three."""
+    written, said = _init_into(tmp_path, shipped=True)
+
+    assert written.exists(), "a fresh install left the customer with no rules"
+    assert "fabletics" in written.read_text(encoding="utf-8").lower()
+    assert "Installed the rulebook shipped with this build" in said, (
+        "it installed the rules and did not say so"
+    )
+
+
+def test_a_rulebook_already_there_is_never_overwritten(tmp_path):
+    """Yours is yours. An installer that replaces the rules somebody wrote is an installer
+    that loses them silently, and an upgrade is when it would happen."""
+    mine = "# my own rules\nversion: mine\nrules: []\n"
+
+    written, said = _init_into(tmp_path, shipped=True, existing=mine)
+
+    assert written.read_text(encoding="utf-8") == mine
+    assert "Installed the rulebook shipped" not in said
+
+
+def test_a_build_that_ships_no_customer_rulebook_stays_generic(tmp_path):
+    """Presence of the shipped file is the switch. A build made without it installs nothing and
+    the product stays generic — which is §12.1's decision, and still right for anybody who is
+    not this customer."""
+    written, said = _init_into(tmp_path, shipped=False)
+
+    assert not written.exists()
+    assert "Installed the rulebook shipped" not in said

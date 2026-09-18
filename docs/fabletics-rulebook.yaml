@@ -7,17 +7,20 @@
 # PDF annotations, which say how the rules are meant to be applied. Nothing here is invented:
 # where the source gives a reason or an example, it is the source's.
 #
-# HOW TO PUT IT IN FORCE — one step
+# HOW IT GETS PUT IN FORCE
 #
-#     campaign-intelligence init              # prints the data directory
-#     cp fabletics-rulebook.yaml "<data directory>/rulebook.yaml"
-#     # then restart the server, or fully quit and reopen Claude Desktop
+# Automatically, on a fresh install. `campaign-intelligence init` — which all three installers
+# run, before the gate — copies this file into the data directory when there is no rulebook
+# there yet, and says so. `health-check` then reports the rulebook as
+# `core-1.0+fabletics-2026.09`, naming both the product's and yours.
 #
-# It ships beside the binary, so on an installed copy it is already on the machine and that
-# `cp` is the whole of it. `campaign-intelligence health-check` then reports the rulebook as
-# `core-1.0+fabletics-2026.09`, naming both — the product's and yours.
+# An existing rulebook is NEVER overwritten: yours is yours, and an upgrade that replaced the
+# rules somebody wrote would lose them silently. To take a later version of this file, copy it
+# yourself:
 #
-# WHY A COPY RATHER THAN THE PRODUCT DEFAULT
+#     cp fabletics-rulebook.yaml "<data directory>/rulebook.yaml"    # then restart
+#
+# WHY INSTALLED RATHER THAN BAKED INTO THE PRODUCT DEFAULT
 #
 # The product ships generic: the `rulebook.yaml` in the install directory is empty and says at
 # length why. These are ONE customer's rules, and putting them in the product default would
@@ -26,11 +29,10 @@
 # encode, because an empty default is what makes the first-run and empty-library behaviour
 # what it is.
 #
-# The source document asks for the opposite — "ship with the defaults below already populated,
-# so the product has opinions on day one". For a Fabletics deployment that is the right
-# outcome and this file plus the copy above gets you there. Making the INSTALLER do the copy
-# is a one-line change and a product decision, not a technical one: it turns a generic build
-# into a customer build. It has not been made here.
+# The source document asks for "the defaults below already populated, so the product has
+# opinions on day one", and for a Fabletics deployment that is right — so `init` installs it,
+# which is the same outcome without one customer's rules becoming every install's. Presence of
+# this file beside the binary is the switch: a build made without it stays generic.
 #
 # The data directory is also the one the product promises to keep. A rulebook written into the
 # install directory is a rulebook the next upgrade replaces wholesale, silently, having told

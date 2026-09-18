@@ -468,11 +468,18 @@ cp example-rulebook.yaml "<data dir>/rulebook.yaml"   # a worked example of ever
 
 `health-check` then reports the rulebook as `core-1.0+your-version`, naming both.
 
-Two files ship beside the binary. `example-rulebook.yaml` is a worked example using an invented
-agency — every shape the file can carry, nothing in force. `fabletics-rulebook.yaml` is a real
-customer rulebook: four non-negotiable guardrails, a tag taxonomy, influencer criteria and red
-flags, recurring partner feedback, a 360° launch checklist, a six-criteria scorecard and ten
-standing corrections with their provenance. Copy whichever is the better starting point.
+Two files ship beside the binary.
+
+`fabletics-rulebook.yaml` is a real customer rulebook — four non-negotiable guardrails, a tag
+taxonomy, influencer criteria and red flags, recurring partner feedback, a 360° launch
+checklist, a six-criteria scorecard and ten standing corrections with their provenance. **This
+build installs it for you**: `init` copies it into the data directory on a fresh install, so a
+new machine has the rules without anybody remembering to. An existing rulebook is never
+overwritten — yours is yours — and a build that does not ship the file installs nothing and
+stays generic.
+
+`example-rulebook.yaml` is a worked example using an invented agency: every shape the file can
+carry, nothing in force. Start from it if you are writing your own.
 
 ## Configuration
 

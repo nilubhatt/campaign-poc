@@ -493,13 +493,22 @@ jobs:
         run: |
           # Windows had no offline check at all, while being the platform the product review
           # was written against - on a network that blocks huggingface.co.
+          #
+          # Exit code is NOT the assertion, and the Linux and macOS halves say so and clear it
+          # while this one did not. `health-check` exits non-zero when ANY component is down,
+          # and text_search is down here by construction: every request is proxied to a closed
+          # port. The claim being tested is narrower — the VISION model loads from the bundle
+          # with no network — so the report is read and the status discarded. Whenever this
+          # step actually ran it would have failed on a product behaving exactly as intended.
           & _verify\campaign-intelligence\campaign-intelligence.exe health-check --json `
             > offline.json
+          $global:LASTEXITCODE = 0
           $report = Get-Content offline.json | ConvertFrom-Json
           if (-not $report.components.visual_search.ok) {
             throw "the packaged product cannot load its vision model offline: $($report.components.visual_search.detail)"
           }
           Write-Host "visual_search ok with every request proxied to a closed port"
+          exit 0
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

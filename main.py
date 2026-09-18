@@ -111,6 +111,24 @@ def main() -> int:
         # discipline and the customer owns the rules about their briefs — and that decision is
         # worth nothing if nobody is ever told where their half lives. §10.6's rule, applied
         # to a file rather than a tool: a capability nobody is told about is one nobody uses.
+        # §12.3: and if this build ships a customer rulebook, PUT IT IN FORCE. The review
+        # document asks for exactly this — "ship with the defaults below already populated, so
+        # the product has opinions on day one and an empty library is still useful" — and a
+        # file sitting beside the binary that nobody copies is a rulebook nobody has.
+        #
+        # Only when there is no rulebook there already: yours is yours, and an installer that
+        # overwrites the rules somebody wrote is an installer that loses them silently.
+        # Presence of the shipped file is the switch: a build made without it installs nothing
+        # and the product stays generic, which is what §12.1 decided and still holds for
+        # anybody who is not this customer.
+        shipped = config.app_dir() / "fabletics-rulebook.yaml"
+        if shipped.exists() and not rulebook.overlay_path().exists():
+            import shutil
+
+            rulebook.overlay_path().parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(shipped, rulebook.overlay_path())
+            rulebook.load.cache_clear()
+            print(f"Installed the rulebook shipped with this build: {shipped.name}")
         print(f"Your rulebook:  {rulebook.overlay_path()}"
               + ("" if rulebook.overlay_path().exists() else "   (not written yet)"))
         # §12.3: and what to copy from. An example nobody is told about is one nobody reads —

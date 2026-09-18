@@ -1247,3 +1247,24 @@ def test_an_expected_non_zero_self_test_is_not_the_steps_verdict():
         "the expected non-zero from health-check still becomes the step's exit code"
     )
     assert "exit 0" in broken, "the step does not end on a verdict of its own"
+
+
+def test_the_offline_check_reads_the_report_and_not_the_exit_code_on_every_platform():
+    """`health-check` exits non-zero when ANY component is down, and in this step text_search
+    is down BY CONSTRUCTION: every request is proxied to a closed port. The claim being tested
+    is narrower — the vision model loads from the bundle with no network — so all three
+    platforms must read the report and discard the status.
+
+    Linux and macOS did, with the reasoning written beside them. Windows did not, so whenever
+    that step actually ran it failed on a product behaving exactly as intended — which is what
+    happened the first time the job got far enough to reach it."""
+    ci = _ci_code()
+    offline = [chunk for chunk in ci.split("      - name: ")
+               if chunk.startswith("Verify the packaged product needs no network")]
+
+    assert len(offline) == 3, f"expected three offline checks, found {len(offline)}"
+    for step in offline:
+        platform = step.split("\n", 1)[0]
+        cleared = "|| true" in step or "$global:LASTEXITCODE = 0" in step
+        assert cleared, f"{platform} lets an expected non-zero decide the step"
+        assert "visual_search" in step, f"{platform} does not assert what it is there to assert"
