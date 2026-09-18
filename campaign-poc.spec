@@ -80,6 +80,10 @@ for pkg in ("uvicorn", "mcp", "starlette", "anyio", "fastapi", "pptx", "pypdf"):
     hiddenimports += collect_submodules(pkg)
 
 # Our own modules referenced only via dynamic import (main.py imports them lazily).
+# The modules core.py was split into (§ refactor): core imports them at module level, so
+# analysis finds them either way — listed because a frozen build that silently loses one of
+# these loses a third of the product's surface, and the cost of saying so is one line.
+hiddenimports += ["diffing", "creative", "missing"]
 hiddenimports += ["http_app", "mcp_server", "store", "core", "vectorstore",
                   "embedding", "extract", "auth", "config", "clip_embed", "images",
                   # §12.1. `yaml` is imported inside `rulebook._read`, which PyInstaller's

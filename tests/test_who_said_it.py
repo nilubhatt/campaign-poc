@@ -1031,10 +1031,14 @@ _MAY_DELEGATE = {"store.py", "mcp_server.py", "http_app.py", "stdio_server.py", 
 # Functions that take one of these names and do not RECORD it, with the reason written beside
 # them — the §10.6 pattern, where an exemption has to be stated rather than arrived at. A new
 # door cannot get in by resembling one of these; it has to be added here, which is the review.
+# Keyed by the file the function LIVES in, so moving code moves the entry — which is a small
+# visible cost and the thing that keeps this table reviewable: a reader can open the file named
+# beside a name and check the reason still holds. `answers` moved from core.py to missing.py
+# when the gap surface was split out, and this was the only place that had to follow it.
 _DOES_NOT_RECORD_IT = {
     # A read. `answers(said_by=...)` filters the override log by whose answers to show, and
     # filtering on a name asserts nothing about who decided anything.
-    "core.py": {"answers"},
+    "missing.py": {"answers"},
     # Decides ELIGIBILITY and echoes the name back in its explanation; the write that follows
     # goes through `require_a_person` in this same module, which is the guard. Checking here
     # as well would be the second copy the test above forbids.
