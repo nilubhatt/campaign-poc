@@ -20,8 +20,10 @@ the scripts' actual behaviour where bash can run them.
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1120,4 +1122,48 @@ def test_a_failed_ollama_install_reaches_the_gate_rather_than_killing_the_script
     assert "text_search" in (result.stdout + result.stderr), (
         "the script died at the Ollama step, so the gate never ran and nothing named a "
         f"component:\n{result.stdout}\n{result.stderr}"
+    )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="pkg scripts are macOS's")
+def test_running_the_tests_does_not_put_a_dialog_on_anybodys_screen(tmp_path):
+    """The failure dialog exists so the gate's words reach somebody — Installer.app shows none
+    of a postinstall's output. Ungated it also reached whoever ran the test suite: a modal
+    appeared on their desktop, once per failure-path test, telling them a product they had
+    never installed could not be installed. A test run must not draw on somebody's screen.
+
+    `INSTALL_PKG_SESSION_ID` and `PACKAGE_PATH` are set by `installer` and Installer.app and by
+    nothing else, which is exactly the question being asked: is this a real install?
+
+    Exercised on a COPY whose `osascript` resolves through PATH. The shipped script calls it by
+    absolute path — correct, since PATH under `installer` is minimal — and a stub could
+    therefore never intercept the real one, so a test written against the shipped path would
+    have reported "no dialog" whatever the code did."""
+    copy = tmp_path / "postinstall"
+    copy.write_text(POSTINSTALL.read_text().replace("/usr/bin/osascript", "osascript"))
+    staging_src = _staged(tmp_path, "#!/bin/bash\necho 'the weights are corrupt' >&2\nexit 1\n")
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    marker = tmp_path / "osascript-was-called"
+    (fake / "osascript").write_text(f"#!/bin/bash\ntouch {marker}\n")
+    (fake / "osascript").chmod(0o755)
+
+    def run(**extra):
+        if not staging_src.exists():          # the postinstall removes it either way
+            shutil.copytree(_staged(tmp_path / "again", "#!/bin/bash\nexit 1\n"), staging_src)
+        marker.unlink(missing_ok=True)
+        subprocess.run(["bash", str(copy)], capture_output=True, text=True, timeout=120,
+                       env={**os.environ, "CAMPAIGN_POC_PKG_STAGING": str(staging_src),
+                            "CAMPAIGN_POC_PKG_USER": os.environ.get("USER", "runner"),
+                            "HOME": str(tmp_path / "home"),
+                            "PATH": f"{fake}:/usr/bin:/bin", **extra})
+        time.sleep(1)                          # it is backgrounded, so give it a moment
+        return marker.exists()
+
+    assert run(INSTALL_PKG_SESSION_ID="abc123"), (
+        "no dialog inside a real Installer session — the gate's words reach nobody, since "
+        "Installer.app shows none of a postinstall's output"
+    )
+    assert not run(), (
+        "running the test suite put a dialog on the screen of whoever ran it"
     )

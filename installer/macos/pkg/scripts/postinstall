@@ -112,7 +112,12 @@ if [ "$status" -ne 0 ]; then
     # this blocked every failing install, and the tests that exercise the failure path timed
     # out rather than failing. An installer that hangs is worse than one that says nothing,
     # because nobody can tell it from a slow one.
-    if [ "$log" != "/dev/null" ] && [ -n "${target_user:-}" ]; then
+    # ONLY inside a real Installer session. `installer` and Installer.app set these; nothing
+    # else does. Without the check the dialog fired from the test suite — a modal on the
+    # machine of whoever ran pytest, once per failure-path test, saying a product they never
+    # installed could not be installed. A test run must not put anything on somebody's screen.
+    if [ "$log" != "/dev/null" ] && [ -n "${target_user:-}" ] \
+       && { [ -n "${INSTALL_PKG_SESSION_ID:-}" ] || [ -n "${PACKAGE_PATH:-}" ]; }; then
         why="$(tail -n 6 "$log" 2>/dev/null | tr '\n' ' ' | tr -d '"\\' | cut -c1-300)"
         nohup "${as_the_user[@]}" /usr/bin/osascript \
             -e "display dialog \"Campaign Intelligence could not finish installing.
