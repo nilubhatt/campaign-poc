@@ -3452,11 +3452,40 @@ or a second copy of something that already exists once.
       person's answer, or nothing at all. "Nothing at all" is a legitimate outcome: §5.1
       settled that a wrong suggestion here is worse than none, and this one silently folds two
       rules into one so neither ever recurs. *Closes D109.*
-- [ ] **13.6 Two gaps that cannot see the record they are about** —
-      `execution_never_checked` fires only where briefed creative already exists, so a
-      concluded campaign uploaded as text with no assets is invisible to it; and commitment
-      vectors are cached without `record_vector_model`, so a CLIP weights change compares
-      across models and `count_unreadable_vectors` does not cover the space. *Closes D122,
+- [x] **13.6 Two gaps that cannot see the record they are about** — `execution_never_checked`
+      fired only where briefed creative already existed, so a concluded campaign uploaded as
+      text with no assets was invisible to it; and commitment vectors were cached without
+      `record_vector_model`, so a CLIP weights change compared across models and
+      `count_unreadable_vectors` did not cover the space. Both rows named the population and
+      neither named what widening it would cost.
+
+      **D122.** The gap's own `why_it_matters` — "every outcome on those campaigns is being read
+      as though the brief caused it" — never mentioned briefed creative, and is strictly MORE
+      true of a record with nothing on file: the old condition made the gap false of the
+      population it excluded. Widening it made the gap reach the shop that works from
+      descriptions, for whom it is permanent, so it had to become set-asideable — a question
+      that had never come up, because while it required briefed creative every record it
+      reached had somebody who photographs. It also needed `since`, without which it was the
+      one set-asideable code with no way back. And the first widening produced an offer that
+      DID NOT WORK: asked for the delivered photographs, a record with nothing briefed got
+      `compare_execution`'s refusal from the other side, and the upload closed the gap while
+      every citation of that campaign went on saying nobody had checked what it ran — D55's
+      two-surfaces shape, manufactured by the product's own suggestion. The condition is now
+      the stored status the citations read, so the gap and the caveat are one claim by
+      construction, and the offer asks for whichever half is missing, briefed first. What keeps
+      the set-aside honest is `_execution_note`, attached per cited record; it is NOT
+      `set_aside`, which nothing that builds a judgment reads.
+
+      **D126.** Routed through `core._add_vector` — the one function that writes a vector and
+      its model together — and `vectorstore.SPACES` puts the commitment space inside the check
+      written to notice a vector table this process cannot read. Which model fills which space
+      now has one answer, beside `_default_dim`, the fact that has to agree with it. The row's
+      framing of the risk was wrong in the way that mattered: "stale" cannot mean "made by
+      weights this BUILD no longer runs". Measured against that reference the check made the
+      weights-swap case WORSE, re-encoding the phrase with the new model and leaving the images
+      on the old one. The reference is the asset vectors' recorded model; a phrase that
+      disagrees is re-encoded, and images that disagree are not rebuildable from here, so
+      `check` refuses out loud rather than reporting a cosine between two spaces. *Closes D122,
       D126.*
 
 ---

@@ -279,6 +279,30 @@ def check(conn, *, campaign_id: str) -> dict:
             f" not visually indexed, so the promises were looked for in the rest."))
 
     assets = [a for a in delivered if a["id"] not in missing]
+
+    # §13.6/D126: the photographs' own weights. A phrase encoded by THIS build and images
+    # encoded by another are two different spaces, and a cosine across them is a number with no
+    # meaning wearing the shape of one that has it. Re-encoding the phrase cannot fix this
+    # half — the images are the stale side, and nothing in this product re-embeds them — so the
+    # honest answer is that nothing is known, which is not the same as not finding them.
+    mine = core.embedding_model_id("asset")
+    others = sorted(m for m in asset_weights(conn, among=[a["id"] for a in assets])
+                    if m != mine)
+    if others:
+        warnings.append(core._vision_notice(
+            f"the delivered photographs were indexed by {', '.join(others)} and this build "
+            f"embeds with {mine}. Similarities between the two are not comparable, so the "
+            f"promises were not looked for. Re-index the images (finish_indexing after "
+            f"clearing the index) and this becomes answerable again."))
+        return _report(campaign_id, record,
+                       [_unchecked(p, f"The photographs were indexed by {', '.join(others)} "
+                                      f"and this build embeds with {mine}; a similarity "
+                                      f"between two models is not a measurement.")
+                        for p in promises], delivered, "nothing_to_check",
+                       "The photographs and this build do not share a visual space, so "
+                       "nothing is known about any of these promises. That is not the same "
+                       "as not finding them.", warnings)
+
     items = [_look_for(conn, promise, assets, vectors) for promise in promises]
     present = [i for i in items if i["verdict"] == "present"]
     looked = [i for i in items if i["verdict"] != "unchecked"]
@@ -317,8 +341,12 @@ def _look_for(conn, promise: dict, assets: list, vectors: list) -> dict:
     import vectorstore
 
     try:
-        staged = vectorstore.get_many(conn, [f"commitment:{promise['id']}"],
-                                      space="commitment")
+        # Only a vector this build's own weights made. A cached phrase from other weights is
+        # not a cheaper answer, it is a different space, and a similarity computed across two
+        # spaces is a number that means nothing while looking exactly like one that does.
+        staged = ({} if _made_by_other_weights(conn, promise["id"]) else
+                  vectorstore.get_many(conn, [f"commitment:{promise['id']}"],
+                                       space="commitment"))
     except Exception:
         # No commitment vectors have ever been written on this install, so the table does not
         # exist. Reading it raised `OperationalError` — not a `ValueError`, so it would reach
@@ -350,9 +378,17 @@ def _look_for(conn, promise: dict, assets: list, vectors: list) -> dict:
         # model load at upload for a check nobody may ever run.
         if any(query):
             try:
+                import core
+
                 vectorstore.init(conn, space="commitment")
-                vectorstore.add(conn, f"commitment:{promise['id']}", query,
-                                space="commitment")
+                # `core._add_vector`, not `vectorstore.add` — "one function so the two cannot
+                # drift", and this was the one vector in the product that had drifted. Written
+                # raw, it carried no record of WHICH MODEL made it, so after a CLIP weights
+                # change a cached phrase was compared against images embedded by different
+                # weights: §7.2's "a model upgrade is a visible migration rather than a silent
+                # re-ranking", happening silently, in a cache nobody reads (§13.6/D126).
+                core._add_vector(conn, f"commitment:{promise['id']}", query,
+                                 space="commitment")
             except Exception:
                 pass                 # a cache that cannot be written is still just a cache
     if not any(query):
@@ -390,6 +426,67 @@ def _look_for(conn, promise: dict, assets: list, vectors: list) -> dict:
                 f"launch. The closest {len(closest)} "
                 f"{'are' if len(closest) != 1 else 'is'} "
                 f"{', '.join(c['file'] for c in closest)}, if you want to look.")}
+
+
+def stale_vectors(conn, *, only: Optional[str] = None) -> list:
+    """Cached phrases made by weights that do not match the images they are scored against.
+
+    §13.6/D126. The reference is the ASSET vectors' model, NOT this build's — and the first
+    version of this function got that wrong in the way that mattered. It compared the cached
+    phrase against `embedding_model_id`, so after a weights swap it re-encoded the phrase with
+    the new model and left the images on the old one: before the "fix", phrase and images were
+    both stale and the comparison was at least internally consistent; after it, the comparison
+    was guaranteed to be across two spaces. A check can be worse than no check when its
+    reference is the wrong thing.
+
+    Rebuildable — re-encoding a phrase costs one CLIP text pass — so a phrase that disagrees
+    with the images is simply re-made. A phrase this build cannot make agree, because the
+    IMAGES are the stale half, is not something re-encoding can fix, and `check` refuses the
+    comparison out loud rather than reporting a number from two spaces.
+    """
+    import core
+    import store
+
+    made = store.vector_models(conn, space="commitment")
+    # The images' own model, or this build's when nothing recorded one. A phrase cannot
+    # disagree with an index that never said what made it.
+    images = asset_weights(conn)
+    reference = images.pop() if len(images) == 1 else core.embedding_model_id("asset")
+    return sorted(vid for vid, model in made.items()
+                  if vid.startswith("commitment:") and model != reference
+                  and (only is None or vid == only))
+
+
+def asset_weights(conn, *, among: Optional[list] = None) -> set:
+    """Which models made the image vectors — the space a commitment vector has to agree with.
+
+    ONE implementation, because it was briefly two: `check` computed it inline against
+    `embedding_model_id` while this computed it from the recorded rows, in the module whose own
+    comment cites two-implementations-of-one-rule as the shape to avoid. They agreed only
+    because `check` refused before the other ran.
+
+    Empty when nothing recorded an asset vector, which callers read as "no disagreement": an
+    empty library has none, and a library old enough to have no provenance never recorded one
+    either way. "Unknown" is not "different" — treating it as different would refuse every
+    check on exactly the installs with no way to answer.
+    """
+    import store
+
+    if not store.provenance_knows_spaces(conn):
+        # Every row would answer for every space, so the text embedder would read as the model
+        # that made the photographs and every check would refuse.
+        return set()
+    made = store.vector_models(conn, space="asset")
+    return {model for vid, model in made.items() if among is None or vid in set(among)}
+
+
+def _made_by_other_weights(conn, promise_id: str) -> bool:
+    """Whether this promise's cached vector disagrees with the images it would be scored
+    against, in which case it is re-encoded rather than read."""
+    try:
+        return bool(stale_vectors(conn, only=f"commitment:{promise_id}"))
+    except Exception:                  # noqa: BLE001 - a cache check is never the answer
+        return False
 
 
 def _unchecked(promise: dict, why: str) -> dict:

@@ -147,6 +147,14 @@ def test_a_complete_library_says_nothing_is_missing(conn):
     core.answer_gap(conn, code="commentary_never_read", answer="not_applicable",
                     note="These records were built from descriptions; there are no decks.",
                     said_by="R. Vega")
+    # §13.6/D122: and the other half of the same fixture. A record built from a description has
+    # no creative on file at either phase, so nothing shows what ran — true, permanent for this
+    # library, and now reported. Saying so is what "complete" means for a library that does not
+    # photograph; it is not the same as the gap not existing.
+    core.answer_gap(conn, code="execution_never_checked", answer="not_applicable",
+                    note="These records were built from descriptions; nobody photographed "
+                         "what ran.",
+                    said_by="R. Vega")
 
     report = core.gaps(conn)
 
@@ -576,4 +584,4 @@ def test_every_gap_code_is_reached_by_the_test_that_checks_them_all(conn, monkey
     codes = {g["code"] for g in core.gaps(conn)["gaps"]}
 
     assert codes == {"few_verified_outcomes", "market_without_outcomes", "partly_indexed",
-                     "no_window", "commentary_never_read"}
+                     "no_window", "commentary_never_read", "execution_never_checked"}

@@ -452,8 +452,12 @@ def test_setting_aside_the_top_gap_moves_most_valuable(conn):
     # the honest answer after setting the window gap aside is the next offerable gap rather
     # than None. What must never differ is `most_valuable` and what the offer surface acts on,
     # which is the assertion below.
-    assert after["most_valuable"] == "commentary_never_read"
-    assert all(g["code"] in ("field_never_recorded", "commentary_never_read")
+    # §13.6/D122 widened `execution_never_checked` to campaigns with NO creative at either
+    # phase, which is exactly what this fixture builds — two measured records, nothing on file
+    # showing what ran — so it is now both true of them and the higher-ranked of the two.
+    assert after["most_valuable"] == "execution_never_checked"
+    assert all(g["code"] in ("field_never_recorded", "commentary_never_read",
+                             "execution_never_checked")
                for g in after["gaps"]), after["gaps"]
     assert core.top_gap(conn) == after["most_valuable"], (
         "the session-start offer would fire on a gap the ranking no longer shows"

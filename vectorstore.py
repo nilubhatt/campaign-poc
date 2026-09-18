@@ -55,6 +55,21 @@ def _pack(vec: list[float]) -> bytes:
     return struct.pack(f"{len(vec)}f", *vec)
 
 
+# Every vector space this product writes into (§13.6/D126). ONE list, because
+# `count_unreadable_vectors` iterated its own copy by hand — `("campaign", "asset")` — so the
+# `commitment` space was outside the only check written to notice a vector table this process
+# cannot read. A space added by name in one place and not the other is invisible by default,
+# which is the wrong direction for a check whose whole job is to see what nothing else can.
+SPACES = ("campaign", "asset", "commitment")
+
+# And which of them CLIP fills. Also ONE list: `_default_dim` sized these two by hand and
+# `core.embedding_model_id` named them by hand, so "is this space CLIP's" had two answers that
+# could disagree — a space added to one and not the other would be sized by CLIP and STAMPED
+# with the text embedder's name, making the provenance false for every vector in it. That is
+# the two-implementations-of-one-rule shape D126 was itself filed against.
+CLIP_SPACES = ("asset", "commitment")
+
+
 def _table_names(space: str) -> tuple[str, str]:
     return f"{space}_vectors", f"{space}_vectors_fallback"
 
@@ -66,8 +81,7 @@ def _default_dim(space: str) -> int:
     # `commitment` is CLIP's space too (§9.3): a commitment vector is the phrase from the
     # brief embedded by the SAME model as the photographs, which is the only reason the two
     # can be compared at all. Sized by the text embedder it would be unstorable.
-    return (config.CLIP_EMBED_DIM if space in ("asset", "commitment")
-            else config.EMBED_DIM)
+    return config.CLIP_EMBED_DIM if space in CLIP_SPACES else config.EMBED_DIM
 
 
 def init(conn: sqlite3.Connection, *, space: str = "campaign", dim: Optional[int] = None) -> None:
@@ -199,7 +213,7 @@ def count_unreadable_vectors(conn) -> int:
     why it is worth asking about explicitly."""
     live_is_vec = _try_load_vec(conn)
     stranded = 0
-    for space in ("campaign", "asset"):
+    for space in SPACES:
         vec_table, fallback_table = _table_names(space)
         unread = fallback_table if live_is_vec else vec_table
         try:

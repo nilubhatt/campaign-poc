@@ -328,14 +328,36 @@ def test_a_campaign_whose_execution_was_checked_is_not_a_gap(conn, tmp_path):
             if g["code"] == "execution_never_checked"] == []
 
 
-def test_a_campaign_with_no_briefed_creative_is_not_this_gap(conn, tmp_path):
-    """There is nothing to compare against, so "nobody checked what ran" is not the thing
-    that is missing — the creative is."""
+def test_a_campaign_with_no_creative_at_all_is_reported_and_asked_for_the_brief(
+        conn, tmp_path):
+    """This test previously asserted the OPPOSITE — that a campaign with nothing on file is
+    not this gap, because "there is nothing to compare against, so 'nobody checked what ran'
+    is not the thing that is missing — the creative is."
+
+    §13.6/D122 overturned the first half and kept the second — and the first attempt got the
+    second wrong in its own way. The gap's subject is that outcomes are being read as though
+    the brief caused them with nothing on file showing what ran, and that is MORE true of a
+    record with no creative at all, not less: it is the state with the least evidence of what
+    happened. What the old test was right about is that the CREATIVE is what such a record
+    needs. Asked for the delivered photographs instead, it got the same empty-half refusal from
+    the other side — so what it is offered is the briefed half, first."""
     cid = _campaign(conn)
     core.add_metrics(conn, campaign_id=cid, structured={"roas": 3.1}, confirm=True)
 
-    assert [g for g in core.gaps(conn)["gaps"]
-            if g["code"] == "execution_never_checked"] == []
+    found = [g for g in core.gaps(conn)["gaps"] if g["code"] == "execution_never_checked"]
+
+    assert found, "the record with the least evidence of what ran is not reported"
+    assert found[0]["counts"]["no_creative_at_all"] == 1
+    offer = found[0]["next_actions"][0]
+    assert offer["tool"] == "upload_image_asset"
+    assert offer["prefilled_args"]["campaign_id"] == cid
+    assert offer["prefilled_args"]["phase"] == "proposed", (
+        "asked for the photographs, which on their own produce the same empty comparison "
+        "from the other side"
+    )
+    assert "nothing for what ran to be compared against" in offer["why"], (
+        "the offer does not say why the briefed half is what this record needs first"
+    )
 
 
 def test_two_photographs_of_one_briefed_element_count_it_once(conn, tmp_path):

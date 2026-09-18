@@ -726,9 +726,10 @@ CREATE TABLE IF NOT EXISTS vector_provenance (
     vector_id     TEXT PRIMARY KEY,
     model         TEXT NOT NULL,   -- §7.2: "a model upgrade is a visible migration rather
                                     -- than a silent re-ranking"
-    space         TEXT NOT NULL DEFAULT 'campaign',  -- campaign | asset: CLIP and the text
-                                    -- embedder are different models by design, so two
-                                    -- entries across spaces is normal, not a mixed index
+    space         TEXT NOT NULL DEFAULT 'campaign',  -- vectorstore.SPACES: campaign, asset,
+                                    -- commitment. CLIP fills two of them and the text embedder
+                                    -- the third, so two model names across spaces is normal
+                                    -- and not a mixed index
     created_at    REAL NOT NULL
 );
 
@@ -2087,6 +2088,11 @@ def _forget_commitment_vectors(conn, campaign_id: str) -> None:
         "SELECT id FROM commitments WHERE campaign_id = ?", (campaign_id,)).fetchall()]
     for vid in ids:
         conn.execute("DELETE FROM commitment_vectors WHERE vector_id = ?", (vid,))
+    # §13.6/D126: and the row saying which model made them. While commitment vectors carried
+    # no provenance this was nothing to clean up; now they do, and leaving it is precisely the
+    # leak `forget_vector_models` exists to prevent — `embedding_models` reporting a model that
+    # produced nothing still in the index, and `stale_vectors` naming a vector that is gone.
+    forget_vector_models(conn, ids)
 
 
 def delete_campaign(conn, campaign_id: str) -> bool:
@@ -3666,6 +3672,42 @@ def embedding_models(conn, space: str = "campaign") -> set:
         "SELECT DISTINCT model FROM vector_provenance WHERE space = ?", (space,)).fetchall()}
 
 
+def provenance_knows_spaces(conn) -> bool:
+    """Whether `vector_provenance` can say which space a row belongs to.
+
+    It predates its own `space` column. A caller that only needs rows it can name by id is
+    fine without it — `vector_models` returns everything and the ids do the filtering — but a
+    caller asking "which models made the ASSET vectors" cannot be answered on that schema at
+    all, and answering it with every row would report the text embedder as an image model.
+    """
+    return "space" in _columns(conn, "vector_provenance")
+
+
+def vector_models(conn, *, space: str) -> dict:
+    """`{vector_id: model}` for one space — which weights made each vector (§13.6/D126).
+
+    The schema tolerance is the point, and it is HERE rather than in each caller because there
+    are now three of them. `vector_provenance` predates its own `space` column, so a query
+    naming that column RAISES on an older install rather than returning nothing — and a caller
+    that wraps the query in a bare `except` then reads the exception as "nothing is stale",
+    which is the check silently not running on exactly the databases old enough to have lived
+    through a model change. `embedding_models` already handled this; a second copy of the
+    handling that got it wrong is the shape this file keeps hitting.
+
+    On that older schema there is no space to filter by, so every row comes back and the caller
+    filters by the ids it actually asked about.
+    """
+    columns = _columns(conn, "vector_provenance")
+    if not columns:
+        return {}
+    if "space" not in columns:
+        rows = conn.execute("SELECT vector_id, model FROM vector_provenance").fetchall()
+    else:
+        rows = conn.execute("SELECT vector_id, model FROM vector_provenance WHERE space = ?",
+                            (space,)).fetchall()
+    return {r["vector_id"]: r["model"] for r in rows}
+
+
 def insert_retrieval(conn, *, subject_title, campaign_id, query, filters, top_k,
                      campaign_ids, embedding_model, similarities=None, warnings=None) -> str:
     """Write down what the server retrieved (§7.2).
@@ -4183,10 +4225,13 @@ def forget_commitment(conn, commitment_id: str) -> None:
     """
     conn.execute("DELETE FROM commitments WHERE id = ? AND origin = 'extracted'",
                  (commitment_id,))
-    conn.execute("DELETE FROM commitment_vectors WHERE vector_id = ?"
-                 if _columns(conn, "commitment_vectors") else "SELECT 1",
-                 (f"commitment:{commitment_id}",) if _columns(conn, "commitment_vectors")
-                 else ())
+    if _columns(conn, "commitment_vectors"):
+        conn.execute("DELETE FROM commitment_vectors WHERE vector_id = ?",
+                     (f"commitment:{commitment_id}",))
+    # The same cleanup as the campaign-wide path, for the same reason (§13.6/D126). An
+    # extractor withdrawing its own earlier reading leaves the vector AND the row that says
+    # which weights made it, or the provenance outlives the thing it is about.
+    forget_vector_models(conn, [f"commitment:{commitment_id}"])
     conn.commit()
 
 

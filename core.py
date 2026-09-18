@@ -1617,6 +1617,31 @@ def _contract_for_this_brief(computed: dict) -> str:
     return "\n".join(lines) + "\n\n"
 
 
+def _vectors_from_other_weights(conn) -> dict:
+    """`{space: {models}}` for vectors this build's own model did not make (§13.6/D126).
+
+    Per space and against the CURRENT model, which is the question `_mixed_model_warning`
+    cannot answer: two models inside one space is a mixed index, but a whole space indexed by
+    an older model is perfectly uniform and still not comparable with anything this build
+    produces. A library re-indexed in full is silent here; one where the weights changed and
+    the images were never rebuilt is not.
+    """
+    found: dict = {}
+    if not store.provenance_knows_spaces(conn):
+        # Every row would answer for every space, so "the text embedder made an image vector"
+        # would be reported on every install old enough to have the earlier schema.
+        return found
+    for space in vectorstore.SPACES:
+        try:
+            mine = embedding_model_id(space)
+            others = {m for m in store.vector_models(conn, space=space).values() if m != mine}
+        except Exception:                # noqa: BLE001 - a health check never raises
+            continue
+        if others:
+            found[space] = others
+    return found
+
+
 def _mixed_model_warning(conn) -> list:
     """Two embedding models in one index (§7.2).
 
@@ -1625,13 +1650,23 @@ def _mixed_model_warning(conn) -> list:
     produced by two different models are not comparable, so a ranking across them is
     arithmetic on incompatible numbers — and the whole evidence package is that ranking.
     """
-    models = store.embedding_models(conn)
-    if len(models) < 2:
+    # §13.6/D126: every space, not only the text one. This asked `embedding_models(conn)` with
+    # its default `space="campaign"`, so a CLIP weights change — which re-ranks every image
+    # similarity in the product — could not reach the one user-facing notice §7.2 asks for.
+    # Per space and then combined, because two models ACROSS spaces is the normal state: CLIP
+    # makes the image vectors and the text embedder the chunk ones, and reading that as a mixed
+    # index would put a permanent warning on every correctly-indexed library.
+    mixed = {space: store.embedding_models(conn, space) for space in vectorstore.SPACES}
+    mixed = {space: found for space, found in mixed.items() if len(found) > 1}
+    if not mixed:
         return []
+    models = sorted({m for found in mixed.values() for m in found})
     return [notices.notice(
         "mixed_embedding_models",
-        detail=f"vectors in this library were produced by {len(models)} different embedding "
-               f"models ({', '.join(sorted(models))})",
+        detail="; ".join(
+            f"{space} vectors in this library were produced by {len(found)} different "
+            f"embedding models ({', '.join(sorted(found))})"
+            for space, found in sorted(mixed.items())),
         affects="this evidence package and every similarity in it",
         remedy="re-index the library so every vector comes from one model",
         # NOT "run reembed": there is no such tool. `finish_indexing` is the one that exists,
@@ -2305,8 +2340,15 @@ def embedding_model_id(space: str = "campaign") -> str:
     a silent re-ranking of every judgment the library will ever make — the similarities from
     two models are not comparable, and ranking across them is arithmetic on incompatible
     numbers.
+
+    A SPACE names a table of vectors; which model fills it is a separate fact, and
+    `vectorstore.CLIP_SPACES` is where that fact is written down once — beside the dimension
+    table that has to agree with it. The commitment space holds CLIP *text* vectors —
+    phrases encoded to be compared against photographs — so its model is CLIP's, not the text
+    embedder's, and saying otherwise would stamp a name on those rows that had nothing to do
+    with them (§13.6/D126).
     """
-    if space == "asset":
+    if space in vectorstore.CLIP_SPACES:
         return (f"clip/{config.CLIP_MODEL_NAME}" if config.CLIP_PROVIDER != "hash"
                 else "hash")
     provider = config.EMBED_PROVIDER
@@ -3593,6 +3635,24 @@ def health_check(conn, *, probe: bool = True) -> dict:
                           "backend. Reinstall the matching version, or re-run "
                           "finish_indexing after removing the stale vectors.",
             }
+        elif _vectors_from_other_weights(conn):
+            stale = _vectors_from_other_weights(conn)
+            # §13.6/D126, and the same argument as `computed_facts` above: this was on disk
+            # and reachable from no surface at all. `_mixed_model_warning` asks a NARROWER
+            # question — two models inside the campaign space — and answers it only while
+            # building an evidence package, so an image index left behind by a weights change
+            # was invisible everywhere, including here.
+            components["database"] = {
+                "ok": False, "code": "vectors_from_other_weights",
+                "detail": f"{sum(len(v) for v in stale.values())} stored vectors were made by "
+                          f"a model this build does not run ("
+                          + "; ".join(f"{space}: {', '.join(sorted(models))}"
+                                      for space, models in sorted(stale.items())) + ").",
+                "affects": "Any similarity computed between those vectors and new ones — the "
+                           "numbers are not comparable, and nothing in the answer would say so.",
+                "remedy": "Re-index the affected records so every vector comes from one "
+                          "model: re-upload them, or clear the index and run finish_indexing.",
+            }
         elif "fallback" in backend or "python" in backend:
             # Not fatal, but it is a real degradation and it was invisible here while
             # /healthz reported it — exactly the asymmetry the reviewer kept hitting.
@@ -4664,19 +4724,101 @@ def _ranked_gaps(conn) -> dict:
                 campaign_id=next(c["id"] for c in ran if c["id"] not in measured_ids))]),
         })
 
-    # §9.1/§9.2: a concluded campaign with measured results, briefed creative, and nothing
-    # showing what actually ran. The review's third possibility — "that what ran was not what
+    # §9.1/§9.2: a concluded campaign with measured results and nothing showing whether what
+    # ran was what was briefed. The review's third possibility — "that what ran was not what
     # was briefed" — which the library could not previously notice at all.
+    #
+    # §13.6/D122. The condition was "no delivered creative, and briefed creative on file", and
+    # both halves were wrong. It missed the record uploaded as text with nothing at either
+    # phase — the one with the LEAST evidence about what ran. And its replacement, "no
+    # delivered creative", produced an OFFER THAT DID NOT WORK: asked for the photographs, a
+    # record with nothing briefed got a comparison with the other half empty, which
+    # `compare_execution` refuses in as many words — and the upload then CLOSED the gap while
+    # every citation of that campaign went on saying nobody had checked what it ran. Two
+    # surfaces describing one record differently, produced by the product's own suggestion.
+    #
+    # So the condition is now the STORED STATUS the citations read, and not a second opinion
+    # about it. `_snapshot_execution_drift` runs at every moment the answer can change and
+    # writes `never_checked` when `compare_execution` could not answer; `_execution_note`
+    # stamps that on every citation. Reading the same row here makes the gap and the caveat
+    # one claim by construction — the gap is reported exactly while the caveat is being
+    # attached, and it closes exactly when the caveat stops.
     unchecked = [c for c in with_outcomes
-                 if store.assets_in_phase(conn, c["id"], "proposed")
-                 and not store.assets_in_phase(conn, c["id"], "delivered")]
+                 if store.execution_drift_for(conn, c["id"])["status"] == "never_checked"]
     if unchecked:
+        # WHICH HALF IS MISSING, because that decides what to ask for and the previous version
+        # asked for the wrong one. A record with boards and no photographs needs the
+        # photographs; a record with photographs and nothing briefed needs the brief; a record
+        # with neither needs the brief first, because the photographs alone would produce the
+        # same empty-half refusal. A record with BOTH and no comparison on file needs neither —
+        # it needs the comparison run.
+        def _has(campaign, phase):
+            return bool(store.assets_in_phase(conn, campaign["id"], phase))
+
+        nothing_at_all = [c for c in unchecked
+                          if not _has(c, "proposed") and not _has(c, "delivered")]
+        nothing_briefed = [c for c in unchecked
+                           if not _has(c, "proposed") and _has(c, "delivered")]
+        nothing_delivered = [c for c in unchecked
+                             if _has(c, "proposed") and not _has(c, "delivered")]
+        never_run = [c for c in unchecked if _has(c, "proposed") and _has(c, "delivered")]
+        # Least evidence first, and ONE ordering: `what`, `campaign_ids` and the offer all read
+        # position 0 of this same list. Reading the target out of a different ordering put an
+        # id in the arguments that appeared in neither — with seven records the sentence named
+        # five boards-only campaigns and the offer said "add the photographs from" a sixth.
+        order = {c["id"]: n for n, group in enumerate(
+            (nothing_at_all, nothing_briefed, nothing_delivered, never_run)) for c in group}
+        unchecked.sort(key=lambda c: order[c["id"]])
+        target = unchecked[0]
+        # An offer §5.2 would accept: one the tool takes AND the record can use. Each of these
+        # leaves the record able to answer something it could not answer before.
+        if target in never_run:
+            offer = actions.action(
+                f"Compare what ran on “{target['title']}” against its brief",
+                "compare_execution",
+                why="Both halves are on file and nothing has compared them, so every citation "
+                    "of this campaign still says nobody checked what it ran.",
+                consent="ask", campaign_id=target["id"])
+        elif target in nothing_delivered:
+            offer = actions.action(
+                f"Add the photographs from “{target['title']}”",
+                "upload_image_asset",
+                why="The brief is on file and nothing shows what ran. With the delivered "
+                    "photographs, compare_execution says which briefed elements appeared, "
+                    "which did not, and which arrived unbriefed.",
+                consent="ask", needs=["the photographs themselves"],
+                campaign_id=target["id"], phase="delivered")
+        else:
+            # Bare, or photographs with nothing briefed. Both need the BRIEFED half, and
+            # asking a bare record for the photographs instead was the false offer: it
+            # produced "1 delivered image on file and nothing briefed to compare them
+            # against", and closed the gap on the way.
+            offer = actions.action(
+                f"Add the briefed creative for “{target['title']}”",
+                "upload_image_asset",
+                why=("Nothing on file says what this campaign was supposed to look like, so "
+                     "there is nothing for what ran to be compared against. The boards are "
+                     "the half to add first — the photographs on their own would produce the "
+                     "same empty comparison from the other side."),
+                consent="ask", needs=["the briefed boards or brief images"],
+                campaign_id=target["id"], phase="proposed")
+        # The composition, named rather than counted twice. One record described as "1 of them"
+        # is a record stated as a fraction of itself, and the version that suppressed the
+        # briefed-creative clause whenever any record was bare never told the reader which
+        # state the others were in.
+        parts = [f"{len(group)} with {phrase}" for group, phrase in (
+            (nothing_at_all, "no creative on file at all"),
+            (nothing_briefed, "photographs but nothing briefed to compare them against"),
+            (nothing_delivered, "briefed creative but no photographs of what ran"),
+            (never_run, "both halves on file and no comparison ever run")) if group]
+        composition = (f" — {parts[0].split(' with ', 1)[1]}" if len(unchecked) == 1
+                       else " (" + "; ".join(parts) + ")")
         found.append({
             "code": "execution_never_checked",
             "what": f"{len(unchecked)} finished campaign"
                     f"{'s' * (len(unchecked) != 1)} with results on file "
-                    f"{'have' if len(unchecked) != 1 else 'has'} briefed creative and no "
-                    f"photographs of what actually ran: "
+                    f"{'have' if len(unchecked) != 1 else 'has'} never been checked against "
+                    f"what actually ran" + composition + ": "
                     f"{', '.join(c['title'] for c in unchecked[:_MAX_NAMED])}"
                     + (f" (and {len(unchecked) - _MAX_NAMED} more)"
                        if len(unchecked) > _MAX_NAMED else "") + ".",
@@ -4684,15 +4826,26 @@ def _ranked_gaps(conn) -> dict:
                                "brief caused it. If what ran was not what was briefed, the "
                                "library is learning from the wrong document and has no way "
                                "to notice."),
-            "counts": {"campaigns": len(unchecked)}, "affects": len(unchecked),
-            "next_actions": actions.trim([actions.action(
-                f"Add the photographs from \u201c{unchecked[0]['title']}\u201d",
-                "upload_image_asset",
-                why="With the delivered photographs on file, compare_execution says which "
-                    "briefed elements appeared, which did not, and which arrived unbriefed.",
-                consent="ask",
-                needs=["the photographs themselves"],
-                campaign_id=unchecked[0]["id"], phase="delivered")]),
+            "basis": "computed",
+            "counts": {"campaigns": len(unchecked),
+                       "no_creative_at_all": len(nothing_at_all),
+                       "nothing_briefed": len(nothing_briefed),
+                       "nothing_delivered": len(nothing_delivered),
+                       "never_compared": len(never_run),
+                       # `campaign_ids` is capped, and a caller reading a list of five beside
+                       # a count of seven has to work out for itself whether it is looking at
+                       # all of them. Say it.
+                       "named": min(len(unchecked), _MAX_NAMED)},
+            "affects": len(unchecked),
+            "campaign_ids": [c["id"] for c in unchecked][:_MAX_NAMED],
+            # The newest record this gap counts, so a set-aside made about the records on file
+            # then does not silence it for records that arrive later (§10.2). Missing from the
+            # first version of this row, which made `execution_never_checked` the one
+            # set-aside-able code with no way back — "the product agreeing to stop mentioning
+            # something it had not yet seen", in the one place the mechanism was written to
+            # prevent it.
+            "since": max((c.get("created_at") or 0) for c in unchecked),
+            "next_actions": actions.trim([offer]),
         })
 
     # §12.4/D51: records whose deck's comments were never read. Recorded since §2.5 and NOT
@@ -4917,7 +5070,24 @@ def _ranked_gaps(conn) -> dict:
 # "there is no deck" the gap is permanent and unclosable — which is a gap everybody learns to
 # ignore, and D51's own reason for not reporting it at all. Now it closes two ways: attach the
 # deck, or say there is not one.
-_CAN_BE_SET_ASIDE = ("market_without_outcomes", "no_window", "commentary_never_read")
+# §13.6/D122 added `execution_never_checked`, and it had to be re-answered rather than
+# inherited: while the gap required briefed creative to already exist, every record it reached
+# had somebody who photographs, so "there will never be photographs here" was never true of one.
+# Widened to records with no creative at either phase, it reaches the shop that works from
+# descriptions — and for them it is permanent, which is exactly what this whitelist is for. The
+# same trade `commentary_never_read` already took: the answer is per CODE, so a library that
+# does photograph can silence it too.
+# What keeps THAT honest is `_execution_note`, not the set-aside record. An earlier version of
+# this comment said the gap "stays on the record under `set_aside`" and that judgments resting
+# on the evidence still say so — the first half is true and the second does not follow from it.
+# Nothing that builds a judgment reads `set_aside`; its only readers are `gaps` and `readiness`.
+# The caveat that actually travels is `_execution_note`, attached per CITED RECORD, which
+# stamps "nobody has checked what this campaign actually ran… that is not the same as it having
+# run faithfully" on every citation regardless of what anyone set aside. Saying otherwise would
+# tell the next maintainer there is a backstop under the per-citation note, which is exactly
+# the belief that would let somebody weaken it.
+_CAN_BE_SET_ASIDE = ("market_without_outcomes", "no_window", "commentary_never_read",
+                     "execution_never_checked")
 
 # One per response, ever. Measured at 3 of 7 offers in a single `gaps()` reply — one per gap,
 # because `trim` caps each gap's own list and nothing capped the response — which made "shall
