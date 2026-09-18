@@ -243,7 +243,13 @@ def test_the_readme_lists_every_tool_the_server_publishes():
     import mcp_server
 
     text = (ROOT / "README.md").read_text(encoding="utf-8")
-    section = text[text.index("## Tools (what Claude calls)"):text.index("## Files")]
+    # The section runs to the NEXT heading, whatever it happens to be. Pinning the end to one
+    # particular following heading made this raise ValueError — not fail, raise — the moment
+    # the README was reorganised: a test that stopped being able to ask its question.
+    start = text.index("## Tools (what Claude calls)")
+    rest = text[start + 1:]
+    end = rest.find("\n## ")
+    section = rest[:end] if end != -1 else rest
     listed = set(re.findall(r"`([a-z_]+)`", section))
     published = {t.name for t in mcp_server.mcp._tool_manager.list_tools()}
 
