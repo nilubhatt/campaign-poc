@@ -395,9 +395,16 @@ jobs:
           if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
             throw "ollama is not on PATH, so the installer will try to install it itself"
           }
+          # /TASKS="desktop" — the ollama task is DESELECTED, because this job provisioned
+          # Ollama itself two steps ago. Measured: with the task on, the installer ran
+          # OllamaSetup.exe, which installed and launched the Ollama app and then never
+          # returned; the step timed out at 25 minutes having printed nothing, and cleanup
+          # killed two orphan ollama processes. Running a second installer inside a silent
+          # install is the hang, and the gate still gets a real text_search because Ollama is
+          # already there — which is also the commonest state of a customer's machine.
           $p = Start-Process -FilePath .\CampaignIntelligence-Setup.exe `
                -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',`
-                             '/LOG=install.log' -Wait -PassThru
+                             '/TASKS=desktop','/LOG=install.log' -Wait -PassThru
           if ($p.ExitCode -ne 0) {
             Get-Content install.log -Tail 60
             throw "the installer failed on a good bundle (exit $($p.ExitCode))"
@@ -453,8 +460,8 @@ jobs:
           $cfg = Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
           Remove-Item $cfg -ErrorAction SilentlyContinue
           Start-Process -FilePath .\Broken-Setup.exe `
-            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/LOG=broken.log' `
-            -Wait -PassThru | Out-Null
+            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=desktop',`
+                          '/LOG=broken.log' -Wait -PassThru | Out-Null
           if ((Test-Path $cfg) -and ((Get-Content $cfg -Raw) -match 'campaign')) {
             Get-Content broken.log -Tail 60
             throw "a product the gate rejected was wired to Claude Desktop"

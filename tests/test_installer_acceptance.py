@@ -1212,3 +1212,22 @@ def test_the_refusal_check_reads_this_installs_behaviour_not_the_last_ones():
     # Removed, on both, before the install whose behaviour is being read.
     assert ci.count('rm -f "$cfg"') >= 1, "the macOS step does not clear the config first"
     assert "Remove-Item $cfg" in ci, "the Windows step does not clear the config first"
+
+
+def test_ci_does_not_run_a_second_installer_inside_the_silent_install():
+    """Measured on a runner: with the `ollama` task selected, the silent Windows install ran
+    OllamaSetup.exe, which installed and launched the Ollama app and never returned. The step
+    timed out at 25 minutes having printed nothing, and job cleanup killed two orphan `ollama`
+    processes. It happened with Ollama ALREADY provisioned and the model pulled, because the
+    installer could not see it.
+
+    So CI provisions Ollama itself and deselects the task. The gate still gets a real
+    `text_search` — which is also the commonest state of a customer's machine, one that already
+    has Ollama."""
+    ci = _ci_code()
+
+    assert "/TASKS=desktop" in ci, (
+        "the silent install still runs the installer's own Ollama task, which is the hang"
+    )
+    assert ci.count("/TASKS=desktop") >= 2, "only one of the two Windows installs deselects it"
+    assert "Provision Ollama" in ci, "nothing provisions Ollama, so the gate cannot pass"
