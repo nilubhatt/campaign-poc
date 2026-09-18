@@ -72,6 +72,13 @@ fi
 
 
 if [ "$WITH_OLLAMA" = 1 ]; then
+  # The places Ollama actually installs to, added to PATH before deciding it is absent.
+  # `installer` runs a .pkg's scripts with PATH=/usr/bin:/bin:/usr/sbin:/sbin, so
+  # `command -v ollama` missed a perfectly good Ollama and the installer downloaded and
+  # reinstalled it — measured on a runner, where the second install then failed for want of a
+  # GUI session and took text_search down with it. It is the commonest real case too: a
+  # machine that already has Ollama is the one a marketer is most likely to be installing on.
+  PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
   if command -v ollama >/dev/null 2>&1; then echo "Ollama present."; else
     # NOT bare: under `set -euo pipefail` a failed install ends the script here, before the
     # gate, and the marketer gets a bare non-zero with no component named. Ollama's installer

@@ -85,6 +85,31 @@ def _bundled() -> Path:
     return inside if inside and inside.exists() else beside
 
 
+CUSTOMER_NAME = "fabletics-rulebook.yaml"
+
+
+def shipped_customer_rulebook() -> Optional[Path]:
+    """A customer rulebook shipped WITH this build, if there is one (§12.3).
+
+    Both places, for the reason `_bundled` gives above and which cost a CI run to rediscover:
+    PyInstaller 6 puts every `datas` entry under `_internal/` whatever destination the spec
+    names, so looking beside the executable alone found nothing on a frozen build and `init`
+    installed no rules while reporting success. Beside the executable first, so a build script
+    that copies it somewhere an administrator can see and replace wins.
+
+    `None` when this build ships no customer rulebook — which is the generic product, and the
+    switch that keeps it generic.
+    """
+    import sys
+
+    beside = config.app_dir() / CUSTOMER_NAME
+    if beside.exists():
+        return beside
+    base = getattr(sys, "_MEIPASS", None)
+    inside = Path(base) / CUSTOMER_NAME if base else None
+    return inside if inside and inside.exists() else None
+
+
 def is_the_editable_copy() -> bool:
     """Whether the file in force is the one an administrator can see and change."""
     return _bundled() == config.app_dir() / BUNDLED_NAME

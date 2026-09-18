@@ -121,8 +121,8 @@ def main() -> int:
         # Presence of the shipped file is the switch: a build made without it installs nothing
         # and the product stays generic, which is what §12.1 decided and still holds for
         # anybody who is not this customer.
-        shipped = config.app_dir() / "fabletics-rulebook.yaml"
-        if shipped.exists() and not rulebook.overlay_path().exists():
+        shipped = rulebook.shipped_customer_rulebook()
+        if shipped and not rulebook.overlay_path().exists():
             import shutil
 
             rulebook.overlay_path().parent.mkdir(parents=True, exist_ok=True)

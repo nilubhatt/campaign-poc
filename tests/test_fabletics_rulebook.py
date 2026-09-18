@@ -292,3 +292,35 @@ def test_the_standing_corrections_reach_a_judgment(conn):
     # Seven of the ten carry no market, and a house rule applies everywhere rather than
     # nowhere — the exact inversion D108's own fix shipped.
     assert len(standing) >= 7, f"only {len(standing)} of ten applied in Peru"
+
+
+def test_the_shipped_rulebook_is_found_where_pyinstaller_actually_puts_it(tmp_path,
+                                                                          monkeypatch):
+    """PyInstaller 6 puts every `datas` entry under `_internal/` whatever destination the spec
+    names — `rulebook._bundled` documents that and handles it for the product's own rulebook.
+    The customer one looked beside the executable alone, so on a frozen build `init` found
+    nothing, installed no rules, and reported success. A CI run rediscovered it.
+
+    Both places, executable-side first so a build script that puts it somewhere an
+    administrator can see and replace wins."""
+    import sys
+
+    import config
+    import rulebook
+
+    app = tmp_path / "app"
+    internal = app / "_internal"
+    internal.mkdir(parents=True)
+    monkeypatch.setattr(config, "app_dir", lambda: app)
+
+    monkeypatch.delattr(sys, "_MEIPASS", raising=False)
+    assert rulebook.shipped_customer_rulebook() is None, "a generic build must stay generic"
+
+    # Collected into _internal, which is what a real frozen build looks like.
+    (internal / "fabletics-rulebook.yaml").write_text("version: x\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "_MEIPASS", str(internal), raising=False)
+    assert rulebook.shipped_customer_rulebook() == internal / "fabletics-rulebook.yaml"
+
+    # And a copy beside the executable wins, because that one can be seen and replaced.
+    (app / "fabletics-rulebook.yaml").write_text("version: y\n", encoding="utf-8")
+    assert rulebook.shipped_customer_rulebook() == app / "fabletics-rulebook.yaml"

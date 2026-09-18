@@ -1268,3 +1268,26 @@ def test_the_offline_check_reads_the_report_and_not_the_exit_code_on_every_platf
         cleared = "|| true" in step or "$global:LASTEXITCODE = 0" in step
         assert cleared, f"{platform} lets an expected non-zero decide the step"
         assert "visual_search" in step, f"{platform} does not assert what it is there to assert"
+
+
+@pytest.mark.parametrize("installer", [LINUX, MACOS], ids=["linux", "macos"])
+def test_ollama_is_looked_for_where_it_actually_lives(installer):
+    """`installer` runs a .pkg's scripts with PATH=/usr/bin:/bin:/usr/sbin:/sbin. Homebrew puts
+    ollama in /opt/homebrew/bin and its own installer symlinks /usr/local/bin, so
+    `command -v ollama` missed a perfectly good Ollama — measured on a runner, where the
+    installer then downloaded and reinstalled it, the second install failed for want of a GUI
+    session, and text_search went down with it, refusing the whole install.
+
+    It is the commonest real case, not an exotic one: a machine that already has Ollama is the
+    one a marketer is most likely to be installing on."""
+    text = installer.read_text(encoding="utf-8")
+    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+    assert "command -v ollama" in code
+    assert "/usr/local/bin" in code, (
+        "a machine with Ollama already installed is treated as one without it"
+    )
+    where = code.index("/usr/local/bin")
+    assert where < code.index("command -v ollama"), (
+        "PATH is widened after the check that needs it"
+    )

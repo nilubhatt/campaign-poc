@@ -473,6 +473,8 @@ jobs:
             # and pwsh hands the step its last exit code, so the step failed after printing
             # its own success line. Cleared deliberately: a non-zero from this call is the
             # expected result, not the step's verdict.
+            $ErrorActionPreference = 'Continue'
+            $PSNativeCommandUseErrorActionPreference = $false
             & $installed health-check --json > broken.json
             $global:LASTEXITCODE = 0
             $r = Get-Content broken.json | ConvertFrom-Json
@@ -500,6 +502,11 @@ jobs:
           # port. The claim being tested is narrower — the VISION model loads from the bundle
           # with no network — so the report is read and the status discarded. Whenever this
           # step actually ran it would have failed on a product behaving exactly as intended.
+          # pwsh 7.4 turns a native command's non-zero exit into a TERMINATING error when
+          # ErrorActionPreference is Stop, which is what GitHub sets — so the step died on the
+          # call itself, before the line below could clear anything.
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
           & _verify\campaign-intelligence\campaign-intelligence.exe health-check --json `
             > offline.json
           $global:LASTEXITCODE = 0
