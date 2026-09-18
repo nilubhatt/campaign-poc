@@ -52,6 +52,8 @@ datas += [("rulebook.yaml", ".")]
 # own wording, and nothing shipped it — a customer who installed the built artefact had no
 # example at all, while the product's own comments told them to copy from one.
 datas += [("docs/example-rulebook.yaml", ".")]
+# §12.3: the customer rulebook, so putting it in force is a copy and not a download.
+datas += [("docs/fabletics-rulebook.yaml", ".")]
 
 # Bundle sqlite-vec fully (its compiled extension is a binary + package data).
 for pkg in ("sqlite_vec",):

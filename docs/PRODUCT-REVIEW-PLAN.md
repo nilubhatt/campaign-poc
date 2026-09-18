@@ -3008,7 +3008,7 @@ with nothing to notice because each half works perfectly alone:
       counted as TWO markets and satisfied §8.3's "seen in at least two markets" gate alone.
       Only where the rulebook declares the region: undeclared, `region` means a continent on
       one record and a country on the next, which is why the row was a question.
-- [~] **12.3 Fabletics example config** — the full transcribed content (guardrails, tag
+- [x] **12.3 Fabletics example config** — the full transcribed content (guardrails, tag
       taxonomy, influencer criteria + red flags, partner feedback, 360 checklist, scorecard)
       and the ten standing corrections with provenance, shipped as an **example/customer**
       file, not the product default.
@@ -3018,10 +3018,27 @@ with nothing to notice because each half works perfectly alone:
       loaded by the tests so it cannot rot silently. It carries an invented agency and says
       so in its own header — the rules in it are illustrative and the product treats them as
       nobody's.
-      The CONTENT half is outstanding and is an input only the customer has: the transcription
-      lives in the 11 Sep review document, not in this repository, and inventing somebody's
-      guidelines would be exactly the fabrication this project exists to prevent. Tracked as
-      an awaiting-input row rather than a deferral, because the next move is theirs.
+      **The CONTENT half is done, and the row was wrong about why it could not be.** It said
+      the transcription "lives in the 11 Sep review document, not in this repository" — true of
+      the repository, and beside the point. The document is the one that kickstarted this
+      workstream and was sitting in the customer's Downloads the whole time; a reviewer said so
+      and was right. Searching the repo and its full history was the wrong search, and stating
+      the result as "only the customer has this" made a blocked row out of an available one.
+      `docs/fabletics-rulebook.yaml` now carries it, transcribed section by section from "Ship
+      the rulebook with the product": four non-negotiable guardrails as `blocking` rules, the
+      four-way tag taxonomy, the influencer criteria and red flags, the recurring partner
+      feedback as evaluation logic, the 360° checklist as the six things a brief must carry
+      with the words that would show each had arrived, the six-criteria scorecard, and all ten
+      standing corrections with their provenance and market scope. The presenter notes carried
+      as PDF annotations are transcribed with the sections they annotate.
+      **Shipped as a customer file, which is this row's own decision.** Putting it in the
+      product default was tried and reverted: 126 tests encode the empty default, because it is
+      what makes the first-run and empty-library behaviour what it is, and one customer's rules
+      in a generic product's default would make every install theirs. It ships beside the
+      binary, so putting it in force is one `cp` into the data directory and no download. The
+      source document asks for the defaults to ship populated, which for a Fabletics build is
+      right — making the INSTALLER do that copy is one line and a product decision rather than
+      a technical one, and it has not been made here. *Closes D129.*
       *Closes D37 and D108.* D37 moved "in market" out of the product's own synonym table —
       one agency's phrasing does not belong in a product that ships generic — and review
       caught the sweep half done, with the model-facing gloss still teaching the word `enums`

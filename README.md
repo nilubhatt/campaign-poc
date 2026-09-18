@@ -454,6 +454,26 @@ bytes came from that workflow rather than from someone's laptop.
 
 ---
 
+## Your own rules
+
+The product ships **generic**: no rules, no vocabulary, no scorecard. What belongs in a
+rulebook is a rule about *your* briefs, which nothing else in the product knows — so you write
+one, and it layers over the product's:
+
+```bash
+campaign-intelligence init                      # prints the data directory
+cp example-rulebook.yaml "<data dir>/rulebook.yaml"   # a worked example of every shape
+# edit it, then restart the server
+```
+
+`health-check` then reports the rulebook as `core-1.0+your-version`, naming both.
+
+Two files ship beside the binary. `example-rulebook.yaml` is a worked example using an invented
+agency — every shape the file can carry, nothing in force. `fabletics-rulebook.yaml` is a real
+customer rulebook: four non-negotiable guardrails, a tag taxonomy, influencer criteria and red
+flags, recurring partner feedback, a 360° launch checklist, a six-criteria scorecard and ten
+standing corrections with their provenance. Copy whichever is the better starting point.
+
 ## Configuration
 
 Every knob is an environment variable. The ones worth knowing:
