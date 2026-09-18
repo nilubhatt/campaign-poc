@@ -223,6 +223,31 @@ jobs:
       # INSTALLS it, on a clean runner, and then requires that the product the installer left
       # behind answers its own self-test — the acceptance criterion §4.1 states and the one
       # thing a build that only compiles cannot check.
+      # Ollama, the headless way, BEFORE the package runs. Measured on a runner: Ollama's own
+      # macOS installer downloads, unpacks to /Applications, then fails at `Unable to find
+      # application named 'Ollama'` — it wants a GUI session to launch the app, and a runner
+      # has none. `install.sh` handled that correctly (the guard reported it and the gate
+      # refused the install, naming text_search), which is the product working; what was wrong
+      # was this job expecting a green install on a machine where the dependency cannot be
+      # installed. Homebrew gives the CLI and server without the .app, so `command -v ollama`
+      # succeeds and the installer skips its own download — which is also the state of a
+      # machine that already has Ollama, the commonest real case.
+      - name: Provision Ollama (macOS runners have no GUI session)
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        run: |
+          brew install ollama
+          (ollama serve >/tmp/ollama.log 2>&1 &)
+          # A plain wait loop: `A && break || sleep` reads as if-then-else and is not one.
+          for _ in $(seq 1 30); do
+            if curl -sf http://localhost:11434/api/tags >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          ollama pull nomic-embed-text
+          ollama list
+
       # A ceiling on every step that RUNS an installer. The first dispatch hung for 99
       # minutes inside the silent Windows install — most likely the Ollama task, which
       # downloads and installs a second installer and then pulls 274MB — and would have
@@ -319,6 +344,26 @@ jobs:
           $v = python -c "import version; print(version.VERSION)"
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" installer\windows\campaign-intelligence.iss
           Copy-Item installer\windows\Output\CampaignIntelligence-Setup.exe .
+
+      # Same reason as macOS, one platform over: the Inno `ollama` task downloads and runs
+      # OllamaSetup.exe, and the first dispatch hung for 99 minutes inside that step. With
+      # Ollama already on PATH the task's own `Get-Command ollama` succeeds and it skips
+      # straight to serve-and-pull.
+      - name: Provision Ollama (so the installer's own task skips its download)
+        if: runner.os == 'Windows'
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          choco install ollama --no-progress -y
+          $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
+                      [Environment]::GetEnvironmentVariable('Path','User')
+          Start-Process ollama -ArgumentList 'serve' -WindowStyle Hidden
+          for ($i = 0; $i -lt 30; $i++) {
+            try { Invoke-WebRequest http://localhost:11434/api/tags -UseBasicParsing | Out-Null; break }
+            catch { Start-Sleep 2 }
+          }
+          ollama pull nomic-embed-text
+          ollama list
 
       # D25, owed since 4.1: "the `[Code]` path has still never been executed anywhere;
       # compiling it is new but is not the same thing". Inno's `[Code]` section holds the gate
