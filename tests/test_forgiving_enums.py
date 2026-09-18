@@ -428,7 +428,12 @@ def test_the_explanations_are_keyed_to_field_names_that_are_actually_used():
     import re
     from pathlib import Path
 
-    used = set(re.findall(r'field="([^"]+)"', Path("store.py").read_text(encoding="utf-8")))
+    # The whole store family, not one file. `store.py` was split into `store_*.py` modules and
+    # the call sites moved with the code — so reading a single filename stopped asking the
+    # question this test exists to ask, which is whether every explanation is reachable.
+    store_src = "".join(p.read_text(encoding="utf-8")
+                        for p in sorted(Path(".").glob("store*.py")))
+    used = set(re.findall(r'field="([^"]+)"', store_src))
     used |= set(re.findall(r"field='([^']+)'", Path("core.py").read_text(encoding="utf-8")))
     used |= set(re.findall(r'field="([^"]+)"', Path("core.py").read_text(encoding="utf-8")))
 

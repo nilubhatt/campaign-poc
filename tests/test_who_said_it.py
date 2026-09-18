@@ -1026,7 +1026,13 @@ _NAMES_A_PERSON = ("said_by", "recorded_by", "classified_by", "confirmed_by", "w
 # `store.normalize_tags` is the exception, and it is here as a NAMED one rather than by being
 # in a skipped file: tags are the one attribution the domain layer never sees as a parameter,
 # because they arrive inside a list of dicts. That is how the sixth door got in.
-_MAY_DELEGATE = {"store.py", "mcp_server.py", "http_app.py", "stdio_server.py", "replay.py"}
+# `store*` rather than `store.py`: the split into `store_campaigns.py` and friends moved these
+# writes without changing what they are. The entry is about a ROLE — this layer hands the name
+# on to whoever records it, rather than recording it itself — and the role travelled with the
+# code. A new module outside the family still has to be added here deliberately, which is the
+# review this table exists to force.
+_MAY_DELEGATE = {"mcp_server.py", "http_app.py", "stdio_server.py", "replay.py"}
+_MAY_DELEGATE_PREFIXES = ("store",)
 
 # Functions that take one of these names and do not RECORD it, with the reason written beside
 # them — the §10.6 pattern, where an exemption has to be stated rather than arrived at. A new
@@ -1087,7 +1093,8 @@ def test_every_write_that_takes_a_name_reaches_the_one_guard():
 
     unguarded = {}
     for name, tree in trees.items():
-        if name in _MAY_DELEGATE or name == "identity.py":
+        if (name in _MAY_DELEGATE or name == "identity.py"
+                or name.removesuffix(".py").startswith(_MAY_DELEGATE_PREFIXES)):
             continue
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
