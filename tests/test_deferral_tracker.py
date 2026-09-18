@@ -42,19 +42,37 @@ def _tracker_rows(section: str) -> list[tuple[str, str]]:
 
 
 def _plan_items() -> dict[str, bool]:
-    """Every numbered plan item -> whether it is marked done."""
+    """Every numbered plan item -> whether it is marked done.
+
+    All THREE markers the plan's own legend defines: `[ ]` not started, `[~]` in progress,
+    `[x]` done. This matched `[ x]` only, so an item marked `[~]` was invisible — it appeared
+    in neither the existence check nor the staleness check, and a row deferred to it could
+    never be flagged. The in-progress marker is the honest one for an item whose remaining half
+    waits on somebody else, and using it must not be what switches the guard off.
+    """
     items = {}
     for line in PLAN.read_text(encoding="utf-8").splitlines():
-        match = re.match(r"- \[([ x])\] \*\*(\d{1,2}\.\d{1,2})", line)
+        match = re.match(r"- \[([ x~])\] \*\*(\d{1,2}\.\d{1,2})", line)
         if match:
             items[match.group(2)] = match.group(1) == "x"
     return items
 
 
 def test_the_tracker_exists_and_has_rows():
-    """An empty tracker and no tracker are the same artefact."""
+    """An empty tracker and no tracker are the same artefact.
+
+    Across the sections, not inside `Open — deferred` specifically. That assertion read as a
+    parse check and was really a claim that work is always owed — and it failed the moment the
+    last deferred row closed, which is the state the whole document exists to reach. A tracker
+    whose deferred section is empty while its Closed section runs to a hundred and fifty rows
+    is working; one that parses to nothing anywhere is broken.
+    """
     assert TRACKER.exists()
-    assert _tracker_rows("Open — deferred"), "no open deferrals listed"
+    rows = {section: _tracker_rows(section)
+            for section in ("Open — deferred", "Open — awaiting input",
+                            "Open — decided against", "Accepted limits", "Closed")}
+    assert any(rows.values()), f"nothing parsed out of the tracker at all: {rows}"
+    assert rows["Closed"], "no closed rows parsed — the format has probably changed"
 
 
 def test_every_deferral_points_at_an_item_that_exists():
@@ -70,6 +88,18 @@ def test_every_deferral_points_at_an_item_that_exists():
         for target in targets:
             assert target in items, (
                 f"{row_id} defers to item {target}, which does not exist in the plan"
+            )
+
+    # And the section that is not "deferred" but is still owed. `Open — deferred` is empty
+    # now, so every check keyed on it alone passes vacuously — and the rows that remain are
+    # the ones waiting on somebody, which is precisely when a dangling item number goes
+    # unnoticed for longest. Columns here: | id | what it needs | From | waiting on | why |.
+    for row_id, row in _tracker_rows("Open — awaiting input"):
+        targets = ITEM.findall(row.split("|")[3])
+        assert targets, f"{row_id} names no item it belongs to"
+        for target in targets:
+            assert target in items, (
+                f"{row_id} belongs to item {target}, which does not exist in the plan"
             )
 
 

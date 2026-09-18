@@ -197,6 +197,10 @@ Run from source, or ship a self-contained bundle (no Python on the target):
 
 ### Installing a bundle
 
+**macOS: download `CampaignIntelligence.pkg` and double-click it.** Choose *Install for me
+only* — the product is per-user and needs no administrator password. The tarball is still
+there for anyone who wants a terminal, and carries the same `install.sh`.
+
 Each archive carries the installer for its own platform: `installer/linux/install.sh`,
 `installer/macos/install.sh`, and the Inno Setup `.exe` for Windows. All three ensure Ollama
 and the embedding model, create the data directory, and then **run a post-install self-test**
@@ -209,6 +213,26 @@ On Unix the new copy is staged and only swapped in once the self-test passes, so
 upgrade leaves the working install untouched. On Windows the files are installed first (Inno
 has no seam for "keep the files but fail the run"), so a failed self-test shows a *"Installed,
 but not working"* finish page naming the component, with Claude Desktop left unconnected.
+
+### The macOS package is not signed yet
+
+You will see **"CampaignIntelligence.pkg cannot be opened because it is from an unidentified
+developer"**, or on macOS 15 and later a flat refusal with no "open anyway" button. That is
+expected, it is not a sign anything is wrong with the download, and it takes three steps:
+
+1. **System Settings → Privacy & Security**
+2. scroll to Security — *"CampaignIntelligence.pkg was blocked"* — and click **Open Anyway**
+3. open the package again and confirm
+
+Signing and notarization are built and waiting on an Apple Developer ID (tracked as D130 in
+`docs/DEFERRALS.md`); when it exists the same build signs, notarizes and staples with no other
+change, and this section goes away. Until then the package is unsigned, which is why the steps
+above exist — and why it is worth saying rather than leaving somebody to guess whether the
+download was corrupted.
+
+The failure path says what it found. If the self-test refuses the install, the message names
+the component and the full output is at `~/Library/Logs/CampaignIntelligence-install.log` —
+Installer.app itself only ever says *"contact the software manufacturer"*.
 
 To re-run that check at any time:
 

@@ -30,6 +30,36 @@ jobs:
           CAMPAIGN_POC_TEST_WEIGHTS: .weights-cache/open_clip_model.safetensors
         run: python -m pytest tests/ -v
 
+  # §4.4. The macOS package's scripts are shell, and every test that EXECUTES one is guarded
+  # by `skipif(sys.platform != "darwin")` — so on a Linux-only runner the tests that actually
+  # run the postinstall, build a .pkg and read xattrs off an installed bundle were all skipped,
+  # silently, which is the same gap the Windows job below exists to close. The rest of the
+  # suite runs on Linux; this job exists for the handful that cannot.
+  macos-installer:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run the macOS installer and packaging tests
+        run: |
+          python -m pytest tests/test_installer_acceptance.py tests/test_bundled_weights.py -v
+          # A skip here means the guard fired on a macOS runner, which would put these back
+          # where they were: written, and never executed anywhere.
+          python -m pytest tests/test_installer_acceptance.py -q -rs 2>&1 | tee skips.txt
+          if grep -q "pkg scripts are macOS's\|xattr semantics are macOS's" skips.txt; then
+            echo "the macOS-only tests skipped ON macOS" >&2
+            exit 1
+          fi
+
   # The Windows installer's [Code] section is Pascal Script, and nothing in the Python suite
   # can tell whether it compiles. A reviewer proved the gap by mutation: the text-matching
   # tests pass against a [Code] block that does not compile at all. ISCC is the only thing

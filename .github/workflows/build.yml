@@ -202,6 +202,91 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "packaged product cannot resolve its weights" }
           if ($out -notcontains "source: bundled") { throw "packaged product did not use the bundled weights" }
 
+      # §4.4. The macOS release was a tarball: Terminal to extract, an install.sh that is
+      # itself quarantined when it arrives through a browser, and Finder opening a .sh in a
+      # text editor. The .pkg is the thing a marketer can double-click. Signed, notarized and
+      # stapled when the credentials exist as repository secrets, and an unsigned package that
+      # says so when they do not — Installer.app warns and lets the user proceed, which the
+      # tarball never allowed at all.
+      - name: Build macOS .pkg
+        if: runner.os == 'macOS'
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          MACOS_SIGN_IDENTITY_INSTALLER: ${{ secrets.MACOS_SIGN_IDENTITY_INSTALLER }}
+          AC_NOTARY_PROFILE: ${{ secrets.AC_NOTARY_PROFILE }}
+        run: |
+          v=$(python -c "import version; print(version.VERSION)")
+          installer/macos/pkg/build-pkg.sh dist/campaign-intelligence "$v" \
+              CampaignIntelligence.pkg
+
+      # D25's shape, one platform over: compiling a package proves the compiler ran. This
+      # INSTALLS it, on a clean runner, and then requires that the product the installer left
+      # behind answers its own self-test — the acceptance criterion §4.1 states and the one
+      # thing a build that only compiles cannot check.
+      - name: Install the .pkg end to end and verify what it left behind
+        if: runner.os == 'macOS'
+        run: |
+          sudo installer -pkg CampaignIntelligence.pkg -target / -verbose
+          dest="$HOME/Library/Application Support/CampaignIntelligence"
+          test -x "$dest/campaign-intelligence" \
+            || { echo "the package installed nothing runnable at $dest" >&2; exit 1; }
+          test ! -d /usr/local/share/campaign-intelligence-staging \
+            || { echo "the staged payload outlived the install" >&2; exit 1; }
+          # Quarantine never applies to a pkg payload, so this is about the product working,
+          # not about Gatekeeper: run the installed copy and require a green self-test.
+          "$dest/campaign-intelligence" health-check --json > installed.json
+          python - <<'PY'
+          import json
+          report = json.load(open("installed.json"))
+          bad = [name for name, c in report["components"].items() if not c.get("ok")]
+          assert not bad, f"the installed product fails its own self-test: {bad}"
+          print("installed and green:", sorted(report["components"]))
+          PY
+          # The positive control for the broken-bundle step below: a product the gate ACCEPTS
+          # is wired. Without it, "nothing was wired" would also pass on an installer that
+          # never wires anything.
+          cfg="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+          grep -q campaign "$cfg" \
+            || { echo "a product that passed the gate was not wired to Claude Desktop" >&2;
+                 exit 1; }
+          echo "and wired to Claude Desktop"
+
+      - name: A broken bundle must fail the .pkg install, not ship a dead product
+        if: runner.os == 'macOS'
+        run: |
+          # The other half of D25: an installer that only ever meets a good bundle has never
+          # had its gate exercised. Corrupt the weights the way an interrupted download does
+          # and require the install to FAIL — a package that reports success here is the
+          # original defect, delivered by a nicer wrapper.
+          rm -rf broken && cp -a dist/campaign-intelligence broken
+          printf 'truncated' > broken/models/open_clip_model.safetensors
+          cp installer/macos/install.sh installer/macos/uninstall.sh broken/
+          v=$(python -c "import version; print(version.VERSION)")
+          installer/macos/pkg/build-pkg.sh broken "$v" Broken.pkg
+          # Captured rather than redirected: under `sudo` the redirect is still the
+          # runner's, which shellcheck flags (SC2024) and which would silently lose the log
+          # the moment the path needed root.
+          set +e
+          log=$(sudo installer -pkg Broken.pkg -target / 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$log"
+          if [ "$status" -eq 0 ]; then
+            echo "the installer accepted a bundle with corrupt weights" >&2
+            exit 1
+          fi
+          # `install.sh`'s OWN sentence about the weights, not the postinstall's wrapper. The
+          # wrapper prints "INSTALL FAILED" whatever went wrong, so grepping for that matched
+          # a permission error, a missing directory, anything at all — an assertion that
+          # could not fail, guarding the one step whose whole job is to prove a refusal.
+          printf '%s' "$log" | grep -qi "weights are corrupt" \
+            || { echo "it failed for some other reason than the corrupt weights" >&2; exit 1; }
+          # And the gate's actual promise: nothing it rejected gets wired.
+          test ! -f "$HOME/Library/Application Support/Claude/claude_desktop_config.json" \
+            || ! grep -q campaign "$HOME/Library/Application Support/Claude/claude_desktop_config.json" \
+            || { echo "a product the gate rejected was wired to Claude Desktop" >&2; exit 1; }
+          echo "refused, said why, and wired nothing"
+
       - name: Build Windows installer (Inno Setup)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -212,6 +297,87 @@ jobs:
           $v = python -c "import version; print(version.VERSION)"
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" installer\windows\campaign-intelligence.iss
           Copy-Item installer\windows\Output\CampaignIntelligence-Setup.exe .
+
+      # D25, owed since 4.1: "the `[Code]` path has still never been executed anywhere;
+      # compiling it is new but is not the same thing". Inno's `[Code]` section holds the gate
+      # — the self-test that must block the success page — and a build that only ran ISCC
+      # proved the Pascal compiled, not that the gate fires. /VERYSILENT is how it runs
+      # unattended; /SUPPRESSMSGBOXES so a modal cannot hang the runner forever.
+      - name: Install the Windows installer end to end and verify what it left behind
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\CampaignIntelligence-Setup.exe `
+               -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',`
+                             '/LOG=install.log' -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            Get-Content install.log -Tail 60
+            throw "the installer failed on a good bundle (exit $($p.ExitCode))"
+          }
+          $dest = Join-Path $env:LOCALAPPDATA `
+                  'Programs\CampaignIntelligence\campaign-intelligence.exe'
+          if (-not (Test-Path $dest)) {
+            Get-Content install.log -Tail 60
+            throw "the installer reported success and left nothing runnable at $dest"
+          }
+          & $dest health-check --json > installed.json
+          $report = Get-Content installed.json | ConvertFrom-Json
+          $bad = $report.components.PSObject.Properties |
+                 Where-Object { -not $_.Value.ok } | ForEach-Object { $_.Name }
+          if ($bad) { throw "the installed product fails its own self-test: $($bad -join ', ')" }
+          Write-Host "installed and green: $($report.components.PSObject.Properties.Name -join ', ')"
+          # The positive control for the broken-bundle step below.
+          $cfg = Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
+          if (-not (Test-Path $cfg) -or ((Get-Content $cfg -Raw) -notmatch 'campaign')) {
+            throw "a product that passed the gate was not wired to Claude Desktop"
+          }
+          Write-Host "and wired to Claude Desktop"
+
+      - name: A broken bundle must fail the Windows install
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # The half D25 names explicitly. An installer that has only ever met a good bundle
+          # has never had its gate exercised, and this gate is the one acceptance criterion
+          # §4.1 turns on. Corrupt the weights the way an interrupted download does, rebuild
+          # the installer around them, and require a refusal.
+          Remove-Item -Recurse -Force _broken -ErrorAction SilentlyContinue
+          Copy-Item -Recurse dist\campaign-intelligence _broken
+          Set-Content -Path _broken\models\open_clip_model.safetensors -Value 'truncated'
+          $v = python -c "import version; print(version.VERSION)"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" `
+            "/DSourceDir=$((Resolve-Path _broken).Path)" `
+            "/O$((Resolve-Path .).Path)" "/FBroken-Setup" `
+            installer\windows\campaign-intelligence.iss
+          # NOT the exit code. Inno's `[Code]` gate cannot change it and the .iss says so in
+          # as many words: an exception at ssPostInstall is caught and discarded by Inno
+          # itself, and raising at ssInstall rolls the files back, which contradicts the
+          # advice to fix the problem and re-run against the files just installed. So a
+          # refused install exits 0 BY DESIGN, and asserting non-zero here would have failed
+          # every release build while proving nothing.
+          #
+          # What the gate actually promises is in the .iss: "Never wire a product the
+          # self-test just rejected." That is observable, and it is the thing a marketer is
+          # protected by — their next Claude session does not point at a broken server.
+          $cfg = Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
+          Remove-Item $cfg -ErrorAction SilentlyContinue
+          Start-Process -FilePath .\Broken-Setup.exe `
+            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/LOG=broken.log' `
+            -Wait -PassThru | Out-Null
+          if ((Test-Path $cfg) -and ((Get-Content $cfg -Raw) -match 'campaign')) {
+            Get-Content broken.log -Tail 60
+            throw "a product the gate rejected was wired to Claude Desktop"
+          }
+          $installed = Join-Path $env:LOCALAPPDATA `
+                       'Programs\CampaignIntelligence\campaign-intelligence.exe'
+          if (Test-Path $installed) {
+            & $installed health-check --json > broken.json
+            $r = Get-Content broken.json | ConvertFrom-Json
+            if ($r.components.visual_search.ok) {
+              throw "the corrupt weights were accepted as a working vision model"
+            }
+          }
+          Write-Host "refused: the self-test failed and nothing was wired"
 
       - name: Verify the packaged product needs no network (Windows)
         if: runner.os == 'Windows'
@@ -238,6 +404,7 @@ jobs:
           path: |
             ${{ matrix.asset }}
             CampaignIntelligence-Setup.exe
+            CampaignIntelligence.pkg
           if-no-files-found: warn
 
       - name: Attach to release
@@ -247,3 +414,4 @@ jobs:
           files: |
             ${{ matrix.asset }}
             CampaignIntelligence-Setup.exe
+            CampaignIntelligence.pkg

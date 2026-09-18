@@ -13,6 +13,13 @@
 #ifndef AppVersion
   #define AppVersion "0.0.0-dev"
 #endif
+; Where the payload comes from. Defaulted, so an ordinary build is unchanged, and overridable
+; so CI can build an installer around a DELIBERATELY BROKEN bundle and require a refusal
+; (D25). An installer that has only ever met a good bundle has never had its gate exercised,
+; and the gate is the one acceptance criterion 4.1 turns on.
+#ifndef SourceDir
+  #define SourceDir "..\..\dist\campaign-intelligence"
+#endif
 #define AppName "Campaign Intelligence"
 #define AppExe  "campaign-intelligence.exe"
 
@@ -44,11 +51,11 @@ UsePreviousAppDir=yes
 UninstallDisplayName={#AppName}
 
 [Files]
-Source: "..\..\dist\campaign-intelligence\*"; DestDir: "{app}"; Excludes: "models\*"; Flags: recursesubdirs createallsubdirs
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "models\*"; Flags: recursesubdirs createallsubdirs
 ; The CLIP checkpoint is ~303MB of near-random tensor data: LZMA2/max spends minutes on it
 ; for ~0% gain, and in a solid stream every install pays to decompress it in order. Kept
 ; out of the solid block and stored uncompressed.
-Source: "..\..\dist\campaign-intelligence\models\*"; DestDir: "{app}\models"; Flags: recursesubdirs createallsubdirs nocompression solidbreak
+Source: "{#SourceDir}\models\*"; DestDir: "{app}\models"; Flags: recursesubdirs createallsubdirs nocompression solidbreak
 
 [Icons]
 Name: "{group}\{#AppName} (server)"; Filename: "{app}\{#AppExe}"; Parameters: "serve"

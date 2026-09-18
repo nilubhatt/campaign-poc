@@ -674,7 +674,7 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       which loads the vision model, and assert on `visual_search`; Linux uses `sudo unshare
       -n`, and Windows — the platform the review was written against, on a network that
       blocks huggingface.co — had no offline check at all and now has one.
-- [ ] **4.4 macOS: sign, notarize, staple - and ship a `.pkg`** (raised by the Phase 4
+- [~] **4.4 macOS: sign, notarize, staple - and ship a `.pkg`** (raised by the Phase 4
       design review; not in the original review, and owed). Today the macOS archive is an
       unsigned binary whose quarantine flag the installer strips. That strip is a legitimate
       stopgap *inside an installer the user chose to run*, on the product's own directory —
@@ -684,6 +684,68 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       to extract, `install.sh` is itself quarantined, and Finder opens a `.sh` in a text
       editor. What is owed: Developer ID signing + notarization + stapling in CI, and a
       `.pkg` whose postinstall runs the same gate — after which the quarantine strip can go.
+      (§4.1's entry above still says the quarantine flag is "stripped"; it was not, and §4.4
+      is where that is established. Read them together.)
+
+      **Done, and the quarantine strip did not work.** Measured before changing anything: the
+      installer's `xattr -dr com.apple.quarantine "$DEST"` stripped the LIVE directory, while
+      everything it runs — `init`, the `health-check` gate — runs out of `$STAGE`, which `mv`
+      then puts in place. On a fresh install `$DEST` does not exist, so the strip was a no-op
+      swallowed by `|| true`; on an upgrade it stripped the copy about to be deleted. Either
+      way the installed binary and the CLIP weights beside it were still quarantined. So the
+      position written down here — "a legitimate stopgap inside an installer the user chose to
+      run" — was not the position the product was in. Fixed, and pinned by a test that installs
+      a quarantined bundle and reads the attribute off the installed copy.
+
+      **Done: the `.pkg`.** `installer/macos/pkg/` — payload staged through /usr/local, a
+      postinstall that drops to the console user and runs `install.sh`, and nothing else. Thin
+      on purpose: the gate is `install.sh`'s and a postinstall repeating any of it would be
+      the second implementation of one rule, which is the shape this codebase keeps being bitten
+      by. `require-scripts="true"`, so the gate cannot be skipped by a payload-only install;
+      the staged copy is removed on success AND on failure, so a refused install does not leave
+      2GB of weights as a souvenir.
+
+      **Done: signing, notarization and stapling in CI** — `build-pkg.sh`, conditional on
+      credentials and saying which it did. It signs every Mach-O in the payload and not only
+      the package: a signed `.pkg` around an unsigned binary notarizes and then fails on
+      launch, because the package's signature says nothing about what is inside it.
+      `--options runtime` on every call, without which notarization is refused, and `stapler
+      staple` after — unstapled, the first launch asks Apple whether the package is notarized,
+      on a network §4.2 says may not allow it.
+
+      **Done: D25, one platform wider than it asked.** The Windows installer was compiled in
+      CI and never run, so its `[Code]` gate had never executed anywhere. Both installers are
+      now installed end to end on a clean runner, the product they leave behind must pass its
+      own self-test and must be wired to Claude Desktop; and both are built a second time
+      around a deliberately corrupted bundle, which must be REFUSED and must leave Claude
+      Desktop unwired. The Inno script gained a `SourceDir` define so that second build is
+      possible at all.
+      **Written and unit-asserted; first EXECUTED on the next tag build.** §13.1 settled one
+      definition of "measured" for this repository and these steps do not meet it yet: what is
+      tested today is that the workflow contains the steps. That is better than nothing and it
+      is not the same thing — which is D25's own sentence, and it applies to its fix.
+      What the first refusal check asserted could not have worked, and review caught both
+      halves. On Windows a refused install exits ZERO by design: the `.iss` explains that Inno
+      discards an exception at `ssPostInstall`, and that raising at `ssInstall` rolls back the
+      files the user is told to fix and re-run against. Asserting a non-zero exit would have
+      failed every release build while proving nothing. On macOS the check grepped for
+      `FAILED`, which the postinstall prints whatever goes wrong — so a permission error would
+      have passed as "refused the corrupt weights". Both now assert the promise the `.iss`
+      actually makes: **never wire a product the self-test rejected**, with a positive control
+      so an installer that wires nothing at all cannot pass either.
+
+      **What remains, and what it needs from you:** an Apple Developer ID. Until
+      `MACOS_SIGN_IDENTITY`, `MACOS_SIGN_IDENTITY_INSTALLER` and `AC_NOTARY_PROFILE` exist as
+      repository secrets the release ships an UNSIGNED `.pkg` — which still installs, and which
+      Installer.app lets the user proceed past, where the tarball never let them start. The
+      quarantine strip stays until signing is actually on: the plan says it "can go" after
+      signing, and removing it while the release is unsigned would take away the only thing
+      standing between a marketer and "the developer cannot be verified" **on the tarball
+      path**. On the `.pkg` path the strip is inert — a pkg payload is never quarantined, as
+      the CI comment says — and the dialog a marketer meets there is on the package itself,
+      before anything is installed, where no strip can reach. That is what D130 is for, and
+      until then README says what they will see and what to click. *Closes D25; the signing
+      half waits on D130.*
 
 - [x] **4.3 Ollama verified at install** to the same standard as the vision model — daemon
       reachable and `nomic-embed-text` present.

@@ -39,11 +39,23 @@ STAGE="$DEST.incoming"
 echo "Installing to $DEST ..."
 rm -rf "$STAGE"; mkdir -p "$STAGE"; cp -a "$BUNDLE"/. "$STAGE"/
 
-# Gatekeeper quarantines anything that arrived through a browser, and the quarantine flag
-# travels with every file inside the archive. Left in place, the first launch is a dialog
-# saying the app "cannot be opened because the developer cannot be verified" - and the user
-# has no reason to connect that to the deck they just tried to upload.
-xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
+# Gatekeeper quarantines anything that arrived through a browser. The flag travels to every
+# file inside the archive when FINDER expands it - not when `tar xzf` does, which is the path
+# LINUX.md documents, and which is why nobody ever reported the dialog this comment predicts.
+# It is still worth one line: double-clicking the tarball in Finder is what a marketer does,
+# and there the first launch is "cannot be opened because the developer cannot be verified",
+# with no reason to connect that to the deck they just tried to upload.
+# On the .pkg path this is inert - a pkg payload is never quarantined - and the dialog a
+# marketer meets there is on the package itself, which no strip can reach. That is 4.4/D130.
+#
+# $STAGE, not $DEST (§4.4). This stripped the LIVE directory, and everything the installer
+# runs - `init`, the health-check gate - runs out of $STAGE, which is also what `mv` puts in
+# place at the end. On a fresh install $DEST does not exist, so the strip was a no-op that
+# `|| true` swallowed; on an upgrade it stripped the copy about to be deleted. Measured: the
+# installed binary and the CLIP weights beside it were still quarantined after a successful
+# install, on both paths. The plan calls this "a legitimate stopgap inside an installer the
+# user chose to run" - it is that only if it happens.
+xattr -dr com.apple.quarantine "$STAGE" 2>/dev/null || true
 
 # Verify the shipped CLIP weights actually survived the copy. An interrupted or disk-full cp
 # leaves a truncated file that looks present to the app and only fails later, inside a tool
@@ -61,7 +73,14 @@ fi
 
 if [ "$WITH_OLLAMA" = 1 ]; then
   if command -v ollama >/dev/null 2>&1; then echo "Ollama present."; else
-    echo "Installing Ollama..."; curl -fsSL https://ollama.com/install.sh | sh; fi
+    # NOT bare: under `set -euo pipefail` a failed install ends the script here, before the
+    # gate, and the marketer gets a bare non-zero with no component named. Ollama's installer
+    # writes /Applications and symlinks /usr/local/bin, neither of which a standard account
+    # can do without a prompt - and under the .pkg there is no terminal to prompt into. Let it
+    # fail and let the self-test say what that cost, which is item 4.3's whole argument.
+    echo "Installing Ollama..."
+    curl -fsSL https://ollama.com/install.sh | sh \
+      || echo "Could not install Ollama; the self-test will say what that means." >&2; fi
   (ollama serve >/dev/null 2>&1 &) || true; sleep 3
   # NOT '|| echo warning': a failed pull leaves text search dead, and the self-test below is
   # what turns that into a refused install rather than a surprise three days later.
@@ -104,4 +123,6 @@ echo
 echo "Installed."
 echo "To run it from a terminal: \"$DEST/campaign-intelligence\""
 echo "Claude Desktop is wired; fully quit and reopen it - closing the window is not enough."
-echo "Uninstall: ./uninstall.sh"
+# The absolute path: after a .pkg install there is no such working directory, and the
+# relative form sent the reader looking for a file that is not where they are standing.
+echo "Uninstall: \"$DEST/uninstall.sh\""

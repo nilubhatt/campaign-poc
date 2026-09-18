@@ -171,9 +171,14 @@ def test_windows_installer_copies_subdirectories():
     flag the weights are silently dropped and the installer still reports success - the
     exact class of failure the review opened with."""
     iss = (_repo_root() / "installer/windows/campaign-intelligence.iss").read_text()
-    files_line = next(line for line in iss.splitlines()
-                      if line.strip().startswith("Source:") and "dist" in line)
-    assert "recursesubdirs" in files_line, files_line
+    # EVERY Source entry, found by what it is rather than by the path it happens to hold.
+    # This looked for the literal "dist", so parameterising the payload directory (§4.4/D25,
+    # so CI can build an installer around a deliberately broken bundle) made the test raise
+    # StopIteration instead of failing — a test that stopped being able to ask its question.
+    sources = [line for line in iss.splitlines() if line.strip().startswith("Source:")]
+    assert sources, "the installer ships no files at all"
+    for line in sources:
+        assert "recursesubdirs" in line, line
 
 
 def test_linux_installer_copies_the_whole_bundle():
