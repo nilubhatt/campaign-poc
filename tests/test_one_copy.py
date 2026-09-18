@@ -31,6 +31,7 @@ half is shared — not because nobody looked.
 """
 import ast
 import pathlib
+import re
 
 import core
 import corrections
@@ -68,13 +69,36 @@ def test_which_markets_a_campaign_counts_towards_is_written_once():
     for body in both:
         assert "_widen_markets" in body, "it does not go through the shared helper"
 
-    # NOWHERE else either. The row names two copies; mutating the shared helper and watching a
-    # test that should have felt it stay green turned up a THIRD, in the merge that re-derives
-    # a correction's breadth from the sightings that just moved. A scan of the whole file is
-    # what finds the fourth.
-    source = (ROOT / "store.py").read_text()
-    assert source.count("fold_market(where) not in seen") == 1, (
-        "the market-fold loop is written out in more than one place"
+    # The merge that re-derives a correction's breadth is a THIRD caller the row does not
+    # name, found by mutating the shared helper and watching a test that should have felt it
+    # stay green. It had no test of its own, which is why nothing was watching it.
+    assert "_widen_markets" in _body("store.py", "merge_correction")
+
+    # And the DEDUPE inside the shared helper is `learning.fold_markets` — "one name per
+    # market, first spelling kept", which is that function's own sentence. The first version
+    # of `_widen_markets` open-coded it, making the extraction a fresh copy of the thing it
+    # was extracting. A scan across the modules that answer this question is what catches the
+    # next one.
+    import ast as _ast
+
+    open_coded = []
+    for module in ("store.py", "metrics.py", "corrections.py", "replay.py", "core.py",
+                   "feedback.py"):
+        source = (ROOT / module).read_text()
+        for node in _ast.walk(_ast.parse(source)):
+            if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                continue
+            body = _body(module, node.name)
+            # The dedupe EXPRESSION, wherever it is spelled: a folded market tested for
+            # membership of a set of folded markets. Matching on the word "seen" instead
+            # caught comment prose and `times_seen`, which is a scan nobody can act on.
+            if re.search(r"fold_market\([^)]*\)\s+not in\s*[{(]", body) \
+                    or re.search(r"fold_market\(where\)\s+not in\s+seen", body):
+                open_coded.append(f"{module}:{node.name}")
+
+    assert not open_coded, (
+        f"these open-code the market dedupe rather than folding through "
+        f"`learning.fold_markets`: {open_coded}"
     )
 
 
@@ -245,6 +269,47 @@ def test_the_market_scope_still_narrows_a_staleness_count(conn):
     )
 
 
+def test_a_record_with_no_market_reaches_no_rule(conn):
+    """`learning.reaches`'s falsy case, which is a decision and not a guard. A rule that
+    graduated on LATAM does not apply to a record that says nowhere it ran, and answering
+    otherwise would put every unmarked record on every rule's list the first time anything
+    graduated anywhere."""
+    import learning
+
+    assert learning.reaches(["LATAM", "Peru"], "peru")
+    assert not learning.reaches(["LATAM", "Peru"], "Vietnam")
+    for nothing in (None, "", "   "):
+        assert not learning.reaches(["LATAM", "Peru"], nothing), (
+            f"a record whose market is {nothing!r} was said to reach a LATAM rule"
+        )
+
+
+def test_a_records_own_markets_are_deduped_however_they_were_typed(conn):
+    """`markets_of` answers "every market this record counts towards", and it folds — a
+    record whose `market` is "Peru" and whose `markets` list also says "peru" counts once,
+    because §8.3's gate is "seen in at least two" and reading one market as two satisfies a
+    gate whose entire purpose is that breadth is earned."""
+    cid = _campaign(conn, "Andes launch", market="Peru", markets=["peru", " PERU ", "Chile"])
+
+    counts = store.markets_of(store.get_campaign(conn, cid))
+
+    folded = [store.fold_market(m) for m in counts]
+    assert len(folded) == len(set(folded)), f"one market counted more than once: {counts}"
+    assert set(folded) == {"peru", "chile"}
+
+
+def test_the_market_scope_refuses_an_alias_that_is_not_one(conn):
+    """`_market_scope` interpolates its alias into SQL — the first function in `store` to put
+    a table alias in a query. Both callers pass a literal; the assert is what keeps them the
+    only two that could."""
+    import pytest
+
+    assert store._market_scope(["Peru"], "v")[0].startswith(" AND EXISTS")
+
+    with pytest.raises(AssertionError):
+        store._market_scope(["Peru"], "v; DROP TABLE campaigns; --")
+
+
 # ---------------------------------------------------------------------------------------
 # What was left alone, and why
 
@@ -254,7 +319,40 @@ def test_the_deciding_half_of_graduation_is_already_one_implementation():
     oversight. `_newly_eligible` and `graduate` differ in a table name and the words of an
     offer; what DECIDES is `learning.gate`, and both go through it. That is the half that
     drifted — §12.4 found the gate applying half of its own rule — and it is shared."""
-    for module, name in (("metrics.py", "graduation"), ("corrections.py", "graduation")):
-        assert "learning.gate(" in _body(module, name), (
+    for module in ("metrics.py", "corrections.py"):
+        assert "learning.gate(" in _body(module, "graduation"), (
             f"{module}'s graduation decides eligibility for itself"
         )
+        # AND that the two callers reach it. Asserting only that `graduation` calls the gate
+        # left `_newly_eligible` free to decide for itself — review replaced its gate check
+        # with a local `times_seen < 2` and this file stayed green, which is the exact drift
+        # the row describes passing the test written to forbid it.
+        for caller in ("_newly_eligible", "graduate"):
+            assert "graduation(" in _body(module, caller), (
+                f"{module}'s {caller} does not go through the shared gate"
+            )
+
+
+def test_promoting_a_measure_is_audited_like_promoting_a_rule(conn):
+    """The asymmetry the "left alone" judgment missed, and the reason it is worth checking a
+    judgment rather than asserting one.
+
+    §11.1 puts the account beside the name "on the write that puts a rule in front of every
+    future brief in its markets" — and a graduated MEASURE is put in front of every future
+    brief in exactly the same way. `corrections.graduate` had recorded it since §11.1;
+    `metrics.graduate` never did, so a standing requirement kept only a free-text name. That
+    is a decision made one way on one path and the other way on the other, which is not the
+    table-shaped difference D114's row reduces them to."""
+    peru = _campaign(conn, "Peru launch", market="Peru", status="concluded")
+    mexico = _campaign(conn, "Mexico launch", market="Mexico", status="concluded")
+    cusco = _campaign(conn, "Cusco launch", market="Peru", status="concluded")
+    for cid in (peru, mexico, cusco):
+        metrics.record(conn, campaign_id=cid, key="footfall_uplift_pct", value=4.0,
+                       metric_type="actual")
+
+    metrics.graduate(conn, "footfall_uplift", confirmed_by="R. Vega")
+
+    said = store.authorship_for(conn, "metric", "footfall_uplift")
+    assert said, "nothing recorded who put this measure in front of every future brief"
+    assert said["on_behalf_of"]["name"] == "R. Vega"
+    assert said["captured_by"]["method"], "the account the call was made from is not recorded"

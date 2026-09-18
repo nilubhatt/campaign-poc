@@ -3403,7 +3403,7 @@ or a second copy of something that already exists once.
       And a THIRD copy of the fold loop that the row does not name, in the merge that
       re-derives a correction's breadth from the sightings that just moved. It was found by
       mutating the shared helper and watching a test that should have felt it stay green — it
-      had no test of its own, which is why it had drifted unnoticed. That is the argument for
+      had no test of its own, so nothing was watching it. That is the argument for
       the row, made by the row's own work.
 
       **The memo mechanism §13.3 wrote twice** is `scoping.scoped_memo` now. Both copies were
@@ -3418,8 +3418,28 @@ or a second copy of something that already exists once.
       a key column and an offer whose fields are different words for a reader. Merging them
       needs a per-kind descriptor larger than either caller, putting a layer between two
       callers and the SQL they each run once: a cost with no drift to prevent. A test pins
-      that the deciding half is shared, so "left alone" stays a judgment rather than an
-      oversight.
+      that BOTH callers reach the shared gate — an earlier version checked only that
+      `graduation` calls it, and review proved a mutant deciding eligibility locally passed —
+      so "left alone" stays a judgment rather than an oversight.
+
+      **And the judgment was wrong in one place, which is the argument for checking one.**
+      `corrections.graduate` records authorship and `metrics.graduate` did not, so a graduated
+      MEASURE kept only a free-text `confirmed_by` while a graduated RULE kept the account the
+      call was made from. §11.1's own words cover both — "the account beside the name, on the
+      write that puts a rule in front of every future brief in its markets" — and a graduated
+      measure is put in front of every future brief in exactly that way. That is not a table
+      name or an offer's wording; it is a decision about whether a write is audited, made one
+      way on one path and the other way on the other. Both reviewers found it independently.
+      Fixed, and pinned.
+
+      **What this did NOT exhaust**, so C155 is not read as closing the class: the same folded
+      membership test stood in four more places — twice in `replay`, and as the market half of
+      `metrics.expected_for` and `corrections.standing_for`, which are the two functions that
+      decide what a brief is CHECKED AGAINST on the two paths D114 is about. All four now use
+      `learning.reaches`. And the first version of `_widen_markets` open-coded the dedupe that
+      IS `learning.fold_markets` — an extraction adding a copy of the thing it was extracting,
+      which `store.markets_of` had a fourth time. The guard that catches the next one scans
+      every module for the dedupe EXPRESSION rather than one file for one spelling.
 - [ ] **13.7 Is this the same rule?** — D109, re-opened by §13.4 with a measurement rather
       than a guess. The lexical matcher misses a paraphrase sharing no vocabulary, and the
       obvious fix does not work: cosine on the shipped `nomic-embed-text` scores one-rule

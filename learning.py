@@ -82,6 +82,26 @@ def fold_markets(raw_markets) -> list:
     return out
 
 
+def reaches(markets, one_market) -> bool:
+    """Whether something scoped to `markets` reaches a subject in `one_market` (§13.5).
+
+    One folded membership test, written out four times before this: twice in `replay`, and as
+    the market half of `metrics.expected_for` and `corrections.standing_for` — the two
+    functions that decide what a brief is CHECKED AGAINST, on the two paths D114 is about.
+    §12.2 changed what folding a market means, and a change like that has to reach every copy
+    or two surfaces answer the same question differently about the same brief.
+
+    `one_market` falsy means the subject has no market, which reaches nothing: a rule that
+    graduated on LATAM does not apply to a record that says where it ran nowhere, and saying
+    otherwise would put every unmarked record on every rule's list.
+    """
+    import store
+
+    if not one_market:
+        return False
+    return store.fold_market(one_market) in {store.fold_market(m) for m in (markets or [])}
+
+
 def gate(*, name: str, noun: str, campaigns: int, markets: list, status: str,
          expected_in=(), confirmed_by: Optional[str] = None,
          from_rulebook: Optional[str] = None, partners: int = 0) -> dict:

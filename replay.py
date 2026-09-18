@@ -115,8 +115,7 @@ def _backlog(conn, *, market: Optional[str] = None) -> list:
         # was a second condition that could never be the one doing the work.
         if not check["missing"]:
             continue
-        if market and store.fold_market(market) not in {store.fold_market(m)
-                                                        for m in check["markets"]}:
+        if market and not learning.reaches(check["markets"], market):
             continue
         # A campaign that has not finished cannot have a measured result, so it is not
         # something to go and ask a partner for — you cannot ask for numbers that do not exist
@@ -194,8 +193,7 @@ def _judgments(conn, *, market: Optional[str] = None) -> list:
             continue                   # a legacy row with no timestamp cannot be compared
         subject = row.get("campaign_id")
         markets = _markets_of_subject(conn, subject)
-        if market and store.fold_market(market) not in {store.fold_market(m)
-                                                        for m in markets}:
+        if market and not learning.reaches(markets, market):
             continue
         after_measures = sorted(
             name for name, entry in measures.items()

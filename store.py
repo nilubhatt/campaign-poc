@@ -3829,15 +3829,21 @@ def _widen_markets(conn, markets: list, campaign_id: Optional[str]) -> list:
     and this is the identical half nobody merged — so it is where the sixth implementation
     would have come from.
     """
+    import learning
+
     if not campaign_id:
         return markets
-    record = get_campaign(conn, campaign_id) or {}
-    seen = {fold_market(m) for m in markets}
-    for where in markets_of(record):
-        if where and fold_market(where) not in seen:
-            markets.append(where.strip())
-            seen.add(fold_market(where))
-    return markets
+    # Through `learning.fold_markets`, which IS "one name per market, first spelling kept" —
+    # the same sentence this function's own docstring says. The first version of this helper
+    # open-coded the dedupe, which made it a third copy of the thing §13.5 exists to remove:
+    # an extraction that adds a copy of what it is extracting. Review caught it.
+    #
+    # It also fixes what the hand-rolled version cost on the merge path, which calls this once
+    # per sighting: `seen` was rebuilt from every market accumulated so far on every call, and
+    # each fold reaches the rulebook vocabulary, so N sightings over M markets was O(N·M)
+    # vocabulary walks where the old inline loop built `seen` once.
+    return learning.fold_markets(list(markets) + markets_of(get_campaign(conn, campaign_id)
+                                                            or {}))
 
 
 def _market_scope(markets: Optional[list], alias: str) -> tuple:
@@ -3852,6 +3858,10 @@ def _market_scope(markets: Optional[list], alias: str) -> tuple:
     parameters, differing only in a table alias — so a change to how a market is matched, and
     §12.2 changed exactly that, had to land twice or the two answers diverged in silence.
     """
+    # A LITERAL, never anything a caller was handed. Both call sites pass "v" and "s"; this
+    # is the first function here to take a table alias and put it in a query, and the assert
+    # is what keeps it the last one that could be given something else.
+    assert alias.isidentifier(), f"table alias must be an identifier, got {alias!r}"
     folded = [f for f in {fold_market(m) for m in (markets or [])} if f]
     if not folded:
         return "", []
@@ -4648,9 +4658,14 @@ def markets_of(campaign: dict) -> list:
             value = str(raw).strip()
             if value.strip().lower() in declared_regions:
                 continue
-            if fold_market(value) not in {fold_market(m) for m in named}:
-                named.append(value)
-    return named or [None]
+            named.append(value)
+    # §13.5: the dedupe is `learning.fold_markets` — "one name per market, first spelling
+    # kept" — which is the FOURTH place that sentence was written out. `[None]` survives it,
+    # because "this record has no market" is a sentinel every caller reads and not an empty
+    # list: `fold_markets` would drop it, so the fold happens first and the sentinel after.
+    import learning
+
+    return learning.fold_markets(named) or [None]
 
 
 def fold_market(name: Optional[str]) -> Optional[str]:

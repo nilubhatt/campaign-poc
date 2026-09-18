@@ -772,6 +772,15 @@ def graduate(conn, name: str, *, confirmed_by: str) -> dict:
         conn, campaigns_with(conn, gate["measure"], measured_only=True))["one_type"]
     store.graduate_metric(conn, gate["measure"], markets=gate["seen_in"],
                           confirmed_by=confirmed_by, campaign_types=on_type)
+    # §11.1/§13.5: the account beside the name, on the write that puts a measure in front of
+    # every future brief in its markets. The correction twin has recorded this since §11.1 and
+    # this did not — so a graduated MEASURE kept only `confirmed_by`, a free-text name, while
+    # a graduated RULE kept the account the call was made from. That is not a table-shaped
+    # difference between the two paths, which is what D114's row claims they are reduced to;
+    # it is a decision about whether a write is audited, made one way here and the other way
+    # there. Review found it while checking that claim.
+    store.record_authorship(conn, subject_kind="metric", subject_key=gate["measure"],
+                            on_behalf_of=confirmed_by)
     entry = describe(conn, gate["measure"])
     return {**entry, "graduated": True,
             # §8.7: the moment the replay becomes non-empty is the moment to point at it.
@@ -834,7 +843,10 @@ def expected_for(conn, *, market: Optional[str] = None, markets: Optional[list] 
             if mine in by_type:
                 out.append(name)
             continue
-        if not wanted or not wanted & {store.fold_market(m) for m in entry["expected_in"]}:
+        # §13.5: `learning.reaches`, the one folded membership test. This and
+        # `corrections.standing_for` are the two functions that decide what a brief is CHECKED
+        # AGAINST, on the two paths D114 is about, and they each wrote it out.
+        if not any(learning.reaches(entry["expected_in"], m) for m in wanted):
             continue
         out.append(name)
     return out

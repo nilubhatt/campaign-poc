@@ -634,7 +634,8 @@ def standing_for(conn, campaign_id: str, *, markets: Optional[list] = None) -> d
         # is §8.3's anti-capture argument and nothing here touches it: only somebody who wrote
         # the rule down can say "everywhere", because only they know.
         if not entry.get("applies_everywhere"):
-            if not wanted & {store.fold_market(m) for m in entry["expected_in"]}:
+            # §13.5: the same `learning.reaches` its metric twin uses.
+            if not any(learning.reaches(entry["expected_in"], m) for m in wanted):
                 continue
         standing.append({
             "correction_id": entry["id"],
