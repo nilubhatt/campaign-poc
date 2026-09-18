@@ -4,7 +4,7 @@
 > [`design.md`](design.md) first for *why* it is shaped this way; this document is *where
 > everything is*. [`README.md`](README.md) covers installing and running it.
 
-**30,611 lines of Python across 33 modules, and 42,457 lines of tests across 105 test
+**31,147 lines of Python across 37 modules, and 42,814 lines of tests across 105 test
 files.** The test-to-code ratio is not an accident: almost every rule described below is
 pinned by a test that was written to fail first.
 
@@ -25,7 +25,8 @@ flowchart TB
         enums["enums.py<br/><i>forgiving input, 302</i>"]
     end
     subgraph orch["Orchestration"]
-        core["core.py<br/><i>10,644</i>"]
+        core["core.py<br/><i>7,392</i>"]
+        split["diffing · creative<br/>missing<br/><i>3,489</i>"]
         actions["actions.py<br/><i>offers, 435</i>"]
         notices["notices.py<br/><i>warnings, 401</i>"]
     end
@@ -36,7 +37,7 @@ flowchart TB
         judge["agreement · replay<br/>identity · people · feedback"]
     end
     subgraph infra["Infrastructure"]
-        store["store.py<br/><i>5,096</i>"]
+        store["store.py + store_campaigns<br/><i>5,249</i>"]
         vec["vectorstore.py<br/><i>223</i>"]
         emb["embedding · clip_embed<br/>images · chunking"]
         ext["extract.py<br/><i>PDF/PPTX, 507</i>"]
@@ -135,21 +136,31 @@ cannot then be used to search for itself is a trap rather than a kindness.
 
 ## 3. Orchestration
 
-### `core.py` (10,644) — the biggest file, and where the work happens
+### `core.py` (7,392) — the biggest file, and where the work happens
 
 Navigate it by its section markers:
 
-| Line | Section | Contains |
+| Section | Where | Contains |
 |---|---|---|
-| 57 | **ingest** | `ingest_campaign`, `attach_deck`, `update_campaign`, the two-pass index rebuild |
-| 743 | **retrieval / evidence** | `find_similar`, `prepare_evaluation`, `save_evaluation`, the stamp |
-| 3878 | **what is missing** | `gaps`, the eight gap codes, ranking, offers |
-| 4160 | **answering back** | `answer_gap`, `answer_finding`, set-aside and reopening |
-| 5333 | **comparing briefs** | `diff_campaigns` |
-| 6116 | **coverage** | `coverage`, `readiness`, `library_state` |
-| 6413 | **the first run** | `getting_started`, `first_steps` |
-| 9524 | **image assets** | `ingest_image_asset`, `find_similar_images`, pHash reuse detection |
-| 9683 | **what shipped** | `compare_execution`, execution drift |
+| **ingest** | `core.py` | `ingest_campaign`, `attach_deck`, `update_campaign`, the two-pass index rebuild |
+| **retrieval / evidence** | `core.py` | `find_similar`, `prepare_evaluation`, `save_evaluation`, the stamp |
+| **coverage** | `core.py` | `coverage`, `readiness`, `library_state` |
+| **the first run** | `core.py` | `getting_started`, `first_steps` |
+| **what is missing** | `missing.py` | `gaps`, the eight gap codes, ranking, offers |
+| **answering back** | `missing.py` | `answer_gap`, `answer_finding`, set-aside and reopening |
+| **comparing briefs** | `diffing.py` | `diff_campaigns` |
+| **image assets** | `creative.py` | `ingest_image_asset`, `find_similar_images`, pHash reuse detection |
+| **what shipped** | `creative.py` | `compare_execution`, execution drift |
+
+Everything in the right-hand modules is **re-exported from `core`**, so `core.diff_campaigns`
+and `core._snapshot_execution_drift` are what callers and tests still say. Two things to know
+before moving anything else:
+
+- A re-export is a **separate binding**. `monkeypatch.setattr(core, "f", ...)` does not change
+  what a function inside `diffing`/`creative`/`missing` calls. Only `core.health_check_cli` is
+  patched that way today, and it stayed in `core.py`.
+- The split modules import `core` **inside** the functions that need it, because `core` imports
+  them at module level and an import back would be a cycle.
 
 Functions worth knowing by name:
 
@@ -278,15 +289,26 @@ which came back as `0` and silently switched off every proactive offer in the pr
 
 ## 5. Infrastructure
 
-### `store.py` (5,096) — SQLite, and Python owns it
+### `store.py` (3,689) + `store_campaigns.py` (1,560) — SQLite, and Python owns it
 
 All SQL lives here. Schema in `_SCHEMA`, indexes in `_INDEXES`, and migration is **additive**:
 `_declared_ddl` / `_add_missing_columns` add what is missing at startup, so an existing database
 upgrades in place without a migration step. Tables belong in `_SCHEMA`, never `_INDEXES` — a
 table declared as an index is created but never migrated.
 
-Sections: campaigns (1116), chunks (2594), assets (2802), metrics (3012), evaluations (3534),
-context events (3970), reconciliations (5019).
+`store_campaigns.py` holds the campaigns table — its listing and filtering, markets and tags,
+and deleting a record with everything keyed to it — and `store` re-exports all of it. What
+remains in `store.py`: the base, chunks, assets, metrics, evaluations, context events,
+commitments, corrections, the computed-facts cache and reconciliations.
+
+The file's `# ──` markers are a guide and **not a grouping**: the span labelled "context events"
+actually runs through commitments, corrections, the facts cache and metric helpers. Check what
+is really in a span before moving it.
+
+Four names are monkeypatched on `store` across the suite — `text_on_file`, `citations`,
+`metric_registry`, `_facts_algorithm_stamp`. Because a re-export is a separate binding, a
+function that moves away from one of those stops seeing the patch. That is why the campaigns
+block, which contains none of them, was the one that moved first.
 
 Helpers to know: `vector_models()` (which model made each vector, tolerating the pre-`space`
 schema), `forget_vector_models()` (provenance must not outlive its vectors),

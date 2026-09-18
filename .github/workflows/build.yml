@@ -223,7 +223,13 @@ jobs:
       # INSTALLS it, on a clean runner, and then requires that the product the installer left
       # behind answers its own self-test — the acceptance criterion §4.1 states and the one
       # thing a build that only compiles cannot check.
+      # A ceiling on every step that RUNS an installer. The first dispatch hung for 99
+      # minutes inside the silent Windows install — most likely the Ollama task, which
+      # downloads and installs a second installer and then pulls 274MB — and would have
+      # burned the job's six-hour limit. A hang that fails in 25 minutes is a result; a hang
+      # that looks like a slow build is not.
       - name: Install the .pkg end to end and verify what it left behind
+        timeout-minutes: 25
         if: runner.os == 'macOS'
         run: |
           # `installer` sends a postinstall's output to /var/log/install.log, not to stdout —
@@ -262,6 +268,7 @@ jobs:
           echo "and wired to Claude Desktop"
 
       - name: A broken bundle must fail the .pkg install, not ship a dead product
+        timeout-minutes: 20
         if: runner.os == 'macOS'
         run: |
           # The other half of D25: an installer that only ever meets a good bundle has never
@@ -319,6 +326,7 @@ jobs:
       # proved the Pascal compiled, not that the gate fires. /VERYSILENT is how it runs
       # unattended; /SUPPRESSMSGBOXES so a modal cannot hang the runner forever.
       - name: Install the Windows installer end to end and verify what it left behind
+        timeout-minutes: 25
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -349,6 +357,7 @@ jobs:
           Write-Host "and wired to Claude Desktop"
 
       - name: A broken bundle must fail the Windows install
+        timeout-minutes: 20
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
