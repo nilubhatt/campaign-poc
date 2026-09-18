@@ -3815,6 +3815,55 @@ def merge_metric(conn, *, provisional: str, into: str) -> None:
     conn.commit()
 
 
+def _widen_markets(conn, markets: list, campaign_id: Optional[str]) -> list:
+    """Every market this campaign counts towards, added to the ones already recorded (§13.5).
+
+    **Through `markets_of`, and every one of them.** A campaign that ran in MX and CO counts
+    towards both, and reading `market or region` alone counted it as zero — the fifth
+    implementation of a question D55 and D88 both record drifting. Folded, so "LATAM" and
+    "latam" cannot satisfy a two-market gate between them; the first spelling seen is the one
+    kept, because it is what somebody typed.
+
+    ONE implementation. It stood character-for-character in `touch_metric` and
+    `touch_correction`, which is D114's point: the parts that DECIDE were unified long ago,
+    and this is the identical half nobody merged — so it is where the sixth implementation
+    would have come from.
+    """
+    if not campaign_id:
+        return markets
+    record = get_campaign(conn, campaign_id) or {}
+    seen = {fold_market(m) for m in markets}
+    for where in markets_of(record):
+        if where and fold_market(where) not in seen:
+            markets.append(where.strip())
+            seen.add(fold_market(where))
+    return markets
+
+
+def _market_scope(markets: Optional[list], alias: str) -> tuple:
+    """`(sql, params)` restricting a count to campaigns in these markets (§13.5).
+
+    The campaign's own market OR region OR anything in its `markets` list — the same question
+    `markets_of` answers, asked in SQL. LIKE on the JSON is deliberate: the list is a JSON
+    array of names and an exact match would miss a multi-market record.
+
+    ONE implementation, for the reason above: `campaigns_that_skipped` and
+    `campaigns_that_skipped_correction` built this same fragment and packed these same
+    parameters, differing only in a table alias — so a change to how a market is matched, and
+    §12.2 changed exactly that, had to land twice or the two answers diverged in silence.
+    """
+    folded = [f for f in {fold_market(m) for m in (markets or [])} if f]
+    if not folded:
+        return "", []
+    clause = " OR ".join(
+        ["LOWER(c.market) = ?", "LOWER(c.region) = ?", "LOWER(c.markets) LIKE ?"] * len(folded))
+    params: list = []
+    for f in folded:
+        params += [f, f, f'%"{f}"%']
+    return (f" AND EXISTS (SELECT 1 FROM campaigns c WHERE c.id = {alias}.campaign_id "
+            f"AND ({clause}))"), params
+
+
 def touch_metric(conn, canonical: str, *, campaign_id: Optional[str] = None) -> None:
     """Record that this measure was seen again — §8.3's graduation gate and §8.5's retirement
     both read these, and recording them from the first write is what stops the history being
@@ -3823,19 +3872,7 @@ def touch_metric(conn, canonical: str, *, campaign_id: Optional[str] = None) -> 
                        "WHERE canonical = ?", (canonical,)).fetchone()
     if not row:
         return
-    markets = json.loads(row["markets"] or "[]")
-    if campaign_id:
-        # Through `markets_of`, and every one of them: a campaign that ran in MX and CO counts
-        # towards both, and reading `market or region` alone counted it as zero — the fifth
-        # implementation of this question, drifting exactly as D55/D88 say they do.
-        record = get_campaign(conn, campaign_id) or {}
-        seen = {fold_market(m) for m in markets}
-        for where in markets_of(record):
-            # Folded, so "LATAM" and "latam" cannot satisfy a two-market gate between them.
-            # The first spelling seen is the one kept, because it is what somebody typed.
-            if where and fold_market(where) not in seen:
-                markets.append(where.strip())
-                seen.add(fold_market(where))
+    markets = _widen_markets(conn, json.loads(row["markets"] or "[]"), campaign_id)
     now = _now()
     conn.execute("UPDATE metric_registry SET first_seen = COALESCE(first_seen, ?), "
                  "last_seen = ?, times_seen = times_seen + 1, markets = ? WHERE canonical = ?",
@@ -4230,13 +4267,13 @@ def merge_correction(conn, *, absorbed: str, into: str) -> None:
     # added up — two numbers maintained by arithmetic drift from the rows they describe.
     rows = conn.execute("SELECT campaign_id, noted_at FROM correction_sightings "
                         "WHERE correction_id = ?", (into,)).fetchall()
+    # §13.5/D114: the THIRD copy of the market-fold loop, found by mutating the shared one
+    # and watching a test that should have felt it stay green. `touch_metric` and
+    # `touch_correction` were the two the row names; a merge re-deriving the same breadth had
+    # a third, which is exactly the argument for there being one.
     markets: list = []
-    seen: set = set()
     for row in rows:
-        for where in markets_of(get_campaign(conn, row["campaign_id"]) or {}):
-            if where and fold_market(where) not in seen:
-                seen.add(fold_market(where))
-                markets.append(where.strip())
+        markets = _widen_markets(conn, markets, row["campaign_id"])
     times = len(rows)
     stamps = [r["noted_at"] for r in rows if r["noted_at"] is not None]
     conn.execute("UPDATE corrections SET times_seen = ?, markets = ?, first_seen = ?, "
@@ -4284,13 +4321,7 @@ def touch_correction(conn, correction_id: str, *, campaign_id: Optional[str] = N
                        (correction_id,)).fetchone()
     if not row:
         return
-    markets = json.loads(row["markets"] or "[]")
-    if campaign_id:
-        seen = {fold_market(m) for m in markets}
-        for where in markets_of(get_campaign(conn, campaign_id) or {}):
-            if where and fold_market(where) not in seen:
-                markets.append(where.strip())
-                seen.add(fold_market(where))
+    markets = _widen_markets(conn, json.loads(row["markets"] or "[]"), campaign_id)
     now = _now()
     conn.execute("UPDATE corrections SET first_seen = COALESCE(first_seen, ?), last_seen = ?, "
                  "times_seen = times_seen + 1, markets = ? WHERE id = ?",
@@ -4367,15 +4398,9 @@ def campaigns_that_skipped_correction(conn, correction_id: str, *, since: Option
            "AND NOT EXISTS (SELECT 1 FROM correction_sightings o "
            "                WHERE o.campaign_id = s.campaign_id AND o.correction_id = ?)")
     params: list = [since, correction_id]
-    folded = [f for f in {fold_market(m) for m in (markets or [])} if f]
-    if folded:
-        clause = " OR ".join(
-            ["LOWER(c.market) = ?", "LOWER(c.region) = ?", "LOWER(c.markets) LIKE ?"]
-            * len(folded))
-        sql += (f" AND EXISTS (SELECT 1 FROM campaigns c WHERE c.id = s.campaign_id "
-                f"AND ({clause}))")
-        for f in folded:
-            params += [f, f, f'%"{f}"%']
+    scope, scope_params = _market_scope(markets, "s")
+    sql += scope
+    params += scope_params
     row = conn.execute(sql, params).fetchone()
     return int(row["n"] or 0)
 
@@ -4757,17 +4782,9 @@ def campaigns_that_skipped(conn, metric: str, *, since: Optional[float],
            "AND NOT EXISTS (SELECT 1 FROM metric_values m "
            "                WHERE m.campaign_id = v.campaign_id AND m.metric = ?)")
     params: list = [since, metric]
-    folded = [f for f in {fold_market(m) for m in (markets or [])} if f]
-    if folded:
-        # The campaign's own market OR region OR anything in its `markets` list — the same
-        # question `markets_of` answers, asked in SQL. LIKE on the JSON is deliberate: the
-        # list is a JSON array of names and an exact match would miss a multi-market record.
-        clause = " OR ".join(
-            ["LOWER(c.market) = ?", "LOWER(c.region) = ?", "LOWER(c.markets) LIKE ?"] * len(folded))
-        sql += (f" AND EXISTS (SELECT 1 FROM campaigns c WHERE c.id = v.campaign_id "
-                f"AND ({clause}))")
-        for f in folded:
-            params += [f, f, f'%"{f}"%']
+    scope, scope_params = _market_scope(markets, "v")
+    sql += scope
+    params += scope_params
     row = conn.execute(sql, params).fetchone()
     return int(row["n"] or 0)
 

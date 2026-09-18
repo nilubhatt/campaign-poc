@@ -40,6 +40,7 @@ import learning
 import metrics
 import notices
 import rulebook
+import scoping
 import store
 import vectorstore
 import version
@@ -1133,35 +1134,23 @@ def _verify_quote(conn, cited: str, segments: list, layer: str, where: str, *,
 # nothing writes to a CITED record while its citations are being verified, so within the
 # block the answer cannot change. A process-lifetime memo would be the staleness §13.2 spent
 # an item removing, one table along.
-# A CONTEXTVAR for the same reason `embedding`'s is: the MCP server runs sync tools on worker
-# threads, so a module global is shared by overlapping tool calls — and interleaved, the
-# nesting logic left a dict behind after both scopes exited, turning a call-scoped memo into
-# the process-lifetime one this pattern exists to avoid.
-_reading_records_once: contextvars.ContextVar = contextvars.ContextVar(
-    "reading_records_once", default=None)
-
-
-@contextlib.contextmanager
-def _each_record_read_once():
-    """Read each cited record at most once for the duration of this block (§13.3/D79)."""
-    if _reading_records_once.get() is not None:
-        yield
-        return
-    token = _reading_records_once.set({})
-    try:
-        yield
-    finally:
-        _reading_records_once.reset(token)
+# §13.5/D114: the same mechanism `embedding`'s memo uses. §13.3 wrote this as a second copy —
+# a ContextVar, a context manager installing a dict only if none is installed, a pass-through
+# reader — and both copies were module globals under a threaded server, so both were shared
+# between overlapping tool calls and both needed the same fix. `scoping` holds it once.
+_scoped_records = scoping.scoped_memo("reading_records_once")
+_each_record_read_once = _scoped_records
 
 
 def _text_on_file(conn, campaign_id: str):
-    """`store.text_on_file`, memoised inside `_each_record_read_once` and nowhere else."""
-    memo = _reading_records_once.get()
-    if memo is None:
-        return store.text_on_file(conn, campaign_id)
-    if campaign_id not in memo:
-        memo[campaign_id] = store.text_on_file(conn, campaign_id)
-    return memo[campaign_id]
+    """`store.text_on_file`, memoised inside `_each_record_read_once` and nowhere else.
+
+    Safe at that scope because nothing writes to a record while the same call is reading it —
+    a save verifies its citations before it writes, and a report is one question about one
+    library at one moment.
+    """
+    return _scoped_records.remembering(
+        campaign_id, lambda: store.text_on_file(conn, campaign_id))
 
 
 def _clean_precedent(conn, value, where: str, *, kind=None) -> Optional[dict]:

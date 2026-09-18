@@ -12,10 +12,8 @@ import math
 import sys
 from typing import Optional
 
-import contextlib
-import contextvars
-
 import config
+import scoping
 
 
 def embed(text: str, timeout: Optional[float] = None) -> list[float]:
@@ -54,37 +52,19 @@ def embed(text: str, timeout: Optional[float] = None) -> list[float]:
 # once each. Against the bundled hash provider that is microseconds; against Ollama it is a
 # network round-trip for a vector that was in hand after the first.
 #
-# SCOPED TO A CALL, not to the process, and that is the whole of what makes it safe. The
-# first version was a process-lifetime LRU keyed on (model, text) — which is sound about
-# vectors, since the same model and the same text give the same one, and wrong about
-# everything else. A vector computed in one call was served in another, so an embedder that
-# went down in between was never noticed: eight tests of partial-failure and outage behaviour
-# failed, and each of them was describing a real thing the product is supposed to report.
+# SCOPED TO A CALL, not to the process, and that is the whole of what makes it safe. An
+# earlier version was a process-lifetime LRU keyed on (model, text) — sound about vectors,
+# since the same model and text give the same one, and wrong about everything else: a vector
+# computed in one call was served in another, so an embedder that went down in between was
+# never noticed. Eight tests of partial-failure and outage behaviour failed, each describing a
+# real thing the product is supposed to report.
 #
-# The waste D90 names is INSIDE one call — `prepare_evaluation` embedding one proposal text
-# four times — so a call is the right scope. Outside a scope this is exactly `embed`.
-# A CONTEXTVAR, not a module global, and the difference is not theoretical: the MCP server
-# runs sync tools on worker threads (`anyio.to_thread.run_sync`), so two overlapping tool
-# calls shared one global. Interleaved, the nesting logic left a non-None dict behind after
-# both scopes exited — and from then on every embed in the process was memoised across calls,
-# which is precisely the process-lifetime cache this was rewritten to remove. `contextvars`
-# is what `anyio` propagates into a worker thread, so each call gets its own.
-_memo: contextvars.ContextVar = contextvars.ContextVar("embedding_memo", default=None)
-
-
-@contextlib.contextmanager
-def each_string_embedded_once():
-    """Embed each distinct string at most once for the duration of this block (§13.3/D90)."""
-    if _memo.get() is not None:
-        # Already inside one. Nesting keeps the outer dict rather than shadowing it, so an
-        # inner block does not throw away what the outer one has already paid for.
-        yield
-        return
-    token = _memo.set({})
-    try:
-        yield
-    finally:
-        _memo.reset(token)
+# §13.5/D114: the MECHANISM is `scoping.scoped_memo`, shared with `core`'s record-read memo,
+# which §13.3 wrote as a second copy of this one. Both were module globals to begin with, both
+# were shared between overlapping tool calls on the server's worker threads, and both needed
+# the same fix — which is D114's argument in miniature.
+_scoped_memo = scoping.scoped_memo("embedding_memo")
+each_string_embedded_once = _scoped_memo
 
 
 def embed_once(text: str, timeout: Optional[float] = None) -> list[float]:
@@ -100,13 +80,8 @@ def embed_once(text: str, timeout: Optional[float] = None) -> list[float]:
     text = (text or "").strip()
     if not text:
         raise ValueError("cannot embed empty text")
-    memo = _memo.get()
-    if memo is None:
-        return embed(text, timeout=timeout)
-    key = (_model_id(), text)
-    if key not in memo:
-        memo[key] = embed(text, timeout=timeout)
-    return list(memo[key])
+    return list(_scoped_memo.remembering(
+        (_model_id(), text), lambda: embed(text, timeout=timeout)))
 
 
 def _model_id() -> str:

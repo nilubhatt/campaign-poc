@@ -3382,10 +3382,44 @@ or a second copy of something that already exists once.
       number `TOOL_TIME_BUDGET_SECONDS` names. `ingest_campaign` already threads a single
       deadline through exactly those three phases — the question was settled and this had
       quietly answered it differently. Both reviewers measured it.
-- [ ] **13.5 The remaining two-copy helpers** — `_newly_eligible`/`graduate`, the offered-once
+- [x] **13.5 The remaining two-copy helpers** — `_newly_eligible`/`graduate`, the offered-once
       flags, `touch_metric`/`touch_correction` (byte-identical market-fold loops) and
       `campaigns_that_skipped`/`campaigns_that_skipped_correction`. "One mechanism" is true of
       the decisions and not of the code under them. *Closes D114.*
+
+      **The five pairs are not the same kind of thing, and the row says so itself** —
+      *"merging them needs a row abstraction over both that is a larger change than either
+      caller"*. So the work was as much judging which is which as deleting code.
+
+      **Byte-identical, and therefore where the next drift comes from.** The market-fold loop
+      in `touch_metric` and `touch_correction` is the same characters in both, down to
+      `seen.add(fold_market(where))` — the fifth implementation of "which markets does this
+      campaign count towards", which is the question D55 and D88 both record drifting. The
+      market-scoping SQL in `campaigns_that_skipped` and its correction twin is the same
+      fragment and the same parameter packing, differing only in a table alias — so §12.2's
+      change to how a market is matched had to land twice or the two answers diverged in
+      silence. Both are now `store._widen_markets` and `store._market_scope`.
+
+      And a THIRD copy of the fold loop that the row does not name, in the merge that
+      re-derives a correction's breadth from the sightings that just moved. It was found by
+      mutating the shared helper and watching a test that should have felt it stay green — it
+      had no test of its own, which is why it had drifted unnoticed. That is the argument for
+      the row, made by the row's own work.
+
+      **The memo mechanism §13.3 wrote twice** is `scoping.scoped_memo` now. Both copies were
+      module globals under a threaded server, both were therefore shared between overlapping
+      tool calls, and both needed the same `contextvars` fix — D114's argument in miniature,
+      inside one item. §13.3 named it as debt owed here rather than writing a third.
+
+      **Left alone, deliberately:** `_newly_eligible`, `graduate` and the offered-once flags.
+      What DECIDES in those is already shared — `learning.gate`, `distinct_briefs`,
+      `subject_markets`, `require_a_person`, the thresholds — and that is the half that
+      drifted, which §12.4 found applying half of its own rule. What remains is a table name,
+      a key column and an offer whose fields are different words for a reader. Merging them
+      needs a per-kind descriptor larger than either caller, putting a layer between two
+      callers and the SQL they each run once: a cost with no drift to prevent. A test pins
+      that the deciding half is shared, so "left alone" stays a judgment rather than an
+      oversight.
 - [ ] **13.7 Is this the same rule?** — D109, re-opened by §13.4 with a measurement rather
       than a guess. The lexical matcher misses a paraphrase sharing no vocabulary, and the
       obvious fix does not work: cosine on the shipped `nomic-embed-text` scores one-rule
