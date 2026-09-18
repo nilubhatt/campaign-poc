@@ -1231,3 +1231,19 @@ def test_ci_does_not_run_a_second_installer_inside_the_silent_install():
     )
     assert ci.count("/TASKS=desktop") >= 2, "only one of the two Windows installs deselects it"
     assert "Provision Ollama" in ci, "nothing provisions Ollama, so the gate cannot pass"
+
+
+def test_an_expected_non_zero_self_test_is_not_the_steps_verdict():
+    """Measured: the Windows broken-bundle step printed its own success line — "refused: the
+    self-test failed and nothing was wired" — and then exited 1.
+
+    `health-check` exits non-zero when a component is down, which is exactly what this step
+    is checking for, and pwsh hands the step its last exit code. So a step whose every
+    assertion passed reported failure, on the strength of a command behaving correctly."""
+    ci = _ci_code()
+    broken = ci.split("A broken bundle must fail the Windows install", 1)[1]
+
+    assert "$global:LASTEXITCODE = 0" in broken, (
+        "the expected non-zero from health-check still becomes the step's exit code"
+    )
+    assert "exit 0" in broken, "the step does not end on a verdict of its own"

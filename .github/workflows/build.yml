@@ -469,13 +469,19 @@ jobs:
           $installed = Join-Path $env:LOCALAPPDATA `
                        'Programs\CampaignIntelligence\campaign-intelligence.exe'
           if (Test-Path $installed) {
+            # `health-check` EXITS 1 when a component is down, which is the whole point here —
+            # and pwsh hands the step its last exit code, so the step failed after printing
+            # its own success line. Cleared deliberately: a non-zero from this call is the
+            # expected result, not the step's verdict.
             & $installed health-check --json > broken.json
+            $global:LASTEXITCODE = 0
             $r = Get-Content broken.json | ConvertFrom-Json
             if ($r.components.visual_search.ok) {
               throw "the corrupt weights were accepted as a working vision model"
             }
           }
           Write-Host "refused: the self-test failed and nothing was wired"
+          exit 0
 
       - name: Verify the packaged product needs no network (Windows)
         if: runner.os == 'Windows'
