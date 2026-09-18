@@ -88,7 +88,14 @@ _STOPWORDS = frozenset((
 # use AI imagery" and "Use AI imagery only with approval" scored 1.0 — the suggester was
 # inverted on precisely the words that invert a rule, and offering "same rule as" there merges
 # a prohibition with its permission.
-_NEGATIONS = frozenset("not no never dont doesnt cant cannot without avoid neither nor".split())
+# §13.7: `nothing`/`none`/`nobody` were missing, and the cost was not a missed refusal but a
+# WRONG one. "Do not schedule anything during Semana Santa." and "Nothing is scheduled during
+# Semana Santa." are one rule; with `nothing` absent the second read as a PERMISSION, so the
+# guard refused the pair outright and `resembles` returned 0.0 — the one rule in the measured
+# set that states a prohibition two ways, thrown away by the check meant to protect it.
+_NEGATIONS = frozenset(
+    "not no never nothing none nobody nowhere dont doesnt didnt isnt arent wasnt werent "
+    "cant cannot wont shouldnt mustnt neednt without avoid neither nor".split())
 # Small numbers written as words. "a single colourway" and "one colourway" are the same
 # instruction, and nothing else in this comparison would ever see that.
 _NUMBER_WORDS = {"one": "1", "single": "1", "sole": "1", "two": "2", "double": "2",
@@ -175,24 +182,36 @@ def _looks_like(conn, text: str, *, exclude: Optional[str] = None) -> Optional[d
         overlap = resembles(mine, _reading(row["text"]))
         if overlap > score:
             best, score = row, overlap
-    # §13.4/D109 was attempted here and REVERTED. The row asks for a semantic fallback so a
-    # paraphrase sharing no vocabulary is noticed, and the measurement says cosine similarity
-    # on the shipped embedder cannot do it. Against `nomic-embed-text`, over five pairs that
-    # ARE one rule and six that are not:
+    # §13.4 and §13.7 both attempted a semantic fallback here and both REVERTED it. The row
+    # asks for one so a paraphrase sharing no vocabulary is noticed; the answer, measured twice
+    # and on three independently-written populations, is that cosine on `nomic-embed-text`
+    # cannot do it — nor the opposite job of REFUSING a bad lexical match, which §13.7 shipped
+    # briefly before the numbers came in. In one table, against this embedder:
     #
-    #     one rule      0.651  0.771  0.872  0.880  0.896
-    #     different     0.378  0.391  0.418  0.446  0.495  0.695
+    #     ONE RULE, said two ways          0.646 ... 0.972
+    #     NOT one rule, same subject       0.763 ... 0.963
     #
-    # The populations OVERLAP — no threshold separates them. Worse, the row's own motivating
-    # pair ("photography before training" / "shoot before the workout") scores 0.771, and a
-    # pair that differs ONLY by negation ("Always show the logo" / "Never show the logo")
-    # scores 0.933: a threshold catching the first fires on the second, which is the
-    # prohibition-merged-with-its-permission that `negated()` exists to prevent. The
-    # instrument measures topical similarity, and two rules about one subject are topically
-    # similar whether or not they say the same thing.
+    # The populations overlap across the whole usable range, so no floor exists in either
+    # direction. The pairs that make it hopeless are the ones that matter most:
     #
-    # So the honest state is that D109 is open with a measurement it did not have, which says
-    # what the next attempt must not be. See the row for where it goes.
+    #     0.963  "…logo in the top left corner…"  /  "…logo in the bottom right corner…"
+    #     0.963  "Seed one colourway per box."    /  "Box one seed per colourway."
+    #     0.881  "…name the product in the first line."  /  "…name the retailer in the first…"
+    #     0.751  "Logo top left."  /  "Keep the logo in the top left corner of every asset."
+    #
+    # The first is a rule against its own opposite, scoring higher than 12 of 14 pairs that
+    # genuinely ARE one rule — and `negated()` cannot catch it, because neither side is phrased
+    # as a prohibition. The second is one rule's words SHUFFLED into nonsense. The fourth is
+    # one rule stated tersely and at length, scoring below every false pair above. Hold the
+    # long side fixed and vary only the short one and the score climbs with its LENGTH —
+    # 0.751, 0.860, 0.864 for three terse statements of the same rule. That is the instrument:
+    # it scores structural and topical similarity, and rule identity is neither.
+    #
+    # §13.7 records "nothing at all" as the answer, which its own row named as a legitimate
+    # outcome. What the next attempt must not be: any single cosine threshold on this embedder,
+    # in either direction. Asking a model the QUESTION is a different instrument and is not
+    # ruled out by any of this; it is also not something the server can do, since the judging
+    # model is on the other side of the protocol.
     return {**best, "how": "wording"} if is_close(score) else None
 
 
@@ -413,19 +432,26 @@ def note(conn, *, text: str, campaign_id: Optional[str], provenance: str) -> dic
             "correction_id": correction_id,
             "text": entry["text"],
             "provenance": provenance.strip(),
-            # §13.4/D109: HOW it was matched, and `basis` because a resemblance is a
-            # reading either way. "These share words" and "a model thinks these mean the same
-            # thing" are different claims, and somebody deciding whether to fold two rules
-            # together needs to know which — only one of them can be checked by looking.
+            # §13.4/D109: HOW it was matched, and `basis` because a resemblance is a reading
+            # either way. "These share words" and "a model thinks these mean the same thing"
+            # are different claims, and somebody deciding whether to fold two rules together
+            # needs to know which — only one of them can be checked by looking. There is one
+            # value today and there is meant to be: §13.7 measured the second claim and could
+            # not make it, so `how` says `wording` because wording is all this reads.
             "looks_like": ({"correction_id": similar["id"], "text": similar["text"],
                             "how": similar["how"], "basis": "heuristic"}
                            if similar else None),
             "what_it_means": (
                 "Recorded as a provisional correction. It is not applied to any brief yet — "
                 "that takes it recurring across markets and somebody confirming it."
+                # No "in what it MEANS rather than in its words" branch. It was written for
+                # §13.4's semantic matcher, that matcher was reverted, and `_looks_like`
+                # returns `wording` unconditionally — so the sentence could never fire and
+                # advertised, in the product's own words, the capability D109 asks for and
+                # §13.7 measured as unbuildable on this embedder. Dead code that describes a
+                # feature is worse than dead code that does nothing: the next reader believes
+                # it.
                 + (f" It closely resembles one already on file"
-                   + (" in what it MEANS rather than in its words"
-                      if similar["how"] == "meaning" else "")
                    + f": “{similar['text']}”. If they "
                    f"are the same rule, say so — a rule stated three ways in three markets "
                    f"counts as three separate rules until somebody folds them together, and "

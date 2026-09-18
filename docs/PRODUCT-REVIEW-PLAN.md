@@ -3440,18 +3440,46 @@ or a second copy of something that already exists once.
       IS `learning.fold_markets` — an extraction adding a copy of the thing it was extracting,
       which `store.markets_of` had a fourth time. The guard that catches the next one scans
       every module for the dedupe EXPRESSION rather than one file for one spelling.
-- [ ] **13.7 Is this the same rule?** — D109, re-opened by §13.4 with a measurement rather
-      than a guess. The lexical matcher misses a paraphrase sharing no vocabulary, and the
-      obvious fix does not work: cosine on the shipped `nomic-embed-text` scores one-rule
-      pairs 0.651–0.896 and different-rule pairs 0.378–0.695 — overlapping — while a pair
-      differing only by NEGATION scores 0.933, so any threshold catching a paraphrase merges
-      a prohibition with its permission. Two things the next attempt must respect, both paid
-      for: it does not belong on the write path (`feedback.py` already moved this pairing into
-      `waiting()`, with measurements), and it needs an instrument that is not a single cosine
-      threshold — asking the model the QUESTION rather than measuring the distance, or a
-      person's answer, or nothing at all. "Nothing at all" is a legitimate outcome: §5.1
-      settled that a wrong suggestion here is worse than none, and this one silently folds two
-      rules into one so neither ever recurs. *Closes D109.*
+- [x] **13.7 Is this the same rule?** — **no semantic matcher was built.** The row's own
+      licensed outcome, "nothing at all", is the outcome — reached with a measurement strong
+      enough to say why rather than only that, and with the part of the ask that turned out to
+      be a lexical defect fixed.
+
+      Measured on three independently-written populations against the shipped
+      `nomic-embed-text`: pairs that ARE one rule score 0.646–0.972, pairs that are NOT one
+      rule on the same subject score 0.763–0.963, and the two are interleaved in the wrong
+      order. The row's own example ("photography before training" / "shoot before the workout")
+      scores 0.793, and any floor admitting it admits seven of eight false pairs — among them
+      "…logo in the top left corner…" against "…in the bottom right corner…" at 0.963 and
+      "Talent is confirmed before the shoot" against "…after the shoot" at 0.960. Each is a
+      rule against its own opposite and neither is catchable by `negated()`, because neither
+      side is phrased as a prohibition. Meanwhile every terse-vs-long statement of one rule
+      scores BELOW the row's own example: hold the long side fixed, vary only the short one,
+      and the score climbs with its LENGTH (0.751, 0.860, 0.864). The instrument measures
+      structural and topical similarity, and rule identity is neither — so it is wrong on both
+      axes at once, which no threshold and no direction repairs.
+
+      Two attempts are recorded against this, both reverted. §13.4 tried a semantic matcher.
+      §13.7 tried the weaker inverse — the embedder used only to REFUSE a lexical match, the
+      way `negated()` refuses — and shipped it before the numbers were in: it refused true
+      pairs at 0.646–0.751 while passing false ones up to 0.963, reintroduced the O(n²) table
+      read `feedback._rule_questions` documents removing (400 corrections, 44s), compared
+      vectors across models without checking provenance, and depended on vectors that no path
+      the product suggests would ever create. Reverted whole.
+
+      What DID ship, because the measurement turned it up: `negated()` listed `not`/`no`/`never`
+      and not `nothing`/`none`/`nobody`, so "Nothing is scheduled during Semana Santa." read as
+      a PERMISSION and scored 0.0 against "Do not schedule anything during Semana Santa." — one
+      rule stated two ways, discarded by the guard written to protect it, with no embedder
+      involved anywhere. It now pairs lexically at 0.60, with prohibition-against-permission
+      still refused at 0.00. And `note`'s dead `how: "meaning"` branch is gone: it advertised
+      "resembles one already on file in what it MEANS rather than in its words", a claim
+      `_looks_like` has never been able to make.
+
+      To revisit needs a DIFFERENT instrument, not a different threshold. Asking a model the
+      question is not ruled out by any of this — but the server cannot ask one, the judging
+      model being on the other side of the protocol, and cosine cannot even generate the
+      candidates, because its top-k fails toward the antonym. *Closes D109.*
 - [x] **13.6 Two gaps that cannot see the record they are about** — `execution_never_checked`
       fired only where briefed creative already existed, so a concluded campaign uploaded as
       text with no assets was invisible to it; and commitment vectors were cached without
