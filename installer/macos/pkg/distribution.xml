@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Campaign Intelligence</title>
+    <organization>com.campaignintelligence</organization>
+    <!-- BOTH domains, and the home one is the point.
+         The product is per-user: it installs into the user's Application Support directory,
+         wires that user's Claude Desktop, and its own installer says "no root needed". A
+         system-only package demanded an admin password for none of that - so a marketer on an
+         IT-managed Mac could not install the .pkg at all, where the tarball worked. The
+         package meant to widen the audience was narrowing it.
+         An earlier version of this comment claimed `enable_currentUserHome` "would put the
+         PAYLOAD in the home directory but still run scripts as root". That is wrong: a
+         home-directory install runs the scripts AS THE USER, without authentication, which
+         removes the console-user guess entirely on the path most people take.
+         The payload still stages rather than landing at its destination, and that is the real
+         reason this is not a plain home-domain package: install.sh copies to $DEST.incoming,
+         gates, and only then swaps - so a failed upgrade leaves the working install untouched
+         (4.1). A payload delivered straight to the destination cannot do that. -->
+    <domains enable_anywhere="false" enable_currentUserHome="true" enable_localSystem="true"/>
+    <!-- arm64 only: the macOS bundle is arm64 (campaign-intelligence-macos-arm64.tar.gz) and
+         the spec sets no target_arch. Allowing an Intel Mac to install let it fail later
+         inside `init` with "could not create the data directory. Check permissions and disk
+         space" - a true sentence about the wrong problem. Installer refuses with the right
+         reason instead. -->
+    <options customize="never" require-scripts="true" hostArchitectures="arm64"/>
+    <!-- macOS 13, the oldest release Claude Desktop supports. -->
+    <volume-check>
+        <allowed-os-versions><os-version min="13.0"/></allowed-os-versions>
+    </volume-check>
+    <choices-outline>
+        <line choice="default"><line choice="com.campaignintelligence.app"/></line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="com.campaignintelligence.app" visible="false">
+        <pkg-ref id="com.campaignintelligence.app"/>
+    </choice>
+    <pkg-ref id="com.campaignintelligence.app" version="0">#app.pkg</pkg-ref>
+</installer-gui-script>

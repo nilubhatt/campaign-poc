@@ -13,6 +13,35 @@ import config
 import store
 
 
+@pytest.fixture(autouse=True)
+def _never_the_real_data_directory(tmp_path, monkeypatch):
+    """§12.2: no test may read the developer's own rulebook.
+
+    `rulebook.overlay_path()` is `config.DATA_DIR / "rulebook.yaml"`, and eighteen tests load
+    the rulebook WITHOUT the `conn` fixture — so `DATA_DIR` was the real
+    `~/campaign-poc-data`. It is empty today, so they passed. The moment anybody does what
+    §12.2 tells them to do and writes a rulebook there, those tests would start failing
+    against a file that has nothing to do with them, and the failure would point at the
+    product rather than at the file.
+
+    Autouse and unconditional: the `conn` fixture already redirects `DATA_DIR`, and this
+    covers every test that does not use it.
+    """
+    # NOT created. Two `test_fetch_weights` tests assert `tmp_path` is empty after a failed
+    # download, and a directory this fixture made would be the thing that "survived". Nothing
+    # needs it to exist: `overlay_path().exists()` is False either way, and the tests that
+    # write an overlay make it themselves.
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data", raising=False)
+    try:
+        import rulebook
+
+        rulebook.load.cache_clear()
+        yield
+        rulebook.load.cache_clear()
+    except ImportError:
+        yield
+
+
 @pytest.fixture
 def conn(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)

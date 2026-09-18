@@ -21,9 +21,13 @@ class _FakeModel:
 def reset_model_cache():
     clip_embed._model = None
     clip_embed._preprocess = None
+    clip_embed._resolution = None   # _load_model populates these; leaking them across
+    clip_embed._load_error = None   # tests makes failures depend on file ordering
     yield
     clip_embed._model = None
     clip_embed._preprocess = None
+    clip_embed._resolution = None
+    clip_embed._load_error = None
 
 
 def test_load_model_is_thread_safe_and_loads_only_once(monkeypatch):

@@ -48,9 +48,18 @@ Check health: `curl http://localhost:8086/healthz` — `vector_backend` should r
   `~/.config/Claude/claude_desktop_config.json`:
   ```json
   { "mcpServers": { "campaign-intelligence": {
-      "command": "/abs/path/campaign-intelligence/campaign-intelligence", "args": ["stdio"] } } }
+      "command": "/abs/path/campaign-intelligence/campaign-intelligence", "args": ["stdio"],
+      "env": { "CAMPAIGN_POC_CLIP_WEIGHTS_PATH": "/abs/path/where/you/put/the/weights" } } } }
   ```
   (Source install: use `.venv/bin/python` + `stdio_server.py` instead.)
+
+  `CAMPAIGN_POC_CLIP_WEIGHTS_PATH` tells the server to load the CLIP weights from disk
+  instead of fetching them by tag from huggingface.co — set it when that host is blocked on
+  your network, or when the weights were supplied out of band. Takes the checkpoint file
+  (`open_clip_model.safetensors` / `open_clip_pytorch_model.bin`) or a folder holding it.
+  A wrong path doesn't stop the server — text search and uploads work regardless; visual
+  similarity is simply off, and the reason is printed at startup (in the client's MCP log
+  for a stdio server, or `clip_weights` in `GET /healthz` when running over HTTP).
 - **Claude Web / cowork:** run bound to `0.0.0.0`, open a tunnel
   (`cloudflared tunnel --url http://localhost:8086`), add `<public-url>/mcp` as a custom connector.
 

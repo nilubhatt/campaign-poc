@@ -55,6 +55,21 @@ def _pack(vec: list[float]) -> bytes:
     return struct.pack(f"{len(vec)}f", *vec)
 
 
+# Every vector space this product writes into (§13.6/D126). ONE list, because
+# `count_unreadable_vectors` iterated its own copy by hand — `("campaign", "asset")` — so the
+# `commitment` space was outside the only check written to notice a vector table this process
+# cannot read. A space added by name in one place and not the other is invisible by default,
+# which is the wrong direction for a check whose whole job is to see what nothing else can.
+SPACES = ("campaign", "asset", "commitment")
+
+# And which of them CLIP fills. Also ONE list: `_default_dim` sized these two by hand and
+# `core.embedding_model_id` named them by hand, so "is this space CLIP's" had two answers that
+# could disagree — a space added to one and not the other would be sized by CLIP and STAMPED
+# with the text embedder's name, making the provenance false for every vector in it. That is
+# the two-implementations-of-one-rule shape D126 was itself filed against.
+CLIP_SPACES = ("asset", "commitment")
+
+
 def _table_names(space: str) -> tuple[str, str]:
     return f"{space}_vectors", f"{space}_vectors_fallback"
 
@@ -63,7 +78,10 @@ def _default_dim(space: str) -> int:
     """Known spaces default their own dimension so callers don't have to remember to pass
     dim= by hand at every call site (review flagged the repeated-magic-number version of
     this as a footgun — one missed dim= and get_many would misread the vector blob)."""
-    return config.CLIP_EMBED_DIM if space == "asset" else config.EMBED_DIM
+    # `commitment` is CLIP's space too (§9.3): a commitment vector is the phrase from the
+    # brief embedded by the SAME model as the photographs, which is the only reason the two
+    # can be compared at all. Sized by the text embedder it would be unstorable.
+    return config.CLIP_EMBED_DIM if space in CLIP_SPACES else config.EMBED_DIM
 
 
 def init(conn: sqlite3.Connection, *, space: str = "campaign", dim: Optional[int] = None) -> None:
@@ -127,6 +145,10 @@ def search(conn: sqlite3.Connection, query_vec: list[float], *, top_k: int = 5,
             (_pack(query_vec), k),
         ).fetchall()
         out = [(r["vector_id"], 1.0 - r["distance"]) for r in rows if r["vector_id"] not in exclude]
+        # §7.2: equal distances come back from the ANN index in whatever order it stored
+        # them, which is not stable across machines or across an insert. Sorting by id within
+        # a tie makes the same library return the same evidence package every time.
+        out.sort(key=lambda t: (-t[1], t[0]))
         return out[:top_k]
 
     # fallback: brute-force cosine
@@ -178,3 +200,24 @@ def delete_many(conn: sqlite3.Connection, vector_ids: list[str], *, space: str =
 
 def backend_name(conn: sqlite3.Connection) -> str:
     return "sqlite-vec" if _try_load_vec(conn) else "python-cosine-fallback"
+
+
+def count_unreadable_vectors(conn) -> int:
+    """Vectors sitting in the table this process does NOT read.
+
+    The two backends store into different tables (`{space}_vectors` via sqlite-vec,
+    `{space}_vectors_fallback` otherwise). A database written where the extension loaded and
+    opened where it does not — a bundle that lost the native library, a copied file, a
+    Python without extension support — has every row flagged embedded and every search
+    returning nothing. That combination is invisible to a coverage count, which is exactly
+    why it is worth asking about explicitly."""
+    live_is_vec = _try_load_vec(conn)
+    stranded = 0
+    for space in SPACES:
+        vec_table, fallback_table = _table_names(space)
+        unread = fallback_table if live_is_vec else vec_table
+        try:
+            stranded += conn.execute(f"SELECT COUNT(*) AS n FROM {unread}").fetchone()["n"]
+        except Exception:
+            continue  # the table may not exist in this database; nothing stranded there
+    return stranded

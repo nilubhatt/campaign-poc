@@ -66,11 +66,22 @@ Node). Edit `%APPDATA%\Claude\claude_desktop_config.json`:
     "campaign-intelligence": {
       "command": "C:\\path\\to\\campaign-poc\\.venv\\Scripts\\python.exe",
       "args": ["C:\\path\\to\\campaign-poc\\stdio_server.py"],
-      "env": { "CAMPAIGN_POC_EMBED_PROVIDER": "ollama" }
+      "env": {
+        "CAMPAIGN_POC_EMBED_PROVIDER": "ollama",
+        "CAMPAIGN_POC_CLIP_WEIGHTS_PATH": "C:\\path\\where\\you\\put\\the\\weights"
+      }
     }
   }
 }
 ```
+
+`CAMPAIGN_POC_CLIP_WEIGHTS_PATH` tells the server to load the CLIP weights from disk
+instead of fetching them by tag from huggingface.co — set it when that host is blocked on
+your network, or when an admin supplied the weights out of band. It takes the checkpoint
+file (`open_clip_model.safetensors` / `open_clip_pytorch_model.bin`) or a folder holding
+it. A wrong path doesn't stop the server — text search and uploads work regardless; visual
+similarity is simply off, and the reason is printed at startup (visible in Claude Desktop's
+MCP log for a stdio server).
 
 Fully quit and reopen Claude Desktop. (Ollama must be running — `-Setup` starts it; it also
 auto-starts at logon after install.) With stdio you don't run `run.ps1` at all for Desktop —
