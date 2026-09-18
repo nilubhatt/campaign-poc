@@ -1167,3 +1167,28 @@ def test_running_the_tests_does_not_put_a_dialog_on_anybodys_screen(tmp_path):
     assert not run(), (
         "running the test suite put a dialog on the screen of whoever ran it"
     )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="pkg scripts are macOS's")
+def test_a_system_install_with_no_gui_session_falls_back_to_who_ran_it(tmp_path):
+    """On a machine with no GUI session — an SSH install, a CI runner, an MDM push —
+    `/dev/console` is owned by root. Refusing there was defensible and wrong: the admin who
+    typed `sudo installer` is a better answer than no answer, and `SUDO_USER` is set by sudo
+    itself so it cannot invent a user who is not there.
+
+    Asserted on the code, because entering the case needs to BE root on somebody's machine."""
+    code = _shell_code(POSTINSTALL)
+
+    assert "SUDO_USER" in code, (
+        "a system install with no console user refuses outright, which is every headless "
+        "install — including the one in this repository's own CI"
+    )
+    console = code.index("/dev/console")
+    sudo_user = code.index("SUDO_USER")
+    assert console < sudo_user, (
+        "SUDO_USER is consulted before the console user, so a real logged-in session loses "
+        "to whoever happened to type sudo"
+    )
+    assert code.index("no home directory to install into") > sudo_user, (
+        "it still refuses before trying the fallback"
+    )

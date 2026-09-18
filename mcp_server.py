@@ -1832,7 +1832,7 @@ def gaps() -> dict:
     missing. The library knows it holds one campaign with measured results, or that no LATAM
     campaign has any; it has never said so unless asked.
 
-    `most_valuable` names the one to fix first. Each gap carries `what` (the fact), 
+    `most_valuable` names the one to fix first. Each gap carries `what` (the fact),
     `why_it_matters` (what it costs), `counts`, and `next_actions` that would close it. An
     empty list means nothing is missing, which is a real and rare answer — do not embroider
     it.

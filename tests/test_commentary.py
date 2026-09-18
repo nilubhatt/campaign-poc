@@ -635,20 +635,27 @@ def test_an_anchor_is_never_guessed_with_false_confidence(tmp_path):
     """A page index from a PDF is exact. A slide number scraped out of a comment part's
     FILENAME is a guess — for the classic format the number is the comment part's ordinal,
     not the slide's — and it was being presented in the same field, with the same confidence,
-    as the exact one."""
+    as the exact one.
+
+    This used to fail on ANY slide anchor, which made it a test of the workaround rather than
+    of the property: a slide resolved correctly through the package relationships would have
+    failed it too, so the test stood in the way of the actual fix. What it asserts now is what
+    it always meant — the number must not come from the filename. `comment1.xml` is wired to
+    slide 3 here, so a scrape answers 1 and only a real resolution answers 3."""
     prs = Presentation()
     for _ in range(3):
         prs.slides.add_slide(prs.slide_layouts[6])
     path = tmp_path / "classic.pptx"
     prs.save(str(path))
-    _add_classic_comment(path, author="Priya Nair", text="A remark.", part_index=1)
+    _add_comment_on_slide(path, author="Priya Nair", text="A remark.",
+                          slide_position=3, part_index=1)
 
     comment = next(c for c in extract.extract_commentary(path)[0] if c["kind"] == "comment")
 
-    assert comment["anchor"] == "deck" or comment["anchor"].startswith("slide"), comment
-    if comment["anchor"].startswith("slide"):
-        pytest.fail("the part filename is not the slide number; say 'deck' rather than "
-                    "naming a slide the comment may not be on")
+    assert comment["anchor"] != "slide 1", (
+        "the anchor is the comment part's filename ordinal, not the slide it is on"
+    )
+    assert comment["anchor"] == "slide 3", comment
 
 
 def test_commentary_can_be_narrowed_to_what_other_people_said(tmp_path, conn):
@@ -825,3 +832,207 @@ def test_annotation_line_endings_are_readable(tmp_path):
     ])
 
     assert extract.extract_commentary(path)[0][0]["text"] == "line one\nline two"
+
+
+# ══ review of 2026-09-18: two author namespaces, one dictionary ═══════════════
+
+def _add_both_comment_formats(path, *, classic_author, modern_author, shared_id="1"):
+    """A deck carrying BOTH comment formats whose author ids collide.
+
+    PowerPoint changed the format, and a deck that has been round-tripped through both
+    versions carries both parts. The ids in `ppt/commentAuthors.xml` and `ppt/authors.xml`
+    are independent namespaces — nothing says a `1` in one is the `1` in the other."""
+    import shutil
+
+    src = str(path) + ".orig"
+    shutil.move(str(path), src)
+    p = 'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"'
+    ns = 'xmlns:p188="http://schemas.microsoft.com/office/powerpoint/2018/8/main"'
+    a = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+
+    classic = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+               f'<p:cmLst {p}><p:cm authorId="{shared_id}" dt="2026-09-04T14:30:00" idx="1">'
+               '<p:pos x="100" y="100"/><p:text>The legacy remark.</p:text>'
+               '</p:cm></p:cmLst>')
+    classic_authors = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                       f'<p:cmAuthorLst {p}><p:cmAuthor id="{shared_id}" '
+                       f'name="{classic_author}" initials="LR" lastIdx="1" clrIdx="0"/>'
+                       '</p:cmAuthorLst>')
+    modern = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              f'<p188:cmLst {ns}>'
+              f'<p188:cm id="9" authorId="{shared_id}" created="2026-09-05T09:00:00.000">'
+              f'<p188:txBody><a:bodyPr {a}/><a:p {a}><a:r><a:t>The modern remark.</a:t>'
+              '</a:r></a:p></p188:txBody></p188:cm></p188:cmLst>')
+    modern_authors = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                      f'<p188:cmAuthorLst {ns}><p188:cmAuthor id="{shared_id}" '
+                      f'name="{modern_author}" initials="MC"/></p188:cmAuthorLst>')
+
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(path, "w") as zout:
+        for item in zin.infolist():
+            zout.writestr(item, zin.read(item.filename))
+        zout.writestr("ppt/comments/comment1.xml", classic)
+        zout.writestr("ppt/commentAuthors.xml", classic_authors)
+        zout.writestr("ppt/modernComments/modernComment_1.xml", modern)
+        zout.writestr("ppt/authors.xml", modern_authors)
+
+
+def test_two_comment_formats_do_not_share_one_author_namespace(tmp_path):
+    """`ppt/authors.xml` (modern) and `ppt/commentAuthors.xml` (classic) were merged into one
+    dictionary keyed on the raw id. The ids are local to their own format, so a deck
+    round-tripped through both PowerPoint versions can carry `1` in each — and the second read
+    silently overwrote the first, attributing a client's words to whoever happened to share a
+    number with them.
+
+    Who said something is not decoration here: it decides whose rule enters the checklist,
+    whose objection is precedent, and whose name a judgment cites."""
+    prs = Presentation()
+    prs.slides.add_slide(prs.slide_layouts[6])
+    path = tmp_path / "both.pptx"
+    prs.save(str(path))
+    _add_both_comment_formats(path, classic_author="Legacy Reviewer",
+                              modern_author="Modern Client")
+
+    comments = {c["text"]: c["author"]
+                for c in extract.extract_commentary(path)[0] if c["kind"] == "comment"}
+
+    assert comments["The legacy remark."] == "Legacy Reviewer", comments
+    assert comments["The modern remark."] == "Modern Client", (
+        "a modern comment was attributed to the classic author who shares its id"
+    )
+
+
+def _add_comment_on_slide(path, *, author, text, slide_position, part_index=1):
+    """A classic comment WIRED to a slide the way PowerPoint wires it — a relationship in that
+    slide's own `.rels`. `part_index` is deliberately independent of `slide_position`, because
+    the whole question is whether the slide is resolved or scraped off the filename."""
+    import shutil
+    import xml.etree.ElementTree as ET
+
+    src = str(path) + ".orig"
+    shutil.move(str(path), src)
+    p = 'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"'
+    comment_xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   f'<p:cmLst {p}><p:cm authorId="1" dt="2026-09-04T14:30:00" idx="1">'
+                   f'<p:pos x="100" y="100"/><p:text>{text}</p:text></p:cm></p:cmLst>')
+    authors_xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   f'<p:cmAuthorLst {p}><p:cmAuthor id="1" name="{author}" initials="PN" '
+                   'lastIdx="1" clrIdx="0"/></p:cmAuthorLst>')
+    part = f"ppt/comments/comment{part_index}.xml"
+
+    with zipfile.ZipFile(src) as zin:
+        items = {i.filename: zin.read(i.filename) for i in zin.infolist()}
+        infos = list(zin.infolist())
+
+    # Which part file is the Nth slide in READING order, resolved the way the product does.
+    rels = ET.fromstring(items["ppt/_rels/presentation.xml.rels"])
+    by_id = {n.get("Id"): n.get("Target") for n in rels}
+    pres = ET.fromstring(items["ppt/presentation.xml"])
+    order = [by_id[n.get("{http://schemas.openxmlformats.org/officeDocument/2006/"
+                         "relationships}id")]
+             for lst in pres.iter("{http://schemas.openxmlformats.org/presentationml/"
+                                  "2006/main}sldIdLst") for n in lst]
+    target_slide = "ppt/" + order[slide_position - 1].lstrip("./")
+    rels_name = (f"{target_slide.rsplit('/', 1)[0]}/_rels/"
+                 f"{target_slide.rsplit('/', 1)[1]}.rels")
+
+    ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+    slide_rels = ET.fromstring(items[rels_name])
+    ET.SubElement(slide_rels, f"{{{ns}}}Relationship", {
+        "Id": "rIdComment99",
+        "Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments",
+        "Target": f"../comments/comment{part_index}.xml"})
+    items[rels_name] = ET.tostring(slide_rels, encoding="utf-8", xml_declaration=True)
+
+    with zipfile.ZipFile(path, "w") as zout:
+        for info in infos:
+            zout.writestr(info, items[info.filename])
+        zout.writestr(part, comment_xml)
+        zout.writestr("ppt/commentAuthors.xml", authors_xml)
+
+
+def test_a_comment_is_anchored_to_the_slide_the_package_says_it_is_on(tmp_path):
+    """§2.5 recorded every PPTX comment as `slide: None`, `anchor: "deck"`, and the reasoning
+    was sound as far as it went — the number in `commentN.xml` is the comment PART's ordinal,
+    so presenting it as a slide number would be a guess dressed as the exact page index a PDF
+    gives. What it stopped short of was doing the resolution properly: the slide that OWNS a
+    comment part is written down, in that slide's own relationships.
+
+    The fixture puts `comment1.xml` on slide **3** precisely so a filename scrape cannot pass:
+    that would answer 1."""
+    prs = Presentation()
+    for _ in range(3):
+        prs.slides.add_slide(prs.slide_layouts[6])
+    path = tmp_path / "anchored.pptx"
+    prs.save(str(path))
+    _add_comment_on_slide(path, author="Priya Nair", text="Lose the third colourway.",
+                          slide_position=3, part_index=1)
+
+    comment = next(c for c in extract.extract_commentary(path)[0] if c["kind"] == "comment")
+
+    assert comment["slide"] == 3, (
+        f"the part's ordinal is 1 and the slide is 3; got {comment['slide']}"
+    )
+    assert comment["anchor"] == "slide 3", comment
+
+
+def test_a_comment_whose_slide_cannot_be_resolved_still_says_deck(tmp_path):
+    """The half worth keeping from the original decision. A comment part no slide claims —
+    a malformed package, or a format whose relationship this does not understand — has no
+    slide anyone can name, and naming one anyway is the silently-wrong anchor §2.5 refused."""
+    prs = Presentation()
+    for _ in range(3):
+        prs.slides.add_slide(prs.slide_layouts[6])
+    path = tmp_path / "orphan.pptx"
+    prs.save(str(path))
+    _add_classic_comment(path, author="Priya Nair", text="A remark.", part_index=1)
+
+    comment = next(c for c in extract.extract_commentary(path)[0] if c["kind"] == "comment")
+
+    assert comment["slide"] is None
+    assert comment["anchor"] == "deck", comment
+
+
+def test_the_slide_number_is_reading_order_not_the_filename(tmp_path):
+    """`slide11.xml` is not necessarily the eleventh slide. The file number is an id; the
+    ORDER lives in `presentation.xml`'s `sldIdLst`, and a deck whose slides have been
+    rearranged keeps its original filenames. Sorting the filenames would be the same class of
+    guess the anchor resolution exists to replace, just a tidier-looking one — so this deck is
+    saved in one order and then REVERSED, and the comment sits on the part that is now first."""
+    import xml.etree.ElementTree as ET
+
+    prs = Presentation()
+    for _ in range(3):
+        prs.slides.add_slide(prs.slide_layouts[6])
+    path = tmp_path / "reordered.pptx"
+    prs.save(str(path))
+
+    # Reverse the presentation's slide list, leaving every part name untouched.
+    src = str(path) + ".reorder"
+    import shutil
+    shutil.move(str(path), src)
+    pml = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+    with zipfile.ZipFile(src) as zin:
+        items = {i.filename: zin.read(i.filename) for i in zin.infolist()}
+        infos = list(zin.infolist())
+    pres = ET.fromstring(items["ppt/presentation.xml"])
+    for lst in pres.iter(f"{pml}sldIdLst"):
+        kids = list(lst)
+        for kid in kids:
+            lst.remove(kid)
+        for kid in reversed(kids):
+            lst.append(kid)
+    items["ppt/presentation.xml"] = ET.tostring(pres, encoding="utf-8", xml_declaration=True)
+    with zipfile.ZipFile(path, "w") as zout:
+        for info in infos:
+            zout.writestr(info, items[info.filename])
+
+    # slide3.xml is now the FIRST slide a reader sees; the comment goes there.
+    _add_comment_on_slide(path, author="Priya Nair", text="A remark.",
+                          slide_position=1, part_index=1)
+
+    comment = next(c for c in extract.extract_commentary(path)[0] if c["kind"] == "comment")
+
+    assert comment["slide"] == 1, (
+        f"the comment is on the first slide a reader sees, held in slide3.xml; "
+        f"got {comment['slide']} — the filenames were sorted rather than the order read"
+    )

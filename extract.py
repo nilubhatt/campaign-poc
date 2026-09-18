@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import mimetypes
 from pathlib import Path
+from typing import Optional
 
 import config
 import notices
@@ -410,8 +411,9 @@ def _read_pptx_comments(path: Path, warnings: list[dict]) -> list[dict]:
     with zipfile.ZipFile(path) as z:
         names = set(z.namelist())
         authors = _pptx_authors(z, names, warnings)
+        on_slide = _pptx_comment_slides(z, names)
         for name in sorted(n for n in names
-                           if n.startswith(("ppt/comments/", "ppt/modernComments/"))
+                           if n.startswith(tuple(_COMMENT_PARTS.values()))
                            and n.endswith(".xml")):
             try:
                 root = ET.fromstring(z.read(name))
@@ -421,12 +423,14 @@ def _read_pptx_comments(path: Path, warnings: list[dict]) -> list[dict]:
                     detail=f"{name}: comments could not be parsed ({exc}); skipped"))
                 continue
             for node in root:
-                items.extend(_comment_and_replies(node, authors, name))
+                items.extend(_comment_and_replies(node, authors, name,
+                                                  slide=on_slide.get(name)))
     return items
 
 
-def _comment_and_replies(node, authors: dict[str, str], part: str,
-                         parent_id: str | None = None) -> list[dict]:
+def _comment_and_replies(node, authors: dict[str, dict[str, str]], part: str,
+                         parent_id: str | None = None,
+                         slide: Optional[int] = None) -> list[dict]:
     """One item per utterance, never one per thread.
 
     A tracked thread on a returned deck is typically a client's remark and the agency's
@@ -442,16 +446,17 @@ def _comment_and_replies(node, authors: dict[str, str], part: str,
         items.append({
             "kind": "comment",
             "text": text,
-            "author": authors.get(node.get("authorId")),
+            "author": authors.get(_comment_format(part), {}).get(node.get("authorId")),
             "date": (node.get("created") or node.get("dt") or "").strip() or None,
-            "slide": None,
-            "anchor": _comment_anchor(part),
+            "slide": slide,
+            "anchor": _comment_anchor(part, slide),
             **({"reply_to": parent_id} if parent_id else {}),
         })
     for child in node.iter():
         if child is node or not child.tag.endswith("}reply"):
             continue
-        items.extend(_comment_and_replies(child, authors, part, parent_id=ident))
+        items.extend(_comment_and_replies(child, authors, part, parent_id=ident,
+                                          slide=slide))
     return items
 
 
@@ -473,11 +478,33 @@ def _own_text(node) -> str:
     return " ".join(parts).strip()
 
 
-def _pptx_authors(z, names: set[str], warnings: list[dict]) -> dict[str, str]:
+# Which author list belongs to which comment format. PowerPoint changed the format, and a
+# deck round-tripped through both versions carries both parts — with author ids that are
+# LOCAL TO EACH. Merged into one dictionary keyed on the raw id, a `1` in one namespace
+# silently overwrote the `1` in the other, and a client's words came back under whoever
+# happened to share their number. Who said something decides whose rule enters the checklist
+# and whose name a judgment cites, so this is not a cosmetic mix-up.
+_AUTHOR_PARTS = {"modern": "ppt/authors.xml", "classic": "ppt/commentAuthors.xml"}
+# The comment parts, by the same two names, so nothing has to re-derive the pairing. ONE
+# mapping: a second place deciding which authors a part uses is the shape this codebase keeps
+# being bitten by.
+_COMMENT_PARTS = {"modern": "ppt/modernComments/", "classic": "ppt/comments/"}
+
+
+def _comment_format(part: str) -> str:
+    """Which format a comment part is in, by the folder PowerPoint puts it in."""
+    for fmt, prefix in _COMMENT_PARTS.items():
+        if part.startswith(prefix):
+            return fmt
+    return "classic"
+
+
+def _pptx_authors(z, names: set[str], warnings: list[dict]) -> dict[str, dict[str, str]]:
+    """`{format: {author_id: name}}` — one namespace per format, never merged."""
     import xml.etree.ElementTree as ET
 
-    authors: dict[str, str] = {}
-    for part in ("ppt/authors.xml", "ppt/commentAuthors.xml"):
+    authors: dict[str, dict[str, str]] = {fmt: {} for fmt in _AUTHOR_PARTS}
+    for fmt, part in _AUTHOR_PARTS.items():
         if part not in names:
             continue
         try:
@@ -491,17 +518,99 @@ def _pptx_authors(z, names: set[str], warnings: list[dict]) -> dict[str, str]:
         for node in root:
             ident, name = node.get("id"), node.get("name")
             if ident and name:
-                authors[ident] = name
+                authors[fmt][ident] = name
     return authors
 
 
-def _comment_anchor(name: str) -> str:
-    """"deck", not a guessed slide.
+_RELS_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+_OFFICE_REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+_PML_NS = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
 
-    A PDF page index is exact. The number in `commentN.xml` is the comment PART's ordinal,
-    not the slide's — and it was being written into the same `anchor` field, read with the
-    same confidence as the exact one. An anchor that is sometimes silently wrong is worse
-    than one that admits it does not know: resolving a comment part to its slide needs the
-    package relationships, which is work item 2.5 does not need to do to be correct.
+
+def _resolve(base: str, target: str) -> str:
+    """A relationship Target, resolved against the part that declared it.
+
+    Targets are relative — `../comments/comment1.xml` from inside `ppt/slides/` — so they have
+    to be walked rather than concatenated, or the key never matches the part name.
     """
-    return "deck"
+    parts = base.split("/")[:-1]
+    for step in target.replace("\\", "/").split("/"):
+        if step in ("", "."):
+            continue
+        if step == "..":
+            if parts:
+                parts.pop()
+        else:
+            parts.append(step)
+    return "/".join(parts)
+
+
+def _slide_order(z, names: set[str]) -> list[str]:
+    """The slide parts in the order a reader sees them, which is what "slide 3" means.
+
+    `slide11.xml` is not necessarily the eleventh slide: the file number is an id, and the
+    ORDER lives in `presentation.xml`'s `sldIdLst` resolved through the presentation's own
+    relationships. Sorting the filenames instead would be the same class of guess this
+    function exists to replace, just a tidier-looking one.
+    """
+    import xml.etree.ElementTree as ET
+
+    rels_part = "ppt/_rels/presentation.xml.rels"
+    if "ppt/presentation.xml" not in names or rels_part not in names:
+        return []
+    try:
+        rels = {node.get("Id"): node.get("Target")
+                for node in ET.fromstring(z.read(rels_part))}
+        root = ET.fromstring(z.read("ppt/presentation.xml"))
+    except ET.ParseError:
+        return []
+    ordered = []
+    for lst in root.iter(f"{_PML_NS}sldIdLst"):
+        for node in lst:
+            target = rels.get(node.get(f"{_OFFICE_REL}id"))
+            if target:
+                ordered.append(_resolve("ppt/presentation.xml", target))
+    return ordered
+
+
+def _pptx_comment_slides(z, names: set[str]) -> dict[str, int]:
+    """`{comment part: slide number}` — resolved through the package, never scraped.
+
+    §2.5 recorded every comment as `slide: None`, `anchor: "deck"`, and the reasoning was
+    sound as far as it went: the number in `commentN.xml` is the comment PART's ordinal, and
+    presenting it as a slide number would be a guess wearing the same clothes as the exact
+    page index a PDF gives. What it stopped short of was doing the resolution properly — the
+    slide that OWNS a comment part is written down, in that slide's own relationships.
+
+    Unresolved parts are simply absent, and the caller falls back to "deck". A comment whose
+    slide genuinely cannot be determined still says so rather than naming one.
+    """
+    import xml.etree.ElementTree as ET
+
+    owners: dict[str, int] = {}
+    for position, slide_part in enumerate(_slide_order(z, names), start=1):
+        folder, _, filename = slide_part.rpartition("/")
+        rels_part = f"{folder}/_rels/{filename}.rels"
+        if rels_part not in names:
+            continue
+        try:
+            rels = ET.fromstring(z.read(rels_part))
+        except ET.ParseError:
+            continue
+        for node in rels:
+            target = node.get("Target") or ""
+            resolved = _resolve(slide_part, target)
+            if resolved.startswith(tuple(_COMMENT_PARTS.values())):
+                owners[resolved] = position
+    return owners
+
+
+def _comment_anchor(name: str, slide: Optional[int]) -> str:
+    """The slide it is on, once the package has been asked — otherwise "deck".
+
+    A PDF page index is exact, and this now is too: it comes from the slide's own
+    relationships rather than from the comment part's filename. Where the relationship is
+    missing or unreadable the answer stays "deck", because an anchor that is sometimes
+    silently wrong is worse than one that admits it does not know.
+    """
+    return f"slide {slide}" if slide else "deck"

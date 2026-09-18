@@ -439,7 +439,7 @@ def test_two_warnings_with_different_actions_do_not_fold_into_one():
     one's action and a count of two."""
     import notices
 
-    first = notices.notice("indexing_incomplete", detail="a", affects="same", 
+    first = notices.notice("indexing_incomplete", detail="a", affects="same",
                            next_actions=actions.to_finish_indexing("camp_1"))
     second = notices.notice("indexing_incomplete", detail="b", affects="same",
                             next_actions=actions.to_finish_indexing("camp_2"))

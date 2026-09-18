@@ -226,7 +226,17 @@ jobs:
       - name: Install the .pkg end to end and verify what it left behind
         if: runner.os == 'macOS'
         run: |
+          # `installer` sends a postinstall's output to /var/log/install.log, not to stdout —
+          # so a failure here arrived as "an error occurred while running scripts" and nothing
+          # else. A red build that says nothing is the same defect this product was built
+          # against, in its own CI. Dump the log whichever way it goes.
+          set +e
           sudo installer -pkg CampaignIntelligence.pkg -target / -verbose
+          status=$?
+          set -e
+          echo "--- postinstall output (/var/log/install.log) ---"
+          sudo tail -n 120 /var/log/install.log || true
+          [ "$status" -eq 0 ] || { echo "installer exited $status" >&2; exit "$status"; }
           dest="$HOME/Library/Application Support/CampaignIntelligence"
           test -x "$dest/campaign-intelligence" \
             || { echo "the package installed nothing runnable at $dest" >&2; exit 1; }
@@ -271,6 +281,11 @@ jobs:
           status=$?
           set -e
           printf '%s\n' "$log"
+          # The gate's own words live in the install log, not in `installer`'s output.
+          echo "--- postinstall output (/var/log/install.log) ---"
+          gate=$(sudo tail -n 120 /var/log/install.log 2>/dev/null || true)
+          printf '%s\n' "$gate"
+          log="$log $gate"
           if [ "$status" -eq 0 ]; then
             echo "the installer accepted a bundle with corrupt weights" >&2
             exit 1

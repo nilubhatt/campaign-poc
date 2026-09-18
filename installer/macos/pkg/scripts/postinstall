@@ -49,10 +49,18 @@ if [ "$(id -u)" -ne 0 ]; then
     target_home="$HOME"
     as_the_user=(env)
 else
-    target_user="${CAMPAIGN_POC_PKG_USER:-$(stat -f "%Su" /dev/console)}"
+    # `/dev/console` first, then who invoked `sudo`. On a machine with no GUI session — an
+    # SSH install, a CI runner, an MDM push — the console is owned by root, and the admin who
+    # typed `sudo installer` is the better answer than refusing. `SUDO_USER` is set by sudo
+    # itself and is empty when there was no sudo, so it cannot invent a user that is not there.
+    target_user="${CAMPAIGN_POC_PKG_USER:-$(stat -f "%Su" /dev/console 2>/dev/null)}"
     if [ -z "$target_user" ] || [ "$target_user" = "root" ]; then
-        echo "This package was installed for the whole system with nobody logged in, so" >&2
-        echo "there is no home directory to install into and no Claude Desktop to wire." >&2
+        target_user="${SUDO_USER:-}"
+    fi
+    if [ -z "$target_user" ] || [ "$target_user" = "root" ]; then
+        echo "This package was installed for the whole system with nobody logged in and no" >&2
+        echo "sudo user to fall back to, so there is no home directory to install into and" >&2
+        echo "no Claude Desktop to wire." >&2
         echo "Log in as the person who will use it and install again, choosing “Install" >&2
         echo "for me only”." >&2
         exit 1
