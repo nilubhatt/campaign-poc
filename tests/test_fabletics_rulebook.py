@@ -242,3 +242,53 @@ def test_a_build_that_ships_no_customer_rulebook_stays_generic(tmp_path):
 
     assert not written.exists()
     assert "Installed the rulebook shipped" not in said
+
+
+# ── the rules actually reaching a judgment, which is the only point of shipping them ──
+
+def test_the_guardrails_reach_an_evaluation(conn):
+    """A rulebook that loads and is never applied is the state D108 describes, and it is
+    invisible from the file itself. This is the whole point of shipping the content: a brief is
+    judged against these rules, outside the similarity path, every time."""
+    import core
+
+    _as_the_customers(conn)
+
+    prepared = core.prepare_evaluation(
+        conn, subject_title="Bogota store opening", market="Peru",
+        proposal_text="A six-week push with creators in Lima, using trending audio.")
+
+    # The `rulebook` block the package actually carries, not a repr match with an `or` in it.
+    book = prepared["rulebook"]
+
+    assert book["rules_applied"] == 13, book
+    assert book["scorecard"] == 6, book
+    assert book["overlay"] == "fabletics-2026.09", book
+    assert book["version"] == "core-1.0+fabletics-2026.09", (
+        "the judgment does not say which rulebook it was made under — the stamp is the only "
+        "thing that tells two rulebooks apart afterwards"
+    )
+    assert book["basis"] == "computed"
+
+
+def test_the_standing_corrections_reach_a_judgment(conn):
+    """Ten corrections with provenance, declared rather than inferred — so they skip the
+    counting gate and not the person. Stored-and-never-applied is what D108 was reopened for."""
+    import core
+
+    _as_the_customers(conn)
+    core.load_declared_corrections(conn, confirmed_by="R. Vega")
+
+    prepared = core.prepare_evaluation(
+        conn, subject_title="Bogota store opening", market="Peru",
+        proposal_text="A six-week push with creators in Lima.")
+
+    standing = prepared["standing_corrections"]["standing"]
+
+    assert standing, (
+        f"none of them reached the judgment: "
+        f"{prepared['standing_corrections']['what_it_means']}"
+    )
+    # Seven of the ten carry no market, and a house rule applies everywhere rather than
+    # nowhere — the exact inversion D108's own fix shipped.
+    assert len(standing) >= 7, f"only {len(standing)} of ten applied in Peru"
