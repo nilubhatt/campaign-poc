@@ -1291,3 +1291,23 @@ def test_ollama_is_looked_for_where_it_actually_lives(installer):
     assert where < code.index("command -v ollama"), (
         "PATH is widened after the check that needs it"
     )
+
+
+def test_the_windows_checks_agree_on_where_the_unpacked_binary_is():
+    """Two steps run the unpacked Windows binary and they disagreed about its path. The zip is
+    built with `Compress-Archive -Path dist/campaign-intelligence/*` — the `/*` puts the
+    CONTENTS in the archive rather than a top-level folder — so expanding gives the exe
+    directly. The weights step used that; the offline step had an extra directory and could
+    never have run.
+
+    It went unnoticed for as long as it did because the job never got that far: the install
+    step before it hung. A check that cannot run is not a check, and two spellings of one path
+    is the same two-implementations defect this codebase keeps finding, in YAML."""
+    ci = _ci_code()
+    runs = re.findall(r"_verify\\+[A-Za-z\\-]*campaign-intelligence(?:\.exe)?", ci)
+    windows = {r for r in runs if "\\" in r}
+
+    assert windows, "nothing runs the unpacked Windows binary"
+    assert windows == {"_verify\\campaign-intelligence.exe"}, (
+        f"the Windows steps disagree about where the unpacked binary is: {sorted(windows)}"
+    )

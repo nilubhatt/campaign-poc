@@ -237,14 +237,21 @@ jobs:
         timeout-minutes: 15
         run: |
           brew install ollama
-          (ollama serve >/tmp/ollama.log 2>&1 &)
+          # `brew services`, not a backgrounded `ollama serve`. A process started with `&` in
+          # one step does not reliably survive into the next one, and the install two steps
+          # later found nothing listening: "FAIL text_search: ollama did not answer within 3s",
+          # after `health-check --wait 60` had retried for a minute. A launchd service outlives
+          # the step that started it.
+          brew services start ollama
           # A plain wait loop: `A && break || sleep` reads as if-then-else and is not one.
-          for _ in $(seq 1 30); do
+          for _ in $(seq 1 45); do
             if curl -sf http://localhost:11434/api/tags >/dev/null; then
               break
             fi
             sleep 2
           done
+          curl -sf http://localhost:11434/api/tags >/dev/null \
+            || { echo "ollama never came up, so the gate cannot pass" >&2; exit 1; }
           ollama pull nomic-embed-text
           ollama list
 
@@ -261,6 +268,9 @@ jobs:
           # so a failure here arrived as "an error occurred while running scripts" and nothing
           # else. A red build that says nothing is the same defect this product was built
           # against, in its own CI. Dump the log whichever way it goes.
+          curl -sf http://localhost:11434/api/tags >/dev/null \
+            || { echo "ollama is not answering BEFORE the install — the gate will refuse it "\
+                      "and that is the runner's fault, not the product's" >&2; exit 1; }
           set +e
           sudo installer -pkg CampaignIntelligence.pkg -target / -verbose
           status=$?
@@ -507,8 +517,13 @@ jobs:
           # call itself, before the line below could clear anything.
           $ErrorActionPreference = 'Continue'
           $PSNativeCommandUseErrorActionPreference = $false
-          & _verify\campaign-intelligence\campaign-intelligence.exe health-check --json `
-            > offline.json
+          # `_verify\campaign-intelligence.exe`, one level up from where this used to look.
+          # The Windows zip is built with `Compress-Archive -Path dist/campaign-intelligence/*`
+          # — the `/*` puts the CONTENTS in the archive, not a top-level folder — so expanding
+          # gives the exe directly. The weights step three above has always used that path;
+          # this one had an extra directory in it and could never have run. It went unnoticed
+          # because the job had never got this far: the install step before it hung.
+          & _verify\campaign-intelligence.exe health-check --json > offline.json
           $global:LASTEXITCODE = 0
           $report = Get-Content offline.json | ConvertFrom-Json
           if (-not $report.components.visual_search.ok) {
