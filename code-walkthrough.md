@@ -4,8 +4,7 @@
 > [`design.md`](design.md) first for *why* it is shaped this way; this document is *where
 > everything is*. [`README.md`](README.md) covers installing and running it.
 
-**31,147 lines of Python across 37 modules, and 42,814 lines of tests across 105 test
-files.** The test-to-code ratio is not an accident: almost every rule described below is
+**37 modules of product code and 106 test files — more lines of test than of product.** The test-to-code ratio is not an accident: almost every rule described below is
 pinned by a test that was written to fail first.
 
 ---
@@ -15,20 +14,20 @@ pinned by a test that was written to fail first.
 ```mermaid
 flowchart TB
     subgraph entry["Entry points"]
-        main["main.py<br/><i>CLI, 278</i>"]
-        stdio["stdio_server.py<br/><i>53</i>"]
-        http["http_app.py<br/><i>114</i>"]
-        auth["auth.py<br/><i>91</i>"]
+        main["main.py<br/><i>CLI</i>"]
+        stdio["stdio_server.py"]
+        http["http_app.py"]
+        auth["auth.py"]
     end
     subgraph api["Public API"]
-        mcp["mcp_server.py<br/><i>65 tools, 2557</i>"]
-        enums["enums.py<br/><i>forgiving input, 302</i>"]
+        mcp["mcp_server.py<br/><i>65 tools</i>"]
+        enums["enums.py<br/><i>forgiving input</i>"]
     end
     subgraph orch["Orchestration"]
-        core["core.py<br/><i>7,392</i>"]
-        split["diffing · creative<br/>missing<br/><i>3,489</i>"]
-        actions["actions.py<br/><i>offers, 435</i>"]
-        notices["notices.py<br/><i>warnings, 401</i>"]
+        core["core.py"]
+        split["diffing · creative<br/>missing"]
+        actions["actions.py<br/><i>offers</i>"]
+        notices["notices.py<br/><i>warnings</i>"]
     end
     subgraph dom["Domain"]
         facts["facts · rulebook"]
@@ -37,10 +36,10 @@ flowchart TB
         judge["agreement · replay<br/>identity · people · feedback"]
     end
     subgraph infra["Infrastructure"]
-        store["store.py + store_campaigns<br/><i>5,249</i>"]
-        vec["vectorstore.py<br/><i>223</i>"]
+        store["store.py<br/>store_campaigns"]
+        vec["vectorstore.py"]
         emb["embedding · clip_embed<br/>images · chunking"]
-        ext["extract.py<br/><i>PDF/PPTX, 507</i>"]
+        ext["extract.py<br/><i>PDF/PPTX</i>"]
         cfg["config · version · scoping"]
     end
     entry --> api --> orch --> dom
@@ -52,7 +51,7 @@ flowchart TB
 
 ## 1. Entry points
 
-### `main.py` (278) — the packaged binary's front door
+### `main.py` — the packaged binary's front door
 
 One `argparse` dispatcher. Every subcommand exists because somebody needed it on a machine
 where something was broken.
@@ -73,13 +72,13 @@ where something was broken.
 frozen binary originally did not, and every installed copy paid a 60-second model load inside
 the first image tool call — the transport timeout the product review opened with.
 
-### `stdio_server.py` (53) and `http_app.py` (114)
+### `stdio_server.py` and `http_app.py`
 
 Two transports, one tool surface. `http_app` takes MCPServer's own Streamable HTTP app and
 bolts on `POST /upload` (a side channel for files too big for a tool argument, returns an
 `asset_id`) and `GET /healthz` (liveness plus which backends are live).
 
-### `auth.py` (91)
+### `auth.py`
 
 Pluggable auth for the HTTP surface. Off by default for local use; the seam exists so the
 hosted version does not need a different server.
@@ -88,7 +87,7 @@ hosted version does not need a different server.
 
 ## 2. The public API
 
-### `mcp_server.py` (2,557) — 65 tools
+### `mcp_server.py` — 65 tools
 
 Every tool is a typed Python function with a docstring Claude reads. This file contains **no
 business logic** — each tool validates, normalises, calls `core`, and returns. The rule is
@@ -113,7 +112,7 @@ Tools by area:
 `_catch_value_errors` is the one piece of machinery: a `ValueError` raised anywhere below
 becomes a readable message rather than "Error executing tool" with the reason discarded.
 
-### `enums.py` (302) — forgiving input, teaching errors
+### `enums.py` — forgiving input, teaching errors
 
 Three layers, because they are three different claims:
 
@@ -136,7 +135,7 @@ cannot then be used to search for itself is a trap rather than a kindness.
 
 ## 3. Orchestration
 
-### `core.py` (7,392) — the biggest file, and where the work happens
+### `core.py` — the biggest file, and where the work happens
 
 Navigate it by its section markers:
 
@@ -178,7 +177,7 @@ Functions worth knowing by name:
 - **`gaps()`** — opens one read scope for the whole report so the same record is not re-read
   by each part.
 
-### `actions.py` (435) — what to offer next
+### `actions.py` — what to offer next
 
 An **offer** is a prefilled tool call the user can accept in one step. `action()` drops
 arguments whose value is unknown rather than sending them blank, and `needs` lists what the
@@ -189,7 +188,7 @@ prefilled arguments are enough.
 rather than tuples, because a prefilled argument can be a list, and a tuple containing a list
 is unhashable — which crashed de-duplication rather than de-duplicating.
 
-### `notices.py` (401) — warnings with a shape
+### `notices.py` — warnings with a shape
 
 One field per reader: `detail` (what happened), `affects` (what it costs), `remedy` (what fixes
 it), `next_step` (the command). Written because the product once handed a marketer
@@ -199,33 +198,33 @@ it), `next_step` (the command). Written because the product once handed a market
 
 ## 4. Domain modules
 
-### `facts.py` (758) — the findings that need no language model
+### `facts.py` — the findings that need no language model
 
 Dates, money, creator profiles, engagement rates, the 360 checklist. Regex and arithmetic over
 deck text, cached per campaign and keyed on a **content hash** of the inputs plus a stamp of
 the source — not on a self-declared version string, because an unbumped version leaves a stale
 cache stale forever.
 
-### `rulebook.py` (859) — the rules every judgment is made under
+### `rulebook.py` — the rules every judgment is made under
 
 A versioned YAML file with an editable overlay. `load()` is cached; `version()` stamps every
 judgment; `vocabulary()` declares the tag vocabulary that comparison resolves synonyms through —
 **a synonym is resolved at comparison time, never by rewriting stored data.**
 
-### `learning.py` (261) — one mechanism, two subjects
+### `learning.py` — one mechanism, two subjects
 
 The gate both metric keys and client rules pass through. `gate()` counts **breadth**
 (`distinct_briefs`, `subject_markets`, partners) rather than repetition; `require_a_person()`
 enforces that graduation is always somebody's decision; `fold_markets()` and `reaches()` are the
 *one* folded market-membership test, extracted after the same loop was found in seven places.
 
-### `metrics.py` (997) — the metric registry
+### `metrics.py` — the metric registry
 
 Typed storage per key, with `canonical()`/`unit_of()` resolving what a marketer typed into what
 the registry holds. `graduate()` promotes a key once it has passed the gate, recording who
 decided. `retire_stale()` proposes retirement; it never retires automatically.
 
-### `corrections.py` (812) — standing client rules
+### `corrections.py` — standing client rules
 
 `note()` records a mention with its provenance (**required** — a correction with no provenance
 is an opinion in a text field). `_looks_like()` suggests a possible duplicate; `resolve()` takes
@@ -235,7 +234,7 @@ Read `negated()` and `resembles()` together: a prohibition and its permission ar
 same rule, however alike they read, and the guard that enforces that is deliberately crude and
 used only to *refuse* a suggestion, never to make one.
 
-### `commitments.py` (558) — the promises a brief named
+### `commitments.py` — the promises a brief named
 
 `extract()` pulls candidate promises from deck text; `check()` looks for each in the delivered
 photographs via CLIP. `_NOT_ANSWERABLE` refuses anything about **how many** or **all** of
@@ -243,42 +242,42 @@ something, out loud, with the reason — because this instrument answers "does a
 like this", and for *"a single colourway"* four colourways in frame would make the match
 stronger.
 
-### `drift.py` (258) — drift is not a synonym for failure
+### `drift.py` — drift is not a synonym for failure
 
 `classify()` records *why* an execution moved from its brief. A campaign that drifted and
 worked is evidence that something worked and the brief may not have been it — which is a
 different claim from "it failed", and the library is required to keep them apart.
 
-### `context.py` (1,458) — what else was happening
+### `context.py` — what else was happening
 
 Context events scoped by market and date: a competitor launch, a holiday, a platform outage.
 `campaign_context()` reports the overlap and **never the cause** — the product records that two
 things coincided, and refuses to say one produced the other.
 
-### `calendar_seed.py` (230)
+### `calendar_seed.py`
 
 The fixed calendar shipped with the product, so "Semana Santa" is a date range the library
 knows without anyone typing it.
 
-### `replay.py` (479) — replay as a report
+### `replay.py` — replay as a report
 
 `run()` re-applies today's rules to past briefs and reports what *would* have been flagged.
 `if_graduated()` answers "what would change if this rule became standing" — so graduating a rule
 is a decision somebody can see the consequences of first.
 
-### `agreement.py` (236) — the instrument
+### `agreement.py` — the instrument
 
 "Consistency is a number, not a feeling." Runs the same judgment repeatedly and reports
 agreement, stamped with the embedder and rulebook version — two runs that agree while differing
 in either agree about nothing in particular.
 
-### `identity.py` (334) and `people.py` (710)
+### `identity.py` and `people.py`
 
 Who said it, how much that claim is worth, and what a person can do about it: `pseudonym()`,
 `erase()`, `rename()`, `retention()`, and `install_disclosure()` behind the `disclosure`
 command. `redact_paths()` keeps file paths — which contain names — out of what is stored.
 
-### `feedback.py` (974) — capturing feedback without making anyone type
+### `feedback.py` — capturing feedback without making anyone type
 
 A numbered queue. `queue()` lists what is waiting, `choose()` takes a number, `record()` stores
 the answer. `waiting()` returns a **campaign** count, and the comment explaining why is worth
@@ -289,7 +288,7 @@ which came back as `0` and silently switched off every proactive offer in the pr
 
 ## 5. Infrastructure
 
-### `store.py` (3,689) + `store_campaigns.py` (1,560) — SQLite, and Python owns it
+### `store.py` + `store_campaigns.py` — SQLite, and Python owns it
 
 All SQL lives here. Schema in `_SCHEMA`, indexes in `_INDEXES`, and migration is **additive**:
 `_declared_ddl` / `_add_missing_columns` add what is missing at startup, so an existing database
@@ -314,7 +313,7 @@ Helpers to know: `vector_models()` (which model made each vector, tolerating the
 schema), `forget_vector_models()` (provenance must not outlive its vectors),
 `execution_drift_for()` (`never_checked` is a **third state**, not a low score).
 
-### `vectorstore.py` (223) — the vector store
+### `vectorstore.py` — the vector store
 
 `SPACES` and `CLIP_SPACES` are the single lists everything else reads. `init`/`add`/`get_many`/
 `search`, `backend_name()` (`sqlite-vec` or `python-cosine-fallback`), and
@@ -322,7 +321,7 @@ schema), `forget_vector_models()` (provenance must not outlive its vectors),
 read*, which otherwise looks exactly like a library where every row is indexed and every search
 returns nothing.
 
-### `embedding.py` (268) and `clip_embed.py` (294)
+### `embedding.py` and `clip_embed.py`
 
 Text and image embedders. `embed_once()` is memoised **per call, not per process** — a
 process-lifetime cache served a vector computed in an earlier call and hid an embedder that had
@@ -335,19 +334,19 @@ inside somebody's first tool call.
 The bundled `hash` provider is for offline smoke tests **only** — it has no semantics, and
 scores a paraphrase and an unrelated pair identically.
 
-### `images.py` (49) and `chunking.py` (40)
+### `images.py` and `chunking.py`
 
 Perceptual hashing for creative-reuse detection, and chunk packing at 1,800 characters. One
 thing that catches people: `chunking.pack` **merges adjacent units**, so a continuation chunk
 carries no section header.
 
-### `extract.py` (507) — PDF and PPTX
+### `extract.py` — PDF and PPTX
 
 `extract_units()` (text), `extract_images()`, `extract_commentary()` (the client's own remarks,
 often the most useful precedent in the deck). Bounded by config: 60 PDF pages, 120 PPTX slides,
 40,000 characters, 20 images per deck.
 
-### `config.py` (207), `version.py` (44), `scoping.py` (84)
+### `config.py`, `version.py`, `scoping.py`
 
 Every knob is env-overridable (`CAMPAIGN_POC_*`). **`config` caches paths at import** — setting
 the environment variable after importing has no effect, which matters when writing tests.

@@ -1311,3 +1311,34 @@ def test_the_windows_checks_agree_on_where_the_unpacked_binary_is():
     assert windows == {"_verify\\campaign-intelligence.exe"}, (
         f"the Windows steps disagree about where the unpacked binary is: {sorted(windows)}"
     )
+
+def test_the_walkthrough_states_the_size_of_the_thing_it_describes():
+    """`code-walkthrough.md` opens with how much code there is, and a figure like "42,814 lines
+    of tests" is wrong by the next commit — it was already wrong two days after being written,
+    and a version of this test that checked it failed on the commit that ADDED the test.
+
+    So the doc states what is stable and still true: how many modules, how many test files, and
+    that there is more test code than product code. Per-MODULE line counts came out for the
+    same reason — a diagram saying `core.py (7,392)` tells the reader nothing the file does not
+    and is wrong immediately."""
+    root = Path(__file__).resolve().parent.parent
+    doc = (root / "code-walkthrough.md").read_text(encoding="utf-8")
+
+    modules = sorted(root.glob("*.py"))
+    tests_ = sorted((root / "tests").glob("*.py"))
+    product = sum(len(p.read_text(encoding="utf-8").split("\n")) for p in modules)
+    test_code = sum(len(p.read_text(encoding="utf-8").split("\n")) for p in tests_)
+
+    stated = re.search(r"\*\*(\d+) modules of product code and (\d+) test files", doc)
+    assert stated, "the walkthrough no longer states the size of what it describes"
+    assert stated.group(1) == str(len(modules)), (
+        f"walkthrough says {stated.group(1)} modules, the tree has {len(modules)}")
+    assert stated.group(2) == str(len(tests_)), (
+        f"walkthrough says {stated.group(2)} test files, the tree has {len(tests_)}")
+    assert test_code > product, (
+        "the claim that there is more test code than product code is no longer true"
+    )
+
+    assert not re.findall(r"`[a-z_]+\.py` \([\d,]+\)", doc), (
+        "a per-module line count is a number that is wrong by the next commit"
+    )
