@@ -20,6 +20,7 @@ These tests exist for the reason the example's do: a file that ships and is neve
 and the first anybody knows is a customer whose rules do nothing.
 """
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -148,20 +149,21 @@ def test_all_ten_standing_corrections_carry_their_provenance(conn):
             f"no provenance on: {correction['text'][:60]}"
         )
 
-
-def test_the_corrections_the_source_scoped_to_markets_say_so(conn):
-    """Three of the ten came from particular markets and the source says which. A correction
-    with no markets applies everywhere, which is right for a house rule and wrong for one
-    learned in Colombia."""
+def test_the_markets_the_source_names_are_kept_as_provenance(conn):
+    """The source names markets in a column headed "Where it came from", and that is where
+    they stay. This test used to assert the opposite — that three corrections carried a
+    `markets` list — which is the provenance-as-scope error written down as a requirement."""
     import yaml
 
-    by_text = {c["text"][:40]: c for c in
-               yaml.safe_load(FABLETICS.read_text(encoding="utf-8"))["corrections"]}
-    scoped = {c["text"][:40]: c.get("markets") for c in by_text.values() if c.get("markets")}
+    declared = yaml.safe_load(FABLETICS.read_text(encoding="utf-8"))["corrections"]
+    provenance = " ".join(c["provenance"] for c in declared)
 
-    assert scoped, "every correction is declared as applying everywhere"
-    assert any("Colombia" in m for m in scoped.values())
-    assert any("Peru" in m for m in scoped.values())
+    for market in ("Peru", "Australia", "Colombia", "Mexico"):
+        assert market in provenance, f"{market} is named by the source and is nowhere on file"
+    assert not [c for c in declared if c.get("markets")], (
+        "where a rule came from is not where it applies"
+    )
+
 
 
 def test_the_build_ships_it_beside_the_binary():
@@ -289,10 +291,10 @@ def test_the_standing_corrections_reach_a_judgment(conn):
         f"none of them reached the judgment: "
         f"{prepared['standing_corrections']['what_it_means']}"
     )
-    # Seven carry no market and apply everywhere; the eighth is Peru's. `>= 7` was the
-    # original assertion and it passed while all three SCOPED corrections were dead in every
-    # market — a test that could not fail in the way that mattered.
-    assert len(standing) == 8, (
+    # All ten. `>= 7` was the original assertion and it passed while three corrections were
+    # dead in every market — a test that could not fail in the way that mattered. It then said
+    # 8, which encoded the provenance-as-scope error the count was a symptom of.
+    assert len(standing) == 10, (
         f"{len(standing)} of ten applied in Peru: {[c['text'][:40] for c in standing]}"
     )
 
@@ -325,25 +327,41 @@ def test_a_correction_scoped_to_a_market_reaches_that_market(conn, market, phras
         f"the rule scoped to {market} does not reach a {market} brief"
     )
 
+def test_provenance_is_not_read_as_scope(conn):
+    """The source's table has a column headed "Where it came from", and three of its cells name
+    a market: "Peru (30 influencers, praised); instructed independently in Australia",
+    "Colombia slide 6", "Mexico slides 9 and 10".
 
-def test_a_scoped_correction_does_not_leak_into_other_markets(conn):
-    """The other half. "Seen in Peru and Australia" is a fact about where it came from, and
-    §8.3's anti-capture argument turns on it: only somebody who wrote the rule down can say
-    "everywhere"."""
+    An earlier version of this file read those as SCOPE and gave the three rules a `markets`
+    list — and this test asserted the consequence, that a single-colourway brief in the UAE saw
+    no such rule. Nothing in the review says that. Read as scope, a provenance column
+    SUPPRESSES a generally worded client standard everywhere it was not first written down,
+    which is a worse failure than applying it too widely and one nobody would ever see.
+
+    `markets` still works and is carried correctly when a client sets it — that is their call.
+    It is not a call to be made by reading a provenance column."""
     import core
+    import yaml
+
+    declared = yaml.safe_load(FABLETICS.read_text(encoding="utf-8"))["corrections"]
+    assert not [c for c in declared if c.get("markets")], (
+        "a correction is scoped to a market the source only names as where it came from"
+    )
 
     _as_the_customers(conn)
     core.load_declared_corrections(conn, confirmed_by="R. Vega")
 
-    prepared = core.prepare_evaluation(conn, subject_title="X", market="UAE",
-                                       proposal_text="A push.")
-    texts = " ".join(c["text"] for c in prepared["standing_corrections"]["standing"])
+    for market in ("Peru", "UAE", "Colombia", "Mexico", "Australia"):
+        prepared = core.prepare_evaluation(conn, subject_title="X", market=market,
+                                           proposal_text="A push.")
+        texts = " ".join(c["text"] for c in prepared["standing_corrections"]["standing"])
+        assert "Seed a single colourway" in texts, (
+            f"the single-colourway rule does not reach a brief in {market}"
+        )
+        assert "State duration and placement" in texts, (
+            f"the OOH rule does not reach a brief in {market}"
+        )
 
-    assert "Seed a single colourway" not in texts, "a Peru rule applied in the UAE"
-    assert "State duration and placement" not in texts, "a Mexico rule applied in the UAE"
-    assert "Every deliverable needs a date" in texts, (
-        "a house rule with no market list must apply everywhere"
-    )
 
 
 def test_the_shipped_rulebook_is_found_where_pyinstaller_actually_puts_it(tmp_path,
@@ -392,10 +410,15 @@ def test_every_rationale_says_where_it_came_from():
 
     book = yaml.safe_load(FABLETICS.read_text(encoding="utf-8"))
 
-    for rule in book["rules"]:
-        why = rule["why"]
+    # rules AND expects. The first version of this test checked `book["rules"]` alone, and six
+    # invented rationales sat in `expects` untouched while it passed — the same blind spot it
+    # was written to close, one key over. `missing.py` hands an expectation's `why` back as
+    # `why_it_matters` and labels it the customer's own rule, so an invented one there is no
+    # more inert than an invented one in a rule.
+    for entry in book["rules"] + book["expects"]:
+        why = entry["why"]
         assert "September 2026 product review" in why, (
-            f"{rule['id']}'s rationale does not say where it came from: {why[:70]}"
+            f"{entry['id']}'s rationale does not say where it came from: {why[:70]}"
         )
     # And where the source is silent, the file says so rather than filling the gap.
     silent = [r for r in book["rules"] if "none is invented here" in r["why"]]
@@ -403,6 +426,23 @@ def test_every_rationale_says_where_it_came_from():
         "every rule now claims a stated rationale; the source does not give one for all of "
         "them, and inventing the difference is the defect this test exists for"
     )
+
+    # Naming the review is not enough on its own: an invented sentence appended to a true
+    # provenance clause still reaches an evaluation as the client's reasoning, and the first
+    # version of this test passed on exactly that. So outside quotation marks a `why` may say
+    # where the rule came from and nothing else — no causal claim about what the rule is FOR.
+    #
+    # Crude, and deliberately so, in the way `negated()` is: it refuses a shape rather than
+    # judging a sentence, and the cost of a false refusal is rewording a line in a YAML file.
+    causal = ("cannot", "because", "so that", "reads as", "is how", "would be", "is where",
+              "delivers", "is a hope", "expensive", "quietly lost", "takes the asset")
+    for entry in book["rules"] + book["expects"]:
+        outside = re.sub(r'"[^"]*"', " ", entry["why"]).lower()
+        found = [c for c in causal if c in outside]
+        assert not found, (
+            f"{entry['id']}'s rationale argues {found} outside anything the review says — "
+            f"that reaches an evaluation as the CLIENT'S reasoning: {entry['why'][:90]}"
+        )
 
 
 def test_a_symlinked_rulebook_is_left_alone(tmp_path):
@@ -442,3 +482,41 @@ def test_a_symlinked_rulebook_is_left_alone(tmp_path):
     assert "Installed the rulebook shipped" not in out.stdout, (
         "it reported installing rules over a link it should not have touched"
     )
+
+
+def test_an_install_that_ran_the_old_loader_is_repaired_on_upgrade(conn):
+    """A fix that only works on a fresh database is not a fix. The old loader threw the
+    declared markets away and promoted with `applies_everywhere=False`, leaving
+    `expected_in = []` — which means "no checklist", so those rules reached no market at all.
+
+    On the next start the loader saw them already on file and reported "already": 0 loaded, 10
+    already, still broken, and nothing said so. Reproduced before fixing. The loader has to
+    RECONCILE what is on file against what the rulebook now declares, not merely skip it."""
+    import core
+    import corrections
+    import store
+
+    _as_the_customers(conn)
+
+    # Exactly what the previous implementation persisted.
+    real = corrections.graduate
+    corrections.graduate = lambda c, cid, **kw: real(c, cid, **{**kw, "markets": None,
+                                                                "everywhere": False})
+    try:
+        core.load_declared_corrections(conn, confirmed_by="R. Vega")
+    finally:
+        corrections.graduate = real
+
+    broken = [r for r in store.corrections(conn) if "colourway" in r["text"]][0]
+    assert broken["expected_in"] == [], "the fixture did not reproduce the old state"
+
+    out = core.load_declared_corrections(conn, confirmed_by="R. Vega")
+
+    prepared = core.prepare_evaluation(conn, subject_title="X", market="Peru",
+                                       proposal_text="A push.")
+    texts = " ".join(c["text"] for c in prepared["standing_corrections"]["standing"])
+    assert "Seed a single colourway" in texts, (
+        f"an upgraded install is still broken; the loader said "
+        f"{out['loaded']} loaded, {out['already']} already"
+    )
+    assert out.get("repaired"), "it repaired rows and did not say so"

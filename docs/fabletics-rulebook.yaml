@@ -245,44 +245,48 @@ expects:
   - id: call-to-action
     input: A call to action, stated in the words the audience will see
     why: >-
-      "Always flag: missing CTA." A launch with no CTA cannot be measured against a goal.
+      Listed under "Always flag" in the September 2026 product review's 360° launch
+      checklist: "missing CTA". The review gives examples of what it means — "Visit the
+      Fabletics store", "RSVP", "Shop the launch in-store" — and no rationale beyond that.
     looks_like: ['cta', 'call to action', 'visit the fabletics store', 'rsvp',
                  'shop the launch', 'shop in-store']
 
   - id: store-traffic-plan
     input: A store traffic plan — how this drives somebody into a store
     why: >-
-      "Always flag: store traffic plan." Retail is the objective these launches are judged
-      against, and a social plan with no traffic path is not one.
+      Listed under "Always flag" in the September 2026 product review's 360° launch
+      checklist: "store traffic plan". The checklist's Events / Retail row names the same
+      thing: "store traffic CTA (visit, RSVP, shop in-store)".
     looks_like: ['store traffic', 'footfall', 'visit the store', 'store locator',
                  'in-store', 'drive traffic']
 
   - id: paid-or-organic-boost
     input: Whether the activity is paid, organic, or boosted — and with what budget
     why: >-
-      "Always flag: paid or organic boost." Reach with no stated support is a hope.
+      Listed under "Always flag" in the September 2026 product review's 360° launch
+      checklist: "paid or organic boost".
     looks_like: ['paid', 'organic', 'boost', 'media spend', 'amplification', 'budget']
 
   - id: partner-collab
     input: The partner or collaborator plan, with handles
     why: >-
-      "Always flag: partner collab." Collab posts are the recurring partner ask, and they
-      need naming before the shoot rather than after.
+      Listed under "Always flag" in the September 2026 product review's 360° launch
+      checklist: "partner collab". Its Social row names "influencer and collab posts".
     looks_like: ['collab', 'partner', 'co-branded', 'handles', '@']
 
   - id: ecom-link-path
     input: The e-commerce path — landing page or PDP, availability, and the UTM links
     why: >-
-      "Always flag: e-com link path." A launch that cannot be clicked through to product
-      cannot be attributed to product.
+      Listed under "Always flag" in the September 2026 product review's 360° launch
+      checklist: "e-com link path". Its E-com / Wholesale row names "landing page and PDP
+      ready", "product availability" and "store locator, UTM links and traffic path".
     looks_like: ['landing page', 'pdp', 'utm', 'link path', 'availability', 'store locator']
 
   - id: kpi-plan
     input: The KPI plan — what success is, in numbers, before the campaign runs
     why: >-
-      "Always flag: KPI plan." Nothing can be reconciled later against a brief that never
-      said what it was for, and "did it work" is the question the whole library exists to
-      answer.
+      Listed under "Always flag" in the September 2026 product review's 360° launch
+      checklist: "KPI plan".
     looks_like: ['kpi', 'target', 'goal', 'success metric', 'reach', 'engagement',
                  'sell-through', 'attendance']
 
@@ -393,7 +397,19 @@ scorecard:
 #
 # `provenance` is required. Without it a judgment citing the correction can say only "the
 # library says so", which is the unfounded confident claim this product is built against.
-# `markets` is optional: empty means everywhere, which is right for a house rule.
+#
+# NONE of these carries a `markets` list, and an earlier version of this file carried three.
+# The source's table has a column headed "Where it came from", and three of its cells name a
+# market — "Peru (30 influencers, praised); instructed independently in Australia", "Colombia
+# slide 6", "Mexico slides 9 and 10". Those are PROVENANCE. Nothing in the review says the
+# single-colourway rule applies only in Peru and Australia, or that stating the duration of an
+# OOH placement is a Mexican concern; read as scope they would SUPPRESS a generally worded
+# client standard everywhere else, which is a worse failure than applying it too widely and
+# one nobody would see. Where it came from is in `provenance`, where the source put it.
+#
+# `markets` remains available and is carried correctly when present — if the client says a
+# rule is market-specific, that is their call to make and the loader will honour it. It is not
+# a call to be made by reading a provenance column.
 
 corrections:
   - text: >-
@@ -410,7 +426,6 @@ corrections:
       Seed a single colourway. Identical monochromatic outfits across all recipients, for
       cohesive social storytelling.
     provenance: "Peru (30 influencers, praised); instructed independently in Australia — 2 markets"
-    markets: ['Peru', 'Australia']
 
   - text: >-
       Show built execution, not mockups. Photographs of what exists read as commitment;
@@ -421,7 +436,6 @@ corrections:
       Brand arrival before celebrity collection. A store opening needs solid weeks of general
       awareness first, and each collection needs its own moment.
     provenance: "Colombia slide 6 — still only partly adopted in Colombia v2"
-    markets: ['Colombia']
 
   - text: >-
       A grand opening needs real activity. A photobooth or claw machine, named explicitly.
@@ -438,7 +452,6 @@ corrections:
   - text: >-
       State duration and placement for any OOH or billboard element.
     provenance: "Mexico slides 9 and 10"
-    markets: ['Mexico']
 
   - text: >-
       Premise disagreements are not fix lists. When a deck argues for the thing the client

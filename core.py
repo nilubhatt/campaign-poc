@@ -4284,11 +4284,24 @@ def load_declared_corrections(conn, *, confirmed_by: str) -> dict:
                     f"the rule itself and where it came from.")}
 
     version = rulebook.overlay() or rulebook.version()
-    loaded, already, follow_on = [], 0, []
+    loaded, already, repaired, follow_on = [], 0, [], []
     for entry in declared:
         existing = corrections.find(conn, entry["text"])
         if existing and existing["status"] == "expected":
-            already += 1
+            # ALREADY IN FORCE — but in force WHERE? A fix that only works on a fresh database
+            # is not a fix. An install that ran an earlier loader has these rows already, and
+            # skipping them left every one of them exactly as that loader wrote it: an earlier
+            # version threw the declared markets away and promoted with
+            # `applies_everywhere=False`, which leaves `expected_in = []`, which means "no
+            # checklist" — so those rules reached no market at all, the loader reported "10
+            # already", and nothing said otherwise. Reconciled rather than skipped: what the
+            # rulebook declares now is what applies now.
+            if corrections.reconcile_declared(
+                    conn, existing["correction_id"], markets=entry["markets"] or [],
+                    everywhere=not entry["markets"], confirmed_by=who):
+                repaired.append(existing["correction_id"])
+            else:
+                already += 1
             continue
         if existing:
             # ALREADY HEARD, NOT YET IN FORCE — the likeliest case for a house rule, and it
@@ -4330,6 +4343,9 @@ def load_declared_corrections(conn, *, confirmed_by: str) -> dict:
 
     return {
         "loaded": len(loaded), "already": already, "basis": "computed",
+        # What an upgrade actually changed. A repair nobody is told about is one nobody can
+        # check, and these rows were in force nowhere while the tool said "already on file".
+        **({"repaired": repaired} if repaired else {}),
         "rulebook": version, "confirmed_by": who,
         **({"no_longer_declared": stale} if stale else {}),
         # What promoting a rule offers next. Going around `corrections.graduate` dropped

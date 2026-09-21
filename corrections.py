@@ -526,6 +526,41 @@ def graduation(conn, correction_id: str, *, from_rulebook: Optional[str] = None)
     return gate
 
 
+def reconcile_declared(conn, correction_id: str, *, markets: list, everywhere: bool,
+                       confirmed_by: str) -> bool:
+    """Bring a correction already in force into line with what the rulebook declares NOW.
+
+    A fix that only works on a fresh database is not a fix. An install that ran an earlier
+    loader already holds these rows, and the loader skipped them as "already on file" — so an
+    earlier version that threw the declared markets away and promoted with
+    `applies_everywhere=False` left `expected_in = []`, which means "no checklist", which means
+    the rule reached no market at all. The tool reported ten already on file and nothing said
+    otherwise.
+
+    HERE rather than in the loader, because `store.graduate_correction` is what writes a
+    correction to `expected` and this module is the only one that may call it — D108's first
+    version built that route twice and the second copy silently dropped the replay entry, the
+    next-actions and the sentence a person reads. Returns whether anything changed, so an
+    upgrade can say what it repaired.
+    """
+    import store
+
+    # The same guard every other write that takes a name goes through. `graduate` calls it and
+    # so does this: a repair that puts a rule in force in a market it was in force in nowhere
+    # is a write about who decided things, and "the loader already checked" is how a second
+    # door gets built.
+    confirmed_by = learning.require_a_person(confirmed_by)
+    entry = describe(conn, correction_id)
+    on_file = entry.get("expected_in") or []
+    if (bool(entry.get("applies_everywhere")) == everywhere
+            and (not markets or sorted(on_file) == sorted(markets))):
+        return False
+    store.graduate_correction(conn, correction_id, markets=markets or on_file,
+                              confirmed_by=entry.get("confirmed_by") or confirmed_by,
+                              applies_everywhere=everywhere)
+    return True
+
+
 def graduate(conn, correction_id: str, *, confirmed_by: str,
              from_rulebook: Optional[str] = None,
              everywhere: bool = False,
