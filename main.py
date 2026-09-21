@@ -122,7 +122,15 @@ def main() -> int:
         # and the product stays generic, which is what §12.1 decided and still holds for
         # anybody who is not this customer.
         shipped = rulebook.shipped_customer_rulebook()
-        if shipped and not rulebook.overlay_path().exists():
+        # `exists()` is False for a DANGLING symlink, and `shutil.copyfile` FOLLOWS one — so a
+        # link whose target had moved read as "no rulebook here" and the copy landed at the
+        # link's target, outside the data directory, while the install reported success.
+        # `rulebook._read` already decided what a dangling symlink means: it refuses to load
+        # one and says so, because "the target moved" and "there is no rulebook" are different
+        # situations and silently treating the first as the second loses somebody's rules.
+        # Anything at that path at all — file, link, dangling link — is somebody's decision.
+        theirs = rulebook.overlay_path()
+        if shipped and not theirs.exists() and not theirs.is_symlink():
             import shutil
 
             rulebook.overlay_path().parent.mkdir(parents=True, exist_ok=True)

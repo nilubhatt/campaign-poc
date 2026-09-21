@@ -4308,7 +4308,11 @@ def load_declared_corrections(conn, *, confirmed_by: str) -> dict:
         promoted = corrections.graduate(
             conn, correction_id, confirmed_by=who, from_rulebook=version,
             # No market list means EVERYWHERE, which is what a house rule is.
-            everywhere=not entry["markets"])
+            everywhere=not entry["markets"],
+            # And a list means THOSE, which has to be carried or the rule reaches nowhere:
+            # `gate["seen_in"]` is where this library watched a rule recur, and a declared
+            # rule has been seen in no campaigns at all.
+            markets=entry["markets"] or None)
         follow_on.extend(promoted.get("next_actions") or [])
         loaded.append(correction_id)
 

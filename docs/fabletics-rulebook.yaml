@@ -4,8 +4,22 @@
 #
 # Every rule, tag, criterion, checklist item and standing correction from the September 2026
 # product review, transcribed section by section — including the presenter notes it carries as
-# PDF annotations, which say how the rules are meant to be applied. Nothing here is invented:
-# where the source gives a reason or an example, it is the source's.
+# PDF annotations, which say how the rules are meant to be applied.
+#
+# WHAT `why` SAYS, AND WHY IT IS WORDED THE WAY IT IS
+#
+# An earlier version of this file claimed "nothing here is invented" and then carried thirteen
+# `why` fields that were nobody's but mine — "a copyright strike takes the asset down
+# mid-flight", "the audience reacts to it". Review checked every one against the source and
+# found all thirteen absent from it. They read as the CLIENT'S stated reasoning and they reach
+# every evaluation, which makes them the confident unfounded claim this product exists to
+# refuse, inside the file that is supposed to carry the client's own rules.
+#
+# So every `why` now says where the rule came from and, where the review gives a reason, gives
+# the review's own words in quotation marks. Several rules simply have no stated rationale in
+# the source — they are listed as non-negotiables and nothing more — and that is what theirs
+# say. A rule with no reason is weaker than one with a reason, and pretending otherwise is
+# worse than either.
 #
 # HOW IT GETS PUT IN FORCE
 #
@@ -71,7 +85,9 @@ rules:
       approved royalty-free libraries only.
     severity: blocking
     why: >-
-      A copyright strike takes the asset down mid-flight and the reach is not recoverable.
+      Listed as a non-negotiable in the September 2026 product review — "hard guardrails,
+      not preferences". The review gives no rationale beyond that, and none is invented
+      here.
     watch_for: ['trending audio', 'trending sound', 'licensed track', 'popular song',
                 'chart music', 'viral sound']
 
@@ -81,7 +97,9 @@ rules:
       approved assets, photography, UGC, or local shoots.
     severity: blocking
     why: >-
-      It is a brand-safety position the client has taken, and the audience reacts to it.
+      Listed as a non-negotiable in the September 2026 product review — "hard guardrails,
+      not preferences". The review gives no rationale beyond that, and none is invented
+      here.
     watch_for: ['ai-generated', 'ai imagery', 'midjourney', 'generative imagery',
                 'ai-made', 'generated image']
 
@@ -91,9 +109,9 @@ rules:
       Fabletics content while wearing, tagging, or actively promoting competitor brands.
     severity: blocking
     why: >-
-      The scope is the CREATOR'S OWN FEED, not only the Fabletics asset — a roster cleared
-      on the asset alone has not been cleared. Peru left two adidas-affiliated profiles on
-      the roster, which is the open breach this rule exists to catch.
+      A non-negotiable in the September 2026 product review, which states the scope itself:
+      "Note the precise scope — this is about the creator's own feed, not only about the
+      Fabletics asset."
     watch_for: ['exclusivity waived', 'no exclusivity', 'competitor', 'adidas', 'nike',
                 'lululemon', 'gymshark', 'alo yoga']
 
@@ -103,7 +121,8 @@ rules:
       disclosure and embargo requirements.
     severity: blocking
     why: >-
-      Timing, tagging and disclosure are the parts that cannot be fixed after a post is live.
+      Listed as a non-negotiable in the September 2026 product review: "Content must follow
+      Global review, launch timing, tagging, disclosure and embargo requirements."
     watch_for: ['publish immediately', 'no approval needed', 'go live', 'embargo',
                 'pre-approval', 'global review']
 
@@ -119,9 +138,11 @@ rules:
       alone. Every profile on a roster carries its engagement rate.
     severity: should_fix
     why: >-
-      Peru's ambassador was approved at 2.2M followers and 0.26% ER while smaller profiles
-      were rejected for low interaction. The rubric already said this and it was missed, which
-      is why it is a rule and not a preference.
+      The September 2026 product review's guiding principle for selection: "engagement quality
+      and brand alignment
+      matter more than follower count." Its red-flag list gives the case — "Peru's
+      ambassador was approved at 2.2M followers and 0.26% ER while smaller profiles were
+      rejected for low interaction — this exact flag, missed."
     watch_for: ['followers', 'follower count', 'reach', 'engagement rate', 'ER']
 
   - id: creator-audience-relevance
@@ -129,7 +150,8 @@ rules:
       Creator audiences are relevant to the local market the campaign runs in.
     severity: should_fix
     why: >-
-      A creator whose audience is elsewhere delivers reach that cannot convert in market.
+      Selection criterion in the September 2026 product review: "Audience relevance to the
+      local market."
     watch_for: ['audience', 'local market', 'geo', 'demographic']
 
   - id: creator-brand-fit
@@ -138,8 +160,8 @@ rules:
       each one is on the list rather than only that they are.
     severity: should_fix
     why: >-
-      Brand fit is criterion 4 of the scorecard, and a roster with no stated reasoning cannot
-      be argued with.
+      Selection criterion in the September 2026 product review: "Brand fit with Fabletics
+      lifestyle and activewear positioning."
 
   - id: creator-content-quality
     rule: >-
@@ -147,7 +169,9 @@ rules:
       feed.
     severity: should_fix
     why: >-
-      Quality and feed hygiene are visible before booking and expensive afterwards.
+      Selection criteria in the September 2026 product review: "Strong content quality,
+      lighting and storytelling" and "Clean recent feed with no direct competitor
+      conflicts."
     watch_for: ['content quality', 'lighting', 'storytelling', 'recent feed']
 
   # ─ 4 · Influencer red flags — the agent must raise these ──────────────────────────────
@@ -156,8 +180,9 @@ rules:
       Raise any creator with a large following and low engagement.
     severity: should_fix
     why: >-
-      Peru: 2.2M followers at 0.26% ER approved, while smaller profiles were rejected for
-      low interaction. This exact flag, missed.
+      Red flag in the September 2026 product review: "Large following with low engagement.
+      Peru's ambassador was approved at 2.2M followers and 0.26% ER while smaller profiles
+      were rejected for low interaction — this exact flag, missed."
     watch_for: ['2.2m', 'followers', 'engagement rate', '0.2', '0.3']
 
   - id: flag-promotional-or-unclear-disclosure
@@ -166,8 +191,8 @@ rules:
       behaviour.
     severity: should_fix
     why: >-
-      Disclosure is a compliance question, and a feed that reads as an ad rail devalues the
-      placement.
+      Red flags in the September 2026 product review: "Overly promotional creator style" and
+      "Unclear disclosure or tagging behaviour."
     watch_for: ['#ad', 'sponsored', 'paid partnership', 'disclosure', 'tagging']
 
   # ─ 5 · Recurring partner feedback — shipped as evaluation logic ───────────────────────
@@ -181,7 +206,10 @@ rules:
       storytelling; localise content to the market.
     severity: should_fix
     why: >-
-      This is the coaching that recurs across partners, market after market.
+      Recurring partner feedback in the September 2026 product review. Source guidance,
+      carried as a presenter note: "Recurring partner feedback is one of the strongest ways
+      to teach the agent your standards. This turns repeated coaching into reusable
+      evaluation logic."
     watch_for: ['collab', 'reels', 'stories', 'vertical', 'recap', 'localise', 'localize']
 
   - id: community-management-standards
@@ -190,7 +218,8 @@ rules:
       correctly; respond with a brand-safe tone.
     severity: should_fix
     why: >-
-      Community management is where a good launch is quietly lost in the week after it.
+      Recurring partner feedback in the September 2026 product review, under community
+      management.
     watch_for: ['comments', 'highlights', 'tagging', 'community', 'moderation']
 
   - id: event-standards
@@ -199,7 +228,8 @@ rules:
       deck with KPIs.
     severity: should_fix
     why: >-
-      An event with no recap and no KPIs cannot become precedent for the next one.
+      Recurring partner feedback in the September 2026 product review, under event
+      standards.
     watch_for: ['event', 'recap deck', 'kpi', 'branded presence', 'signage']
 
 # ─── what a brief must carry (the 360° launch checklist) ─────────────────────────────────

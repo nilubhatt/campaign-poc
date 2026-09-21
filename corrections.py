@@ -528,7 +528,8 @@ def graduation(conn, correction_id: str, *, from_rulebook: Optional[str] = None)
 
 def graduate(conn, correction_id: str, *, confirmed_by: str,
              from_rulebook: Optional[str] = None,
-             everywhere: bool = False) -> dict:
+             everywhere: bool = False,
+             markets: Optional[list] = None) -> dict:
     """Promote a correction to standing. Requires the gate AND a person (§8.3's gate, §8.6's
     subject).
 
@@ -536,6 +537,14 @@ def graduate(conn, correction_id: str, *, confirmed_by: str,
     It changes which CONDITIONS the gate applies — a declared rule does not have to have been
     seen in three campaigns — and changes nothing else: the person is still required, the
     replay entry is still written, and this is still the only function that promotes one.
+
+    `markets` is where the customer SAYS the rule applies, and it is a different fact from
+    `gate["seen_in"]`, which is where this library has watched it recur. A declared rule has
+    been seen in no campaigns at all, so taking the observed list left `expected_in` empty —
+    and an empty list means "no checklist", so a correction the customer scoped to Peru
+    applied in no market whatever, while a market-less one applied in all of them. A declared
+    rule WITH markets was strictly worse than one without. That is the inversion D108's own
+    fix shipped, recurring for scoped rules; review reproduced it across four markets.
     """
     import store
 
@@ -543,8 +552,8 @@ def graduate(conn, correction_id: str, *, confirmed_by: str,
     gate = graduation(conn, correction_id, from_rulebook=from_rulebook)
     if not gate["eligible"]:
         raise ValueError(gate["what_it_means"])
-    store.graduate_correction(conn, correction_id, markets=gate["seen_in"], confirmed_by=who,
-                              applies_everywhere=everywhere)
+    store.graduate_correction(conn, correction_id, markets=markets or gate["seen_in"],
+                              confirmed_by=who, applies_everywhere=everywhere)
     # §11.1: the account beside the name, on the write that puts a rule in front of every
     # future brief in its markets.
     store.record_authorship(conn, subject_kind="correction", subject_key=correction_id,

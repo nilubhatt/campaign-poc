@@ -289,9 +289,61 @@ def test_the_standing_corrections_reach_a_judgment(conn):
         f"none of them reached the judgment: "
         f"{prepared['standing_corrections']['what_it_means']}"
     )
-    # Seven of the ten carry no market, and a house rule applies everywhere rather than
-    # nowhere — the exact inversion D108's own fix shipped.
-    assert len(standing) >= 7, f"only {len(standing)} of ten applied in Peru"
+    # Seven carry no market and apply everywhere; the eighth is Peru's. `>= 7` was the
+    # original assertion and it passed while all three SCOPED corrections were dead in every
+    # market — a test that could not fail in the way that mattered.
+    assert len(standing) == 8, (
+        f"{len(standing)} of ten applied in Peru: {[c['text'][:40] for c in standing]}"
+    )
+
+
+@pytest.mark.parametrize("market,phrase", [
+    ("Peru", "Seed a single colourway"),
+    ("Australia", "Seed a single colourway"),
+    ("Colombia", "Brand arrival before celebrity collection"),
+    ("Mexico", "State duration and placement for any OOH"),
+])
+def test_a_correction_scoped_to_a_market_reaches_that_market(conn, market, phrase):
+    """Three of the ten name the markets they came from, and the loader threw the list away:
+    `graduate` was given the markets the library had SEEN the rule in, which for a declared
+    rule is none, so `expected_in` stayed empty and `standing_for` excluded them from
+    everywhere.
+
+    A declared correction WITH markets was therefore strictly worse than one without — it
+    applied nowhere, while a market-less one applied everywhere. That is the exact inversion
+    D108's own fix shipped, recurring for scoped rules."""
+    import core
+
+    _as_the_customers(conn)
+    core.load_declared_corrections(conn, confirmed_by="R. Vega")
+
+    prepared = core.prepare_evaluation(conn, subject_title="X", market=market,
+                                       proposal_text="A push.")
+    texts = " ".join(c["text"] for c in prepared["standing_corrections"]["standing"])
+
+    assert phrase in texts, (
+        f"the rule scoped to {market} does not reach a {market} brief"
+    )
+
+
+def test_a_scoped_correction_does_not_leak_into_other_markets(conn):
+    """The other half. "Seen in Peru and Australia" is a fact about where it came from, and
+    §8.3's anti-capture argument turns on it: only somebody who wrote the rule down can say
+    "everywhere"."""
+    import core
+
+    _as_the_customers(conn)
+    core.load_declared_corrections(conn, confirmed_by="R. Vega")
+
+    prepared = core.prepare_evaluation(conn, subject_title="X", market="UAE",
+                                       proposal_text="A push.")
+    texts = " ".join(c["text"] for c in prepared["standing_corrections"]["standing"])
+
+    assert "Seed a single colourway" not in texts, "a Peru rule applied in the UAE"
+    assert "State duration and placement" not in texts, "a Mexico rule applied in the UAE"
+    assert "Every deliverable needs a date" in texts, (
+        "a house rule with no market list must apply everywhere"
+    )
 
 
 def test_the_shipped_rulebook_is_found_where_pyinstaller_actually_puts_it(tmp_path,
@@ -324,3 +376,69 @@ def test_the_shipped_rulebook_is_found_where_pyinstaller_actually_puts_it(tmp_pa
     # And a copy beside the executable wins, because that one can be seen and replaced.
     (app / "fabletics-rulebook.yaml").write_text("version: y\n", encoding="utf-8")
     assert rulebook.shipped_customer_rulebook() == app / "fabletics-rulebook.yaml"
+
+
+def test_every_rationale_says_where_it_came_from():
+    """The file once claimed "nothing here is invented" while carrying thirteen `why` fields
+    that were the author's own — "a copyright strike takes the asset down mid-flight", "the
+    audience reacts to it". Review checked each against the source document and found all
+    thirteen absent from it.
+
+    They are not decoration: a `why` reaches every evaluation as the CLIENT'S stated reasoning,
+    which makes an invented one the confident unfounded claim this product exists to refuse,
+    inside the file carrying the client's own rules. Every one must now name its source, and
+    where the review gives a reason it is quoted rather than paraphrased."""
+    import yaml
+
+    book = yaml.safe_load(FABLETICS.read_text(encoding="utf-8"))
+
+    for rule in book["rules"]:
+        why = rule["why"]
+        assert "September 2026 product review" in why, (
+            f"{rule['id']}'s rationale does not say where it came from: {why[:70]}"
+        )
+    # And where the source is silent, the file says so rather than filling the gap.
+    silent = [r for r in book["rules"] if "none is invented here" in r["why"]]
+    assert silent, (
+        "every rule now claims a stated rationale; the source does not give one for all of "
+        "them, and inventing the difference is the defect this test exists for"
+    )
+
+
+def test_a_symlinked_rulebook_is_left_alone(tmp_path):
+    """`exists()` is False for a DANGLING symlink, so `init` read one as "no rulebook here" and
+    `shutil.copyfile` — which follows symlinks — wrote the customer rulebook into the link's
+    target. Reproduced: 22KB appeared at a path outside the data directory entirely, and the
+    install reported success.
+
+    The product already decided what a dangling symlink means. `rulebook._read` refuses to
+    load one and says so, precisely because "the target moved" and "there is no rulebook" are
+    different situations and silently treating the first as the second loses somebody's rules.
+    `init` must not overrule that from the other side."""
+    import shutil
+    import subprocess
+    import sys
+
+    app, data, elsewhere = tmp_path / "app", tmp_path / "data", tmp_path / "elsewhere"
+    for p in (app, data, elsewhere):
+        p.mkdir(parents=True)
+    shutil.copyfile(FABLETICS, app / "fabletics-rulebook.yaml")
+    (data / "rulebook.yaml").symlink_to(elsewhere / "gone.yaml")
+
+    script = ("import pathlib, sys\n"
+              "sys.argv = ['campaign-intelligence', 'init']\n"
+              "import config\n"
+              f"config.app_dir = lambda: pathlib.Path({str(app)!r})\n"
+              "import main\nmain.main()\n")
+    out = subprocess.run([sys.executable, "-c", script],
+                         cwd=Path(__file__).resolve().parent.parent,
+                         capture_output=True, text=True, timeout=180,
+                         env={**os.environ, "CAMPAIGN_POC_DATA": str(data),
+                              "CAMPAIGN_POC_DB": str(data / "c.db")})
+
+    assert not (elsewhere / "gone.yaml").exists(), (
+        "init followed a dangling symlink and wrote the rulebook outside the data directory"
+    )
+    assert "Installed the rulebook shipped" not in out.stdout, (
+        "it reported installing rules over a link it should not have touched"
+    )
