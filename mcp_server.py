@@ -2251,9 +2251,11 @@ def replay_rules(market: Optional[str] = None) -> dict:
 
       • `backlog` — stored campaigns that do not carry something now expected of them. This is
         the list to go and ask partners for: records with names on them, not a count.
-      • `judgments` — saved judgments that were written before a measure or a rule became
-        standing, so they were never checked against it, plus any that rest on a standing
-        correction somebody has since set aside.
+      • `judgments` — saved judgments that something now applies to and did not then: a
+        measure confirmed after the judgment was written, or a rule that has started applying
+        to that brief's markets since — because it became standing later, or because it was
+        standing and its scope has changed. Either way it was never checked against it. Plus
+        any judgment that rests on a standing correction somebody has since set aside.
 
     **Nothing is rewritten and nothing is marked.** The report is derived every time it is
     asked, so no stored judgment carries a verdict about itself.

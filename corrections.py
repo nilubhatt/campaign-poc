@@ -652,6 +652,17 @@ def graduate(conn, correction_id: str, *, confirmed_by: str,
     gate = graduation(conn, correction_id, from_rulebook=from_rulebook)
     if not gate["eligible"]:
         raise ValueError(gate["what_it_means"])
+    # WHAT THE FILE DECLARES, when the caller did not say. `graduation` reads the rulebook to
+    # build the preview a person is shown — and `graduate_correction` is the tool that preview
+    # offers next, so the two reading different sources meant accepting the offer did
+    # something else: a global declaration previewed as global and graduated Peru-only,
+    # because the caller supplied no scope and the fallback is where the rule was overheard.
+    # Only when nothing was stated: the loader states both, and what it states wins.
+    if markets is None and not everywhere:
+        declared = declared_in_the_rulebook(describe(conn, correction_id)["text"])
+        if declared:
+            markets = declared["markets"] or None
+            everywhere = not declared["markets"]
     # `gate["seen_in"]` is where this library WATCHED the rule recur, and it is the right
     # answer for a rule the library inferred. It is the wrong answer for one the customer
     # declared everywhere, and that case is the likeliest a house rule has: the library

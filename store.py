@@ -641,6 +641,37 @@ CREATE TABLE IF NOT EXISTS correction_sightings (
                                          -- and what makes the fold checkable afterwards
     noted_at      REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS correction_scope (
+    -- WHEN a rule started applying where it applies, which is a different fact from when
+    -- somebody confirmed it (§8.7/§12.3). `confirmed_at` is preserved across a re-confirmation
+    -- on purpose — it is the audit field, and rewriting it would make the replay claim a
+    -- judgment that CITES a rule was never checked against it — so a rule whose SCOPE changed
+    -- later was invisible to the replay: the upgrade that put ten house rules in force
+    -- everywhere offered "see which judgments this now applies to", and the report was empty
+    -- because every one of those rules had been confirmed before the judgments were written.
+    --
+    -- A history rather than one `scope_changed_at`, because a single timestamp cannot tell
+    -- widening from narrowing: dropping SEA from a rule would make every LATAM judgment it had
+    -- already been applied to look unchecked. With the history the question is asked exactly —
+    -- did this rule reach THIS brief's markets on the day it was judged?
+    id            TEXT PRIMARY KEY,
+    correction_id TEXT NOT NULL REFERENCES corrections(id) ON DELETE CASCADE,
+    changed_at    REAL NOT NULL,
+    expected_in   TEXT NOT NULL DEFAULT '[]',
+    applies_everywhere INTEGER NOT NULL DEFAULT 0,
+    -- 0 when the rule stopped applying ANYWHERE, which is a scope like any other and the one
+    -- a table of markets alone would miss: a rule somebody set aside, a brief judged while it
+    -- was withdrawn, and the rule then reopened and confirmed again with the SAME markets —
+    -- no change to compare, so the history said it had applied throughout and the report said
+    -- nothing about the brief it was never applied to. With this column the table is an
+    -- IN-FORCE history rather than a scope history, which is the larger and more useful thing.
+    standing      INTEGER NOT NULL DEFAULT 1,
+    -- 1 when this row was DERIVED rather than recorded: the scope a rule already had on a
+    -- database written before this table, assumed to have held since it was confirmed. That
+    -- is the assumption this report made before the history existed, and marking it is what
+    -- keeps a derived past distinguishable from a recorded one (§2.4's `basis`).
+    seeded        INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS metric_values (
     id            TEXT PRIMARY KEY,
     campaign_id   TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -2943,6 +2974,10 @@ def set_aside_correction(conn, correction_id: str) -> None:
     # if the library can still say where it stood. `status` is what stops it being applied.
     conn.execute("UPDATE corrections SET status = 'ignored', offered = 1 WHERE id = ?",
                  (correction_id,))
+    # WHEN it stopped applying, for §8.7: a brief judged while this rule was withdrawn was not
+    # checked against it, and if the rule comes back with the same markets there is no scope
+    # change to notice — so the report said nothing about the one judgment it should.
+    withdraw_correction_scope(conn, correction_id)
     conn.commit()
 
 
@@ -2977,8 +3012,126 @@ def touch_correction(conn, correction_id: str, *, campaign_id: Optional[str] = N
     conn.commit()
 
 
+def correction_scope_history(conn, correction_id: str) -> list:
+    """Every scope this rule has had, oldest first. Empty for a database written before the
+    history existed, which is what makes the caller's fallback necessary rather than tidy."""
+    if not _columns(conn, "correction_scope"):
+        return []
+    return [{"changed_at": row["changed_at"],
+             "expected_in": json.loads(row["expected_in"] or "[]"),
+             "applies_everywhere": bool(row["applies_everywhere"]),
+             # A row from before this column existed is a row written by a graduation, which
+             # is the only thing that wrote one: standing.
+             "standing": bool(row["standing"]) if "standing" in row.keys() else True,
+             "basis": ("heuristic" if ("seeded" in row.keys() and row["seeded"])
+                       else "computed")}
+            for row in conn.execute(
+                # `rowid`, not `id`: the ids are random, and two changes inside one clock tick
+                # — which Windows measures in whole milliseconds — would then order
+                # arbitrarily. Insertion order is the order they happened in.
+                "SELECT * FROM correction_scope WHERE correction_id = ? "
+                "ORDER BY changed_at, rowid", (correction_id,))]
+
+
+def correction_scope_at(conn, correction_id: str, when: float) -> Optional[dict]:
+    """What this rule applied to at `when` — including `standing: False` for withdrawn — or
+    None if nothing on file covers that date at all.
+
+    Three pasts, not two, and the caller needs them apart. `None` means nothing was recorded
+    by then: the rule was not standing yet. A row with `standing: False` means it HAD been
+    standing and somebody had set it aside. A row with markets that do not reach the brief
+    means it was standing elsewhere. Collapsed into None, the report said a withdrawn rule's
+    "scope changed" — a cause the library cannot back, about a rule whose scope never moved.
+    """
+    in_effect = None
+    for change in correction_scope_history(conn, correction_id):
+        if change["changed_at"] > when:
+            break
+        in_effect = change
+    return in_effect
+
+
+def _write_correction_scope(conn, correction_id: str, *, when: float, markets: list,
+                            applies_everywhere: bool, standing: bool = True,
+                            seeded: bool = False) -> None:
+    if not _columns(conn, "correction_scope"):
+        return
+    conn.execute(
+        "INSERT INTO correction_scope (id, correction_id, changed_at, expected_in, "
+        "applies_everywhere, standing, seeded) VALUES (?,?,?,?,?,?,?)",
+        (_id("scope"), correction_id, when, json.dumps(sorted(markets)),
+         1 if applies_everywhere else 0, 1 if standing else 0, 1 if seeded else 0))
+
+
+def withdraw_correction_scope(conn, correction_id: str) -> None:
+    """Record that this rule stopped applying (§8.6's set-aside, §8.7's report).
+
+    Called by `set_aside_correction`, which is the only thing that takes a standing rule out
+    of force. `expected_in` is left alone on the row itself — where a rule USED to apply is
+    part of its record — and this says WHEN it stopped, which is the fact the replay needs.
+    """
+    history = correction_scope_history(conn, correction_id)
+    if history and not history[-1]["standing"]:
+        return
+    was = get_correction(conn, correction_id) or {}
+    if not history and was.get("confirmed_at"):
+        _write_correction_scope(conn, correction_id, when=was["confirmed_at"],
+                                markets=was.get("expected_in") or [],
+                                applies_everywhere=bool(was.get("applies_everywhere")),
+                                seeded=True)
+    _write_correction_scope(conn, correction_id, when=_now(),
+                            markets=was.get("expected_in") or [],
+                            applies_everywhere=bool(was.get("applies_everywhere")),
+                            standing=False)
+
+
+def _record_correction_scope(conn, correction_id: str, *, markets: list,
+                             applies_everywhere: bool, was: Optional[dict] = None) -> None:
+    """One row per CHANGE, and a row for what came BEFORE the history existed.
+
+    The seeding is the half that is not bookkeeping. A database written before this table has
+    no history at all, so the first row written after the upgrade would be the earliest scope
+    on file — and a rule standing in LATAM since long before a LATAM judgment would look, to
+    anything reading the history, like a rule that started applying today. Every old judgment
+    in its markets would come back onto the report as "not checked against", which is the
+    false direction: telling somebody they missed something they did not miss. So the scope
+    the row ALREADY had is recorded as having held since it was confirmed, which is exactly
+    what the report assumed before the history existed.
+
+    One row per change rather than one per confirmation: re-confirming a rule changes nothing
+    about what it applies to, and the history is read as a list of changes.
+    """
+    if not _columns(conn, "correction_scope"):
+        return
+    history = correction_scope_history(conn, correction_id)
+    # `confirmed_at` ALONE, which is the same test its sibling `withdraw_correction_scope`
+    # makes. Asking for `status == "expected"` too looked stricter and was wrong on the one
+    # path this product offers by name: `reopen` puts a rule back as PROVISIONAL on purpose,
+    # so a declared rule somebody had set aside — the likeliest `ignored` row on an upgraded
+    # install, and the one the loader offers to reopen — came through here as provisional, the
+    # seed was skipped, and the first history row was dated today. Every judgment ever made in
+    # that rule's markets then read as unchecked, including ones whose blocking finding QUOTES
+    # the rule. A rule with no `confirmed_at` has never been in force and has no past to seed.
+    if not history and was and was.get("confirmed_at"):
+        _write_correction_scope(conn, correction_id, when=was["confirmed_at"],
+                                markets=was.get("expected_in") or [],
+                                applies_everywhere=bool(was.get("applies_everywhere")),
+                                seeded=True)
+        history = correction_scope_history(conn, correction_id)
+    now = sorted(markets), bool(applies_everywhere), True
+    if history and (sorted(history[-1]["expected_in"]),
+                    history[-1]["applies_everywhere"],
+                    history[-1]["standing"]) == now:
+        return
+    _write_correction_scope(conn, correction_id, when=_now(), markets=markets,
+                            applies_everywhere=applies_everywhere)
+
+
 def graduate_correction(conn, correction_id: str, *, markets: list, confirmed_by: str,
                         applies_everywhere: bool = False) -> None:
+    # What the row said BEFORE this write, for the scope history below: on a database that
+    # predates that table, what it said is what has to be recorded as having held until now.
+    was = get_correction(conn, correction_id)
     # COALESCE, for the reason `graduate_metric` gives: the first confirmation is when this
     # became a rule, and rewriting it makes §8.7 assert that a judgment which CITES the rule
     # was never checked against it.
@@ -2987,6 +3140,11 @@ def graduate_correction(conn, correction_id: str, *, markets: list, confirmed_by
                  "retired_at = NULL, offered = 1, applies_everywhere = ? WHERE id = ?",
                  (json.dumps(sorted(markets)), confirmed_by, _now(),
                   1 if applies_everywhere else 0, correction_id))
+    # And WHEN it started applying to that, which `confirmed_at` cannot say once it is
+    # preserved across a re-confirmation. Written here because this is the only function that
+    # writes a rule's scope, so the history cannot be missed by a second door.
+    _record_correction_scope(conn, correction_id, markets=markets,
+                             applies_everywhere=applies_everywhere, was=was)
     conn.commit()
 
 

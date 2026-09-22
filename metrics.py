@@ -852,7 +852,7 @@ def expected_for(conn, *, market: Optional[str] = None, markets: Optional[list] 
         # is a thing this library WATCHED recur, so it is expected where the evidence put it,
         # and there is no such thing as a declared measure for a customer to scope to all
         # markets. The day there is, this is the line that has to learn about it.
-        if not learning.in_force(entry["expected_in"], wanted):
+        if not learning.in_force(entry["expected_in"], wanted, everywhere=False):
             continue
         out.append(name)
     return out

@@ -19,8 +19,10 @@ confident unfounded assertion this whole review is written against, with the ser
 behind it.
 
 What the server knows exactly is what a judgment was **not checked against**: which measures
-became expected after it was saved, which rules became standing after it was saved, and whether
-a rule it actually rested on has since been withdrawn. All three are `computed` in §2.4's sense
+became expected after it was saved, which rules started APPLYING TO IT after it was saved — a
+rule can become standing later, or be standing and reach this brief's markets only after its
+scope changes, and both are the same fact about the judgment — and whether a rule it actually
+rested on has since been withdrawn. All three are `computed` in §2.4's sense
 — identical for every reader, so a difference is a bug. And they are the thing a person can act
 on, because the answer to "would it change" is *judge it again*, which is an offer.
 
@@ -85,9 +87,11 @@ def run(conn, *, market: Optional[str] = None) -> dict:
              if len(stamps) > 1 else
              "One rulebook throughout, so nothing below is explained by the rules having "
              "moved.")
-            + " Everything else in this report is built from WHEN each measure and rule was "
-              "confirmed rather than from the stamp, because that is what says what was "
-              "known on a given day."),
+            + " Everything else here is built from what was IN FORCE on the day each "
+              "judgment was written rather than from the stamp — for a measure that is when "
+              "it was confirmed, and for a rule it is when the rule started applying to that "
+              "brief's markets, which is a different date whenever a rule's scope has "
+              "changed since."),
         "basis": "computed",
         "backlog": backlog,
         "judgments": judgments[:_MAX_JUDGMENTS],
@@ -197,20 +201,32 @@ def _judgments(conn, *, market: Optional[str] = None) -> list:
             continue
         after_measures = sorted(
             name for name, entry in measures.items()
-            if entry["confirmed_at"] > judged_at and _applies(entry["expected_in"], markets))
-        after_rules = [
-            {"correction_id": c["id"], "text": c["text"]}
-            for c in rules
-            if c["confirmed_at"] > judged_at
-            and _applies(c["expected_in"], markets,
-                         everywhere=bool(c.get("applies_everywhere")))]
+            if entry["confirmed_at"] > judged_at
+            # A MEASURE, which is expected where the evidence put it: there is no such
+            # thing as one a customer declared for every market.
+            and _applies(entry["expected_in"], markets, everywhere=False))
         saved = store.get_evaluation(conn, row["id"]) or {}
         rested_on, sole = _withdrawn_rules_cited(saved, withdrawn)
-        # No "exclude the rules this judgment cites" guard here, though the first fix added
-        # one: a judgment can only cite a rule that was already standing when it was saved
-        # (core refuses a provisional one), so with `confirmed_at` preserved across a
-        # re-confirmation the comparison can never put a cited rule after its own judgment.
-        # The mutation pass found the guard unreachable, which is what it is for.
+        # THE RULES THIS JUDGMENT ACTUALLY CITES, excluded — the guard that came back.
+        #
+        # It was removed as unreachable and it was: under the old comparison a judgment could
+        # only cite a rule already standing when it was saved, and with `confirmed_at`
+        # preserved across a re-confirmation, a rule confirmed before its own judgment could
+        # never sort after it. That property belonged to the comparison, and the comparison is
+        # the in-force history now. A rule can leave a brief's markets and come back — and a
+        # judgment can cite a rule that was standing SOMEWHERE ELSE, which `save_evaluation`
+        # accepts — so a rule whose own blocking finding quotes it appeared on that judgment's
+        # "never checked against" list. Whatever the history says, a judgment that quotes a
+        # rule was checked against it: that is what citing it means.
+        cited = _rules_cited(saved)
+        after_rules = []
+        for c in rules:
+            if c["id"] in cited:
+                continue
+            since = _newly_reaches(conn, c, markets, judged_at)
+            if since:
+                after_rules.append({"correction_id": c["id"], "text": c["text"],
+                                    "since": since})
         # Only the measures the subject does not actually carry. The rest are checks that
         # would pass, and a report that lists a passing check beside a real gap is one nobody
         # reads twice.
@@ -286,7 +302,7 @@ def _markets_of_subject(conn, campaign_id: Optional[str]) -> list:
     return [m for m in store.markets_of(record) if m]
 
 
-def _applies(expected_in, markets, *, everywhere: bool = False) -> bool:
+def _applies(expected_in, markets, *, everywhere: bool) -> bool:
     """Whether a rule that graduated in `expected_in` reaches a subject in `markets`.
 
     A judgment about a Japanese brief was not "unchecked" against a rule that graduated on
@@ -304,6 +320,72 @@ def _applies(expected_in, markets, *, everywhere: bool = False) -> bool:
     return learning.in_force(expected_in, markets, everywhere=everywhere)
 
 
+def _cited_by(finding: dict) -> Optional[str]:
+    """The correction this finding quotes as precedent, if any.
+
+    One definition of "this finding cites a rule", because there were three lines that each
+    reached into `precedent` for a `correction_id` and the newest of them was mine, written
+    while closing a round about two implementations of one rule.
+    """
+    return ((finding.get("precedent") or {}).get("correction_id")
+            if isinstance(finding, dict) else None) or None
+
+
+def _rules_cited(saved: dict) -> set:
+    """Every correction a saved judgment's findings quote as precedent."""
+    return {_cited_by(finding) for finding in (saved.get("findings") or [])} - {None}
+
+
+def _newly_reaches(conn, rule: dict, markets: list, judged_at: float) -> Optional[str]:
+    """WHY this rule reaches this brief now and did not on the day it was judged, or None.
+
+    Three answers, not one, because they are three different things for a reader to do
+    something about: `became_standing` is a rule nobody had confirmed yet, `scope_changed` is
+    a rule they confirmed months ago that did not apply HERE until its scope moved, and
+    `was_withdrawn` is a rule that was standing, was set aside, and has since been put back.
+    Reported as one sentence — "became standing after this was judged" — the other two read as
+    mistakes, and the reader who checks `correction_status` finds a confirmation date from
+    before the judgment and concludes the report is broken. Which is what happened. Reported
+    as "its scope changed", a withdrawal states a cause the library cannot back: that rule's
+    scope never moved.
+
+    Asked of the scope history rather than of `confirmed_at`, because those are two different
+    facts and only the first is the one this report is about. `confirmed_at` is preserved
+    across a re-confirmation — deliberately, it is the audit field — so a rule that was
+    standing but in force NOWHERE when a brief was judged, and in force everywhere afterwards,
+    looked to this report like a rule that had been applied all along. That is precisely the
+    upgraded install: ten house rules reaching nothing, briefs judged without them, the repair
+    offering "see which judgments this now applies to", and an empty report.
+
+    The history also keeps the other direction honest, which a single "scope changed at"
+    timestamp could not: narrowing a rule from LATAM+SEA to LATAM changes nothing about a
+    LATAM judgment that WAS checked against it, and re-listing it would be a false claim in
+    the more damaging direction — the report saying somebody missed something they did not.
+
+    A database written before the history existed has none, and then the old question is the
+    best available answer: was it confirmed after this judgment.
+    """
+    import store
+
+    if not _applies(rule["expected_in"], markets,
+                    everywhere=bool(rule.get("applies_everywhere"))):
+        return None                       # it does not reach this brief even now
+    confirmed_after = rule["confirmed_at"] > judged_at
+    history = store.correction_scope_history(conn, rule["id"])
+    if not history:
+        return "became_standing" if confirmed_after else None
+    then = store.correction_scope_at(conn, rule["id"], judged_at)
+    if (then and then["standing"]
+            and _applies(then["expected_in"], markets,
+                         everywhere=then["applies_everywhere"])):
+        return None                       # it reached this brief on the day it was judged
+    if confirmed_after:
+        return "became_standing"          # nobody had confirmed it yet
+    if then and not then["standing"]:
+        return "was_withdrawn"            # standing, set aside, and since put back
+    return "scope_changed"                # standing, and not here
+
+
 def _withdrawn_rules_cited(saved: dict, withdrawn: dict) -> tuple:
     """Standing corrections this judgment rested on that have since been set aside.
 
@@ -317,7 +399,7 @@ def _withdrawn_rules_cited(saved: dict, withdrawn: dict) -> tuple:
     out, seen = [], set()
     findings = saved.get("findings") or []
     for finding in findings:
-        cited = (finding.get("precedent") or {}).get("correction_id")
+        cited = _cited_by(finding)
         if cited in withdrawn and cited not in seen:
             seen.add(cited)
             out.append({"correction_id": cited, "text": withdrawn[cited]["text"],
@@ -333,8 +415,7 @@ def _withdrawn_rules_cited(saved: dict, withdrawn: dict) -> tuple:
         # rule that has been withdrawn.
         and all(f.get("kind") == "guardrail_breach" for f in argued
                 if f.get("severity") in ("blocking", "should_fix"))
-        and all((f.get("precedent") or {}).get("correction_id") in withdrawn
-                for f in breaches))
+        and all(_cited_by(f) in withdrawn for f in breaches))
     return out, sole
 
 
@@ -359,10 +440,30 @@ def _judgment_sentence(consequence: str, gaps: list, measures: list, rules: list
                 f"That is a difference in the evidence, not a verdict — whether it changes "
                 f"anything is the judgment's to make.")
     named = [c["text"] for c in rules]
-    return (f"{len(named)} rule{'s' * (len(named) != 1)} became standing here after this was "
-            f"judged, so it was never checked against "
+    # WHY each one is newly here, because a reader who is told a rule "became standing after
+    # this was judged" and then finds a confirmation date from before it concludes the report
+    # is broken. Both sentences describe the same fact about the judgment — it was not checked
+    # against this rule — and they are different facts about the RULE.
+    moved = [c["text"] for c in rules if c.get("since") == "scope_changed"]
+    back = [c["text"] for c in rules if c.get("since") == "was_withdrawn"]
+    new_here = [c["text"] for c in rules
+                if c.get("since") not in ("scope_changed", "was_withdrawn")]
+    how = []
+    if new_here:
+        how.append(f"{len(new_here)} became standing here after this was judged")
+    if moved:
+        how.append(f"{len(moved)} {'was' if len(moved) == 1 else 'were'} already standing and "
+                   f"did not apply to this brief until its scope changed")
+    if back:
+        how.append(f"{len(back)} {'was' if len(back) == 1 else 'were'} set aside when this was "
+                   f"judged and {'has' if len(back) == 1 else 'have'} since been put back")
+    return (f"{' and '.join(how)}, so it was never checked against "
             f"{'them' if len(named) != 1 else 'it'}: {'; '.join(named[:2])}"
-            f"{' and others' if len(named) > 2 else ''}. Whether this brief breaks "
+            f"{' and others' if len(named) > 2 else ''}"
+            # A rule is a sentence and usually ends in a period, so a second one read as a
+            # typo in the middle of the report ("…all recipients.. Whether…").
+            f"{'' if named and named[min(len(named), 2) - 1].endswith('.') else '.'}"
+            f" Whether this brief breaks "
             f"{'any of them' if len(named) != 1 else 'it'} is a judgment, so the library does "
             f"not guess — judge it again to find out.")
 
@@ -488,7 +589,7 @@ def _would_miss(conn, record: dict, markets: list, name: str) -> bool:
     if record.get("record_type") not in learning.CHECKABLE_RECORDS:
         return False
     where = [m for m in store.markets_of(record) if m]
-    if not _applies(markets, where):
+    if not _applies(markets, where, everywhere=False):
         return False
     return not [v for v in metrics.values_for(conn, record["id"], name)
                 if v["metric_type"] == "actual"]

@@ -4266,13 +4266,19 @@ def _came_from_a_rulebook(conn, correction_id: str) -> bool:
                for sighting in corrections.sightings(conn, correction_id))
 
 
-def _no_longer_declared(conn, declared_now: set) -> list:
+def _no_longer_declared(conn, still_declared: set) -> list:
     """Standing rules that came from a rulebook and are not in it any more (§12.3).
 
     A customer edits the wording or deletes a line, and the old rule keeps applying — eleven
     standing for ten declared, neither wrong on its face. Reported rather than retired
     automatically: a typo in a file must not silently withdraw a rule that saved judgments
     already cite.
+
+    `still_declared` is the set of ROWS this run's file reached, not the texts in it, because
+    a declaration and the rule it lands on can have different words: `find` follows a merge,
+    so a file declaring a wording somebody folded into another rule puts THAT rule in force.
+    Compared on text, the loader loaded a rule and said in the same response that it is no
+    longer in the rulebook and should be retired.
 
     Here rather than inside the loop, because the loop is not the only caller and the one that
     was missing is the worst case: a rulebook whose `corrections:` a customer has EMPTIED
@@ -4281,7 +4287,7 @@ def _no_longer_declared(conn, declared_now: set) -> list:
     """
     return [row["text"] for row in corrections.all_of_them(conn)
             if row.get("status") == "expected"
-            and row["text"].casefold() not in declared_now
+            and row["id"] not in still_declared
             and _came_from_a_rulebook(conn, row["id"])]
 
 
@@ -4347,9 +4353,18 @@ def load_declared_corrections(conn, *, confirmed_by: str) -> dict:
     for entry in declared:
         existing = corrections.find(conn, entry["text"])
         if existing and existing["correction_id"] in handled:
+            # WHY they are one rule, and it is not always the same reason. Somebody may have
+            # answered `same_rule` about them — a decision — or the two lines may differ only
+            # in case or punctuation, which `corrections._normalise` folds with nobody asked.
+            # Reporting the second as the first states a human judgment that never happened,
+            # which is exactly the `judged` / `heuristic` distinction this product turns on.
             same_rule_on_file.append(
                 {"declared": entry["text"], "same_as": handled[existing["correction_id"]],
-                 "correction_id": existing["correction_id"]})
+                 "correction_id": existing["correction_id"],
+                 "basis": "judged" if existing.get("merged_into") or [
+                     row for row in corrections.all_of_them(conn)
+                     if row.get("merged_into") == existing["correction_id"]]
+                 else "heuristic"})
             continue
         if existing:
             handled[existing["correction_id"]] = entry["text"]
@@ -4423,6 +4438,10 @@ def load_declared_corrections(conn, *, confirmed_by: str) -> dict:
                 # after three campaigns: those are different claims about how much is known.
                 provenance=f"{entry['provenance']} {_DECLARED_MARK}{version})",
             )["correction_id"]
+        # A row this file reached, however it got here — the drift sweep asks that question of
+        # rows rather than of words, and a rule created a moment ago is not a rule the file
+        # has stopped declaring.
+        handled[correction_id] = entry["text"]
         promoted = corrections.graduate(
             conn, correction_id, confirmed_by=who, from_rulebook=version,
             # No market list means EVERYWHERE, which is what a house rule is.
@@ -4439,7 +4458,7 @@ def load_declared_corrections(conn, *, confirmed_by: str) -> dict:
     # for ten declared, neither wrong on its face, and the offer goes quiet because everything
     # declared is on file. Reported rather than retired automatically: a typo in a file must
     # not silently withdraw a rule that saved judgments already cite.
-    stale = _no_longer_declared(conn, {entry["text"].casefold() for entry in declared})
+    stale = _no_longer_declared(conn, set(handled))
 
     return {
         "loaded": len(loaded), "already": already, "basis": "computed",
@@ -4470,10 +4489,15 @@ def load_declared_corrections(conn, *, confirmed_by: str) -> dict:
             + (f" {len(repaired)} rule(s) already on file now apply where your rulebook says "
                f"they do; nothing already judged is rewritten."
                if repaired else "")
-            + (f" {len(same_rule_on_file)} line(s) in your rulebook are one rule here, "
-               f"because somebody answered `same_rule` about them: only the first of each is "
-               f"applied, and the others are listed under `same_rule_on_file`. Give them one "
-               f"wording in the file, or the scopes you wrote against them cannot both hold."
+            + (f" {len(same_rule_on_file)} line(s) in your rulebook are one rule here"
+               + (" — somebody answered `same_rule` about them"
+                  if any(m["basis"] == "judged" for m in same_rule_on_file) else "")
+               + (" — and some differ only in case or punctuation, which this library folds "
+                  "into one rule without asking"
+                  if any(m["basis"] == "heuristic" for m in same_rule_on_file) else "")
+               + f". Only the first of each is applied, and the others are listed under "
+                 f"`same_rule_on_file`. Give them one wording in the file, or the scopes you "
+                 f"wrote against them cannot both hold."
                if same_rule_on_file else "")
             + (f" {len(set_aside)} rule(s) your rulebook declares were set aside here and "
                f"were NOT put back: that was somebody's decision and a file does not reverse "

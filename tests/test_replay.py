@@ -769,3 +769,386 @@ def test_a_judgment_with_no_record_is_not_listed_against_a_rule_that_applies_eve
     _declared_everywhere(conn)
 
     assert replay.run(conn)["judgments"] == []
+
+
+def test_a_rule_that_widens_to_a_new_market_reaches_that_market_s_judgments(conn):
+    """A rule standing in LATAM when a Japanese brief was judged did not apply to it, so the
+    judgment is not listed. Widen the rule to Japan and it is — the rule reaches that brief
+    now and did not then, which is what this report is for. `confirmed_at` cannot see that:
+    it says when somebody first confirmed the rule, which was before the judgment either way.
+    """
+    subject = _campaign(conn, "Japan v1", market="Japan")
+    cid = _standing_rule(conn)                       # LATAM, SEA, EMEA
+    _judged(conn, subject, title="Japan v1")
+    assert replay.run(conn)["judgments"] == []
+
+    # `store.graduate_correction` is the one function that writes a rule's scope, and the
+    # only way a standing rule's scope moves: `graduate` refuses a rule already in force.
+    store.graduate_correction(conn, cid, markets=["LATAM", "SEA", "EMEA", "Japan"],
+                              confirmed_by="R. Vega")
+
+    rows = replay.run(conn)["judgments"]
+    assert [r["subject_title"] for r in rows] == ["Japan v1"]
+    assert rows[0]["consequence"] == "rule_not_applied"
+
+
+def test_a_rule_that_narrows_does_not_relist_the_markets_it_kept(conn):
+    """The other direction, and the one a timestamp alone gets wrong: a LATAM brief judged
+    under a rule that covered LATAM and SEA was checked against it. Dropping SEA changes
+    nothing about that judgment, and saying "not checked against" would be false."""
+    subject = _campaign(conn, "Colombia v1", market="LATAM")
+    cid = _standing_rule(conn)                       # LATAM, SEA, EMEA
+    _judged(conn, subject, title="Colombia v1")
+
+    store.graduate_correction(conn, cid, markets=["LATAM"], confirmed_by="R. Vega")
+
+    assert replay.run(conn)["judgments"] == [], (
+        "narrowing a rule made a judgment it had already been applied to look unchecked")
+
+
+def test_a_database_written_before_the_scope_history_answers_as_it_used_to(conn):
+    """Nobody's library has this history for rules confirmed under an earlier release, and a
+    report that reads an empty history as "nothing applied then" would put every judgment ever
+    saved on the list. Without a history the old question is the best answer there is: was the
+    rule confirmed after this judgment."""
+    already = _campaign(conn, "Colombia v1")
+    cid = _standing_rule(conn)
+    _judged(conn, already, title="Colombia v1")
+    later = _campaign(conn, "Colombia v2")
+    _judged(conn, later, title="Colombia v2")
+    conn.execute("DELETE FROM correction_scope")       # as an older release left it
+    conn.commit()
+
+    assert replay.run(conn)["judgments"] == [], (
+        "a rule standing before these judgments came back as never applied")
+
+    # And the other half of that fallback still works: confirmed AFTER the judgment is listed.
+    conn.execute("UPDATE corrections SET confirmed_at = ? WHERE id = ?",
+                 (store._now(), cid))
+    conn.commit()
+    assert len(replay.run(conn)["judgments"]) == 2
+
+
+def test_re_confirming_a_rule_that_has_not_moved_relists_nothing(conn):
+    """The history is a list of CHANGES. A confirmation that changes no scope is not one, and
+    recording it would say the rule started applying today — putting every judgment in its
+    markets back on the report, on an upgrade that changed nothing."""
+    subject = _campaign(conn, "Colombia v1")
+    cid = _standing_rule(conn)
+    _judged(conn, subject, title="Colombia v1")
+
+    before = len(store.correction_scope_history(conn, cid))
+    store.graduate_correction(conn, cid, markets=["LATAM", "SEA", "EMEA"],
+                              confirmed_by="R. Vega")
+
+    assert len(store.correction_scope_history(conn, cid)) == before, (
+        "a re-confirmation with the same scope was recorded as a scope change")
+    assert replay.run(conn)["judgments"] == []
+
+
+def test_a_rule_that_predates_the_history_and_is_then_re_confirmed_relists_nothing(conn):
+    """The two halves together, which is the upgrade an install actually performs: rules with
+    no history, and then something re-confirms one. The first row written afterwards would be
+    the earliest scope on file, so a rule standing since long before a judgment would read as
+    having started applying today. What it already said is recorded as having held since it
+    was confirmed — the same assumption the report made before this table existed."""
+    subject = _campaign(conn, "Colombia v1")
+    cid = _standing_rule(conn)
+    _judged(conn, subject, title="Colombia v1")
+    conn.execute("DELETE FROM correction_scope")
+    conn.commit()
+
+    store.graduate_correction(conn, cid, markets=["LATAM", "SEA", "EMEA"],
+                              confirmed_by="R. Vega")
+
+    assert replay.run(conn)["judgments"] == [], (
+        "an upgrade that changed nothing put an old judgment back on the report")
+    assert [h["expected_in"] for h in store.correction_scope_history(conn, cid)] == [
+        ["EMEA", "LATAM", "SEA"]], "the scope it already had was not carried forward"
+
+
+def test_a_judgment_made_while_a_rule_was_withdrawn_is_listed_when_it_comes_back(conn):
+    """Set aside, judged, reopened, confirmed again with the SAME markets. There is no scope
+    change to compare, so a history of markets alone said the rule had applied throughout and
+    this report said nothing about the one judgment it was never applied to. Withdrawn is a
+    scope like any other: it is the scope of nothing."""
+    cid = _standing_rule(conn)
+    corrections.set_aside(conn, cid, why="paused while the client rethinks")
+    subject = _campaign(conn, "Colombia v1")
+    _judged(conn, subject, title="Colombia v1")
+    assert replay.run(conn)["judgments"] == [], "it was not standing, so nothing is claimed"
+
+    corrections.reopen(conn, cid)
+    corrections.graduate(conn, cid, confirmed_by="R. Vega")
+
+    rows = replay.run(conn)["judgments"]
+    assert [r["subject_title"] for r in rows] == ["Colombia v1"], (
+        "the rule is back in force and the brief judged without it is not on the report")
+    assert rows[0]["consequence"] == "rule_not_applied"
+
+
+def test_a_judgment_made_before_a_rule_was_withdrawn_is_not_relisted(conn):
+    """The other direction. This brief WAS checked against the rule, then somebody set the
+    rule aside and put it back. Nothing about that judgment changed, and saying it was never
+    checked would be the false claim that matters."""
+    subject = _campaign(conn, "Colombia v1")
+    cid = _standing_rule(conn)
+    _judged(conn, subject, title="Colombia v1")
+
+    corrections.set_aside(conn, cid, why="paused")
+    corrections.reopen(conn, cid)
+    corrections.graduate(conn, cid, confirmed_by="R. Vega")
+
+    assert replay.run(conn)["judgments"] == []
+
+
+def test_setting_a_rule_aside_twice_records_when_it_stopped_once(conn):
+    """`set_aside` takes no view of the status it found — it is idempotent at the row — so it
+    can be called on a rule already set aside. The history says WHEN the rule stopped
+    applying, and that is the first time, not the last time somebody clicked."""
+    cid = _standing_rule(conn)
+    corrections.set_aside(conn, cid, why="paused")
+    after_first = store.correction_scope_history(conn, cid)
+
+    corrections.set_aside(conn, cid, why="still paused")
+
+    assert store.correction_scope_history(conn, cid) == after_first, (
+        "the second set-aside moved the date the rule stopped applying")
+
+
+def test_a_rule_withdrawn_on_a_database_with_no_history_keeps_what_came_before(conn):
+    """The upgrade case for withdrawal. Without the scope it already had recorded as having
+    held until then, the earliest row in the history is "withdrawn" — so a brief judged years
+    earlier, against the rule, WHILE it was standing, has no scope at its own date and reads
+    as never checked once the rule comes back."""
+    subject = _campaign(conn, "Colombia v1")
+    cid = _standing_rule(conn)
+    _judged(conn, subject, title="Colombia v1")
+    conn.execute("DELETE FROM correction_scope")        # as an older release left it
+    conn.commit()
+
+    corrections.set_aside(conn, cid, why="paused")
+    corrections.reopen(conn, cid)
+    corrections.graduate(conn, cid, confirmed_by="R. Vega")
+
+    assert replay.run(conn)["judgments"] == [], (
+        "a judgment this rule HAD been applied to came back as never checked")
+
+
+def test_two_scope_changes_in_one_clock_tick_keep_the_order_they_happened_in(conn):
+    """Windows measures `time.time()` in whole milliseconds, so two changes to one rule can
+    share a timestamp. Ordered by the random row id, which of them came last is a coin toss —
+    and the last one is the scope that is in force. Ordered by insertion, it is the truth.
+
+    The ids here are deliberately arranged to sort against insertion order, which is what
+    makes this test able to fail rather than able to pass twice."""
+    cid = _standing_rule(conn)
+    conn.execute("DELETE FROM correction_scope")
+    same_tick = 1_700_000_000.0
+    for row_id, markets in (("zzz", '["LATAM"]'), ("aaa", '["LATAM", "SEA"]')):
+        conn.execute("INSERT INTO correction_scope (id, correction_id, changed_at, "
+                     "expected_in, applies_everywhere, standing) VALUES (?,?,?,?,0,1)",
+                     (row_id, cid, same_tick, markets))
+    conn.commit()
+
+    history = store.correction_scope_history(conn, cid)
+    assert [h["expected_in"] for h in history] == [["LATAM"], ["LATAM", "SEA"]]
+    assert store.correction_scope_at(conn, cid, same_tick)["expected_in"] == ["LATAM", "SEA"]
+
+
+def test_a_rule_reopened_on_an_upgraded_database_does_not_accuse_an_old_judgment(conn):
+    """The offer this product makes for a declared rule somebody set aside is
+    `reopen_correction`, and `reopen` leaves the rule PROVISIONAL by design — so the seed that
+    records what a row already applied to was skipped on exactly that path. The first history
+    row was then dated today, and every judgment ever made in the rule's markets read as
+    unchecked, including ones whose blocking finding CITES the rule.
+
+    The unrecorded set-aside window stays invisible, which is the honest answer: nothing on
+    file says when it happened, and silence is the safe direction."""
+    subject = _campaign(conn, "Colombia v1")
+    cid = _standing_rule(conn)
+    eid = core.save_evaluation(
+        conn, subject_title="Colombia v1", campaign_id=subject, verdict="revise",
+        summary="Seeds four.", approve_if="Seed one colourway.",
+        findings=[{"severity": "blocking", "kind": "guardrail_breach",
+                   "finding": "Seeds four colourways", "fix": "Seed one",
+                   "precedent": {"correction_id": cid, "quote": SEEDING}}])["evaluation_id"]
+    corrections.set_aside(conn, cid, why="paused while the client rethinks")
+    conn.execute("DELETE FROM correction_scope")     # an install from before the history
+    conn.commit()
+
+    corrections.reopen(conn, cid)
+    corrections.graduate(conn, cid, confirmed_by="R. Vega")
+
+    listed = [r for r in replay.run(conn)["judgments"] if r["evaluation_id"] == eid]
+    assert not [r for r in listed
+                if cid in [c["correction_id"] for c in
+                           r["not_checked_against"]["corrections"]]], (
+        "the report says this judgment was never checked against the rule its own blocking "
+        "finding quotes")
+
+
+def test_a_rule_a_judgment_cites_is_never_reported_as_unchecked(conn):
+    """The guard that came back. It was removed as unreachable, and it WAS — under the old
+    comparison, where a rule confirmed before its own judgment could not sort after it. The
+    comparison is the in-force history now, and `save_evaluation` accepts a judgment citing a
+    rule standing in another market: cited here, out of scope then, in scope after a widening,
+    and the report puts the rule its own blocking finding quotes on its "never checked
+    against" list. Whatever the history says, a judgment that quotes a rule was checked
+    against it — that is what citing it means."""
+    for market in ("SEA", "EMEA", "APAC"):
+        corrections.note(conn, text=SEEDING, provenance=f"{market} slide 4",
+                         campaign_id=_campaign(conn, f"said-{market}", market=market))
+    cid = corrections.find(conn, SEEDING)["correction_id"]
+    corrections.graduate(conn, cid, confirmed_by="R. Vega")      # SEA, EMEA, APAC
+
+    subject = _campaign(conn, "Colombia v1", market="LATAM")
+    eid = core.save_evaluation(
+        conn, subject_title="Colombia v1", campaign_id=subject, verdict="revise",
+        summary="Seeds four.", approve_if="Seed one colourway.",
+        findings=[{"severity": "blocking", "kind": "guardrail_breach",
+                   "finding": "Seeds four colourways", "fix": "Seed one",
+                   "precedent": {"correction_id": cid, "quote": SEEDING}}])["evaluation_id"]
+
+    store.graduate_correction(conn, cid, markets=["SEA", "EMEA", "APAC", "LATAM"],
+                              confirmed_by="R. Vega")
+
+    rows = [r for r in replay.run(conn)["judgments"] if r["evaluation_id"] == eid]
+    assert not [c for r in rows for c in r["not_checked_against"]["corrections"]
+                if c["correction_id"] == cid], (
+        "a judgment's own cited rule is on its 'never checked against' list")
+
+
+def test_the_report_says_which_of_the_two_things_happened(conn):
+    """A reader told a rule "became standing after this was judged" who then looks it up and
+    finds a confirmation date from BEFORE the judgment concludes the report is broken — which
+    is what the reviewer who found the missing judgments concluded. Both rules below were
+    never applied to this brief, and for different reasons; the report names which."""
+    subject = _campaign(conn, "Japan v1", market="Japan")
+    moved = _standing_rule(conn)                       # LATAM, SEA, EMEA — not Japan
+    _judged(conn, subject, title="Japan v1")
+    fresh = _declared_everywhere(conn, "No price promises in client-facing creative.")
+    store.graduate_correction(conn, moved, markets=["LATAM", "SEA", "EMEA", "Japan"],
+                              confirmed_by="R. Vega")
+
+    row = replay.run(conn)["judgments"][0]
+    since = {c["correction_id"]: c["since"] for c in row["not_checked_against"]["corrections"]}
+    assert since == {moved: "scope_changed", fresh: "became_standing"}, since
+    assert "1 became standing here after this was judged" in row["what_it_means"]
+    assert ("1 was already standing and did not apply to this brief until its scope changed"
+            in row["what_it_means"]), row["what_it_means"]
+
+
+def test_a_reconstructed_past_is_marked_as_one(conn):
+    """The seeded row is an ASSUMPTION — the scope a rule already had, taken to have held
+    since it was confirmed, because nothing on a database written before this table recorded
+    when it started applying. It is the honest assumption and it is still an assumption, so it
+    does not read like a recorded change (§2.4: a computed claim and a stated one must never
+    read alike)."""
+    cid = _standing_rule(conn)
+    conn.execute("DELETE FROM correction_scope")       # as an older release left it
+    conn.commit()
+
+    store.graduate_correction(conn, cid, markets=["LATAM", "Japan"], confirmed_by="R. Vega")
+
+    history = store.correction_scope_history(conn, cid)
+    assert [h["basis"] for h in history] == ["heuristic", "computed"], history
+    assert history[0]["expected_in"] == ["EMEA", "LATAM", "SEA"], "the past it assumed"
+    assert history[1]["expected_in"] == ["Japan", "LATAM"], "the change it recorded"
+
+
+def test_a_rule_put_back_after_being_set_aside_says_so_rather_than_blaming_its_scope(conn):
+    """Its scope never moved. "Already standing and did not apply to this brief until its
+    scope changed" is a cause the library cannot back — the third of three pasts, and the
+    report had two words for them."""
+    cid = _standing_rule(conn)
+    corrections.set_aside(conn, cid, why="paused while the client rethinks")
+    subject = _campaign(conn, "Colombia v1")
+    _judged(conn, subject, title="Colombia v1")
+    corrections.reopen(conn, cid)
+    corrections.graduate(conn, cid, confirmed_by="R. Vega")
+
+    row = replay.run(conn)["judgments"][0]
+    assert [c["since"] for c in row["not_checked_against"]["corrections"]] == ["was_withdrawn"]
+    assert ("1 was set aside when this was judged and has since been put back"
+            in row["what_it_means"]), row["what_it_means"]
+    assert "scope changed" not in row["what_it_means"]
+    # A rule is a sentence and ends in a period; the report used to add a second one.
+    assert ".. Whether" not in row["what_it_means"]
+
+
+def test_a_judgment_written_after_a_repair_is_not_on_the_report(conn):
+    """The flow this whole change ships for, from the other side. Nowhere → everywhere is the
+    one scope change with an identical market list, so an equality test that compares markets
+    alone reads it as no change at all — and then a brief judged AFTER the repair, which was
+    checked against the rule, is reported as never checked. Mutation found nothing watching
+    this: every other test judges before the repair."""
+    cid = _standing_rule(conn)
+    conn.execute("DELETE FROM correction_scope")       # an install from before the history
+    conn.commit()
+    store.graduate_correction(conn, cid, markets=[], confirmed_by="R. Vega",
+                              applies_everywhere=False)    # in force nowhere, as it shipped
+    store.graduate_correction(conn, cid, markets=[], confirmed_by="R. Vega",
+                              applies_everywhere=True)     # the repair
+
+    subject = _campaign(conn, "Peru v1", market="Peru")
+    _judged(conn, subject, title="Peru v1")
+
+    assert replay.run(conn)["judgments"] == [], (
+        "a brief judged AFTER the repair was checked against these rules")
+
+
+def test_a_judgment_written_after_a_rule_came_back_is_not_on_the_report(conn):
+    """The same shape for a withdrawal: set aside, put back with the SAME markets, and only
+    then judged. Nothing about that judgment was unchecked."""
+    cid = _standing_rule(conn)
+    corrections.set_aside(conn, cid, why="paused")
+    corrections.reopen(conn, cid)
+    corrections.graduate(conn, cid, confirmed_by="R. Vega")
+
+    subject = _campaign(conn, "Colombia v1")
+    _judged(conn, subject, title="Colombia v1")
+
+    assert replay.run(conn)["judgments"] == []
+
+
+def test_a_reconstructed_past_keeps_whether_the_rule_applied_everywhere(conn):
+    """The seeded row carries `applies_everywhere`, not only the market list. Dropped, a
+    global rule's reconstructed past reads as a rule scoped to nothing — so narrowing it
+    afterwards would report every brief it HAD applied to as never checked."""
+    cid = _standing_rule(conn)
+    store.graduate_correction(conn, cid, markets=[], confirmed_by="R. Vega",
+                              applies_everywhere=True)
+    subject = _campaign(conn, "Peru v1", market="Peru")
+    _judged(conn, subject, title="Peru v1")
+    conn.execute("DELETE FROM correction_scope")       # as an older release left it
+    conn.commit()
+
+    store.graduate_correction(conn, cid, markets=["Peru"], confirmed_by="R. Vega")
+
+    seeded = store.correction_scope_history(conn, cid)[0]
+    assert seeded["applies_everywhere"] and seeded["basis"] == "heuristic"
+    assert replay.run(conn)["judgments"] == [], (
+        "a brief this rule already applied to came back as never checked")
+
+
+def test_a_reopened_rule_does_not_accuse_a_judgment_that_never_cited_it(conn):
+    """The same defect as the citing version above, with the citation removed — because the
+    citation guard was masking it. A judgment that quotes the rule is excluded from this
+    report whatever the history says, so the test that proved the seed stopped proving it the
+    moment that guard came back, and the mutation pass said so.
+
+    Plain judgment, rule standing when it was written, set aside, upgraded from a release with
+    no history, reopened through the offer the loader makes: nothing was unchecked here."""
+    subject = _campaign(conn, "Colombia v1")
+    cid = _standing_rule(conn)
+    _judged(conn, subject, title="Colombia v1")
+    corrections.set_aside(conn, cid, why="paused while the client rethinks")
+    conn.execute("DELETE FROM correction_scope")       # an install from before the history
+    conn.commit()
+
+    corrections.reopen(conn, cid)
+    corrections.graduate(conn, cid, confirmed_by="R. Vega")
+
+    assert replay.run(conn)["judgments"] == [], (
+        "a rule this judgment WAS checked against came back as never applied")

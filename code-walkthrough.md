@@ -266,13 +266,22 @@ knows without anyone typing it.
 ### `replay.py` — replay as a report
 
 `run()` reports what a saved judgment was **not checked against** — which measures and rules
-became expected after it was written, and whether a rule it actually cited has since been
+started applying to it after it was written, and whether a rule it actually cited has since been
 withdrawn. It does not say what would have been flagged and deliberately cannot: whether a
 brief breaks a rule is a judgment, the server cannot re-run the model, and the offer to judge
 it again is the honest version of that question. `if_graduated()` answers "what would change if
 this rule became standing" — so graduating a rule is a decision somebody can see the
 consequences of first, and for a house rule the customer declared it counts every market
 rather than the one the rule happened to be overheard in.
+
+The rules half asks the `correction_scope` history — *did this rule reach this brief's markets on
+the day it was judged* — rather than comparing `confirmed_at`. Those are two different facts:
+`confirmed_at` is preserved across a re-confirmation because it is the audit field, so a rule whose
+SCOPE changed later looked to this report like one that had applied all along. That is how an
+upgrade came to offer "see which judgments this now applies to" and open an empty report. A
+history rather than one "scope changed at" timestamp, because a single timestamp cannot tell
+widening from narrowing — and re-listing a judgment a rule HAD been applied to is the more
+damaging of the two errors.
 
 ### `agreement.py` — the instrument
 

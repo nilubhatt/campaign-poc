@@ -666,3 +666,30 @@ def test_a_correction_too_long_to_store_is_refused_before_anything_is_written(co
 
     with pytest.raises(ValueError, match="provenance"):
         rulebook.load()
+
+
+def test_there_is_one_route_to_writing_when_a_rule_started_applying(conn):
+    """The same guard as `graduate_correction`'s, for the table that answers "did this rule
+    apply to this brief on the day it was judged". Two writers exist on purpose — a
+    confirmation and a withdrawal are different events — and both live in `store`, beside the
+    one function that writes the scope itself. A third door in another module is how the two
+    come to disagree about what "no history" means, which is exactly the defect review found
+    here: the two seeds diverged, and the divergence WAS the bug."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    callers = []
+    for path in sorted(root.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, (ast.Name, ast.Attribute))
+                    and getattr(node.func, "id", getattr(node.func, "attr", ""))
+                    in ("_write_correction_scope", "_record_correction_scope",
+                        "withdraw_correction_scope")):
+                callers.append(path.name)
+
+    assert set(callers) == {"store.py"}, (
+        f"the in-force history is written from more than one module: {sorted(set(callers))}"
+    )

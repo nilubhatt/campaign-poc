@@ -158,6 +158,7 @@ erDiagram
     evaluations ||--o{ reconciliations : "prediction vs reality"
     metrics ||--|| metric_registry : "graduated keys"
     corrections ||--o{ correction_sightings : "each time it was said"
+    corrections ||--o{ correction_scope : "when it started applying where"
 ```
 
 | Group | Tables | What it holds |
@@ -165,7 +166,7 @@ erDiagram
 | **Records** | `campaigns`, `campaign_chunks`, `assets`, `asset_fingerprints`, `import_batches` | the campaigns themselves, their deck text chunked for search, their images |
 | **Outcomes** | `metrics`, `metric_values`, `metric_registry`, `measure_history` | what happened, typed and keyed |
 | **Judgment** | `evaluations`, `reconciliations`, `retrievals`, `answers` | what Claude said, what it rested on, how it turned out |
-| **Learning** | `corrections`, `correction_sightings`, `library_state` | client rules, each sighting, and whether they have graduated |
+| **Learning** | `corrections`, `correction_sightings`, `correction_scope`, `library_state` | client rules, each sighting, when each started applying where, and whether they have graduated |
 | **Execution** | `commitments`, `execution_drift`, `drift_classifications` | what the brief promised vs what the photographs show |
 | **Context** | `context_events`, `context_attributions` | what else was going on when a campaign ran |
 | **People** | `authorship`, `erasures`, `reactions`, `feedback_notes` | who said what, and GDPR-shaped removal |

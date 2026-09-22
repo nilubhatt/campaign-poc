@@ -46,6 +46,39 @@ def _as_the_customers(conn):
     return path
 
 
+def _as_the_old_loader_left_it(conn):
+    """The rows an upgraded install actually holds.
+
+    Written through `store` rather than by re-running an old code path: the earlier loader
+    threw the declared markets away and promoted with `applies_everywhere=False`, leaving
+    `expected_in = []` — "no checklist", so the rule reached no market at all. `graduate` will
+    not produce that state any more (it reads the declaration itself now), and a fixture that
+    monkeypatches the function under test into behaving like last year's version stops
+    reproducing anything the moment that function is fixed. What has to be reproduced is the
+    DATABASE.
+    """
+    import core
+    import store
+
+    core.load_declared_corrections(conn, confirmed_by="R. Vega")
+    for row in store.corrections(conn):
+        if row["status"] == "expected":
+            store.graduate_correction(conn, row["id"], markets=[],
+                                      confirmed_by=row["confirmed_by"] or "R. Vega",
+                                      applies_everywhere=False)
+    # AND NO IN-FORCE HISTORY, which is the other half of "as the old loader left it" and the
+    # half a fixture written through today's `store` cannot help writing. With those rows
+    # present the upgrade takes the branch that READS a history; a real upgraded install takes
+    # the branch that has to reconstruct one, and that is the branch worth testing.
+    conn.execute("DELETE FROM correction_scope")
+    conn.commit()
+    assert all(r["expected_in"] == [] and not r["applies_everywhere"]
+               for r in store.corrections(conn) if r["status"] == "expected"), (
+        "the fixture did not reproduce the old state")
+    assert not conn.execute("SELECT COUNT(*) FROM correction_scope").fetchone()[0], (
+        "the fixture left an in-force history no upgraded install has")
+
+
 def test_it_ships():
     assert FABLETICS.exists(), f"no customer rulebook at {FABLETICS}"
 
@@ -499,13 +532,7 @@ def test_an_install_that_ran_the_old_loader_is_repaired_on_upgrade(conn):
     _as_the_customers(conn)
 
     # Exactly what the previous implementation persisted.
-    real = corrections.graduate
-    corrections.graduate = lambda c, cid, **kw: real(c, cid, **{**kw, "markets": None,
-                                                                "everywhere": False})
-    try:
-        core.load_declared_corrections(conn, confirmed_by="R. Vega")
-    finally:
-        corrections.graduate = real
+    _as_the_old_loader_left_it(conn)
 
     broken = [r for r in store.corrections(conn) if "colourway" in r["text"]][0]
     assert broken["expected_in"] == [], "the fixture did not reproduce the old state"
@@ -616,13 +643,7 @@ def test_a_repaired_rule_offers_the_replay(conn):
 
     _as_the_customers(conn)
 
-    real = corrections.graduate
-    corrections.graduate = lambda c, cid, **kw: real(c, cid, **{**kw, "markets": None,
-                                                                "everywhere": False})
-    try:
-        core.load_declared_corrections(conn, confirmed_by="R. Vega")
-    finally:
-        corrections.graduate = real
+    _as_the_old_loader_left_it(conn)
 
     out = core.load_declared_corrections(conn, confirmed_by="R. Vega")
     assert out.get("repaired")
@@ -771,6 +792,9 @@ def test_two_declared_rules_that_are_one_rule_on_file_do_not_ping_pong(conn):
     assert out.get("same_rule_on_file"), (
         f"two declarations are one rule on file and nothing said so: {out}")
     assert "one rule" in out["what_it_means"]
+    # Somebody DID answer `same_rule` here, so saying so is a fact rather than a guess.
+    assert [m["basis"] for m in out["same_rule_on_file"]] == ["judged"]
+    assert "somebody answered `same_rule` about them" in out["what_it_means"]
 
 
 def test_a_rule_the_library_learned_becomes_a_rule_the_rulebook_declares(conn):
@@ -924,13 +948,7 @@ def test_the_sentence_a_person_reads_counts_the_repairs(conn):
     import corrections
 
     _as_the_customers(conn)
-    real = corrections.graduate
-    corrections.graduate = lambda c, cid, **kw: real(c, cid, **{**kw, "markets": None,
-                                                                "everywhere": False})
-    try:
-        core.load_declared_corrections(conn, confirmed_by="R. Vega")
-    finally:
-        corrections.graduate = real
+    _as_the_old_loader_left_it(conn)
 
     out = core.load_declared_corrections(conn, confirmed_by="R. Vega")
 
@@ -1018,3 +1036,152 @@ def test_the_preview_does_not_call_a_declared_scope_a_sighting(conn):
     assert preview["seen_in"] == ["Japan"], (
         f"the file's declaration was reported as where the rule was seen: "
         f"{preview['seen_in']}")
+
+
+def test_confirming_a_declared_rule_by_hand_uses_the_scope_it_declares(conn):
+    """`correction_status` previews what the rulebook declares, and `graduate_correction` is
+    the tool it offers next. The tool ignored the declaration and fell back to where the rule
+    had been overheard — so accepting the offer produced a Peru-only rule from a global
+    declaration, and a Peru-only rule from a Mexico one. The preview and the act it leads to
+    have to read the same source."""
+    import corrections
+    import core
+    import rulebook
+
+    path = rulebook.overlay_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("version: fab-1.0\ndescribes: two declarations\ncorrections:\n"
+                    "  - text: A global house rule about dates.\n    provenance: Client call\n"
+                    "  - text: A Mexico rule about currency.\n    provenance: Client email\n"
+                    "    markets: ['Mexico']\n", encoding="utf-8")
+    rulebook.load.cache_clear()
+
+    peru = core.ingest_campaign(conn, title="Lima", market="Peru", status="concluded",
+                                detail="A launch.", confirm=True)["campaign_id"]
+    rules = {}
+    for text in ("A global house rule about dates.", "A Mexico rule about currency."):
+        cid = corrections.note(conn, text=text, campaign_id=peru,
+                               provenance="Peru slide 2")["correction_id"]
+        corrections.graduate(conn, cid, confirmed_by="R. Vega")
+        rules[text] = corrections.describe(conn, cid)
+
+    globally = rules["A global house rule about dates."]
+    assert globally["applies_everywhere"], "a global declaration became a scoped rule"
+    assert globally["expected_in"] == []
+
+    mexico = rules["A Mexico rule about currency."]
+    assert mexico["expected_in"] == ["Mexico"], (
+        f"a Mexico declaration became {mexico['expected_in']}")
+    assert not mexico["applies_everywhere"]
+
+
+def test_a_declared_alias_of_a_merged_rule_is_not_reported_as_deleted(conn):
+    """Somebody answered `same_rule` about two wordings, so the library holds one rule under
+    the other's words. The file declares the alias; `find` follows the merge and puts the
+    right rule in force — and the drift sweep, comparing literal text, then said in the same
+    response that the rule it had just loaded is NO LONGER IN THE RULEBOOK and should be
+    retired. One response, two answers."""
+    import core
+    import corrections
+    import rulebook
+
+    alias = "Seeding boxes carry one colourway."
+    canonical = "Only one colourway per seeding box."
+    path = rulebook.overlay_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("version: fab-1.0\ndescribes: an alias\ncorrections:\n"
+                    f"  - text: {alias}\n    provenance: Client call, 3 March\n",
+                    encoding="utf-8")
+    rulebook.load.cache_clear()
+
+    cid = core.ingest_campaign(conn, title="Lima", market="Peru", status="concluded",
+                               detail="A launch.", confirm=True)["campaign_id"]
+    first = corrections.note(conn, text=alias, campaign_id=cid,
+                             provenance="Deck")["correction_id"]
+    second = corrections.note(conn, text=canonical, campaign_id=cid,
+                              provenance="Deck")["correction_id"]
+    corrections.resolve(conn, first, decision="same_rule", same_as=second)
+
+    out = core.load_declared_corrections(conn, confirmed_by="R. Vega")
+
+    assert out["loaded"] == 1
+    assert not out.get("no_longer_declared"), (
+        f"it loaded the rule and reported it deleted in the same breath: "
+        f"{out.get('no_longer_declared')}")
+    assert "NO LONGER IN YOUR RULEBOOK" not in out["what_it_means"]
+
+
+def test_a_judgment_written_while_the_rule_reached_nothing_is_listed_after_the_repair(conn):
+    """The repair's whole offer, on the sequence an upgraded install actually has: the rules
+    were in force NOWHERE, a brief was judged without them, and then the upgrade put them in
+    force everywhere. `confirmed_at` is deliberately preserved across the repair — it is the
+    audit field, and rewriting it would make this report claim a judgment that CITES a rule
+    was never checked against it — so the replay, comparing against `confirmed_at` alone, saw
+    a rule confirmed before the judgment and said nothing. The offer opened an empty report.
+
+    When a rule STARTED APPLYING is a different fact from when somebody confirmed it, and it
+    is the one this report needs."""
+    import core
+    import replay
+
+    _as_the_customers(conn)
+    _as_the_old_loader_left_it(conn)
+
+    peru = core.ingest_campaign(conn, title="Lima flagship", market="Peru",
+                                status="concluded", detail="A launch.",
+                                confirm=True)["campaign_id"]
+    core.save_evaluation(conn, subject_title="Lima flagship", campaign_id=peru,
+                         verdict="approve", summary="Looks sound.", findings=[])
+
+    out = core.load_declared_corrections(conn, confirmed_by="R. Vega")
+    assert [a["tool"] for a in out.get("next_actions") or []] == ["replay_rules"]
+
+    report = replay.run(conn)
+    assert report["judgments_total"] == 1, (
+        "the repair offered the replay and the replay it offered is empty")
+    row = report["judgments"][0]
+    assert row["consequence"] == "rule_not_applied"
+    assert len(row["not_checked_against"]["corrections"]) == 10
+
+
+def test_a_first_load_reports_nothing_as_no_longer_declared(conn):
+    """The drift sweep asks which standing rules the file has stopped declaring, and it asks
+    it of the rows THIS run reached. A row created by this very run is not one of those — and
+    when the loop recorded only pre-existing rows, a first load of a rulebook reported all ten
+    of its own rules as no longer in it, in the response that had just loaded them."""
+    import core
+
+    _as_the_customers(conn)
+
+    out = core.load_declared_corrections(conn, confirmed_by="R. Vega")
+
+    assert out["loaded"] == 10
+    assert not out.get("no_longer_declared"), out.get("no_longer_declared")
+    assert "NO LONGER IN YOUR RULEBOOK" not in out["what_it_means"]
+
+
+def test_two_lines_folded_by_punctuation_are_not_reported_as_somebody_s_decision(conn):
+    """The same report, on the other reason two lines can be one rule. `rulebook` refuses an
+    exact duplicate, but `corrections._normalise` folds case and punctuation — so two lines
+    nobody was ever asked about collapse onto one row, and the sentence credited a person with
+    a decision they never made. A heuristic reported as a judgment is the one distinction this
+    product is built on, inverted."""
+    import core
+    import rulebook
+
+    path = rulebook.overlay_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("version: fab-1.0\ndescribes: two spellings\ncorrections:\n"
+                    "  - text: Seeding boxes carry one colourway.\n"
+                    "    provenance: Client call, 3 March\n    markets: ['Mexico']\n"
+                    "  - text: seeding boxes carry one colourway\n"
+                    "    provenance: Client call, 9 May\n    markets: ['Japan']\n",
+                    encoding="utf-8")
+    rulebook.load.cache_clear()
+
+    out = core.load_declared_corrections(conn, confirmed_by="R. Vega")
+
+    assert out["loaded"] == 1
+    assert [m["basis"] for m in out["same_rule_on_file"]] == ["heuristic"]
+    assert "somebody answered" not in out["what_it_means"]
+    assert "differ only in case or punctuation" in out["what_it_means"]

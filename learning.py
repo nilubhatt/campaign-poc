@@ -106,7 +106,7 @@ def reaches(markets, one_market) -> bool:
     return store.fold_market(one_market) in {store.fold_market(m) for m in (markets or [])}
 
 
-def in_force(scope, markets, *, everywhere: bool = False) -> bool:
+def in_force(scope, markets, *, everywhere: bool) -> bool:
     """Whether a rule scoped to `scope` reaches a subject in `markets` (§12.3/D108).
 
     `reaches` answers it for ONE market, and every caller that has a subject needs it answered
@@ -120,6 +120,12 @@ def in_force(scope, markets, *, everywhere: bool = False) -> bool:
     flag and the replay did not, which put the tool that OFFERS the replay and the replay
     itself in disagreement about the same rule — the offer said "see which judgments this now
     applies to" and the report it opened was empty.
+
+    `everywhere` has NO DEFAULT, and that is the fix rather than a style choice. A default of
+    `False` is what let `metrics.expected_for`, the graduation preview and the gate's own
+    sentence keep the old behaviour silently while the shared predicate was written — the same
+    silence the duplication had, wearing the shape of a fix. Required, every caller says which
+    question it is asking, and a new one cannot fail to.
 
     A subject with NO market reaches nothing, declared or not. That is the live rule and not a
     shortcut: `standing_for` refuses to apply anything to a brief with no market rather than
