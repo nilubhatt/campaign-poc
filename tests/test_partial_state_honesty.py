@@ -28,8 +28,20 @@ def _slow_embed(seconds=0.12):
 
 
 def test_a_partly_embedded_campaign_does_not_claim_to_be_embedded(conn, monkeypatch):
+    # A clock this test owns. "Some but not all" needs work to finish BEFORE the budget runs
+    # out, and the budget starts when ingest starts — so on a loaded machine the chunking can
+    # spend it before the first embed and "some" becomes "none", which is a true fact about
+    # that machine and nothing about this code. Its twin in `test_handler_time_budget` failed
+    # exactly that way in CI. The fake embed advances the clock rather than sleeping.
+    clock = {"t": 0.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+
+    def one_then_stop(text, timeout=None):
+        clock["t"] += 10.0          # the first chunk spends the whole budget
+        return [0.0] * config.EMBED_DIM
+
     monkeypatch.setattr(config, "TOOL_TIME_BUDGET_SECONDS", 0.2)
-    monkeypatch.setattr(embedding, "embed", _slow_embed())
+    monkeypatch.setattr(embedding, "embed", one_then_stop)
 
     deck = "\n\n".join(f"section {i} " + "word " * 200 for i in range(12))
     result = core.ingest_campaign(conn, title="Cut short", deck_text=deck, confirm=True)
