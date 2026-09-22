@@ -181,6 +181,9 @@ def _judgments(conn, *, market: Optional[str] = None) -> list:
     import actions
     import store
 
+    # Which judgment was written first, for the one comparison two wall-clock floats cannot
+    # settle between them. Once per report.
+    order = store.evaluation_order(conn)
     measures = {name: entry for name, entry in metrics_registry(conn).items()
                 if entry["status"] == "expected" and entry.get("confirmed_at")}
     all_rules = store.corrections(conn)
@@ -223,7 +226,8 @@ def _judgments(conn, *, market: Optional[str] = None) -> list:
         for c in rules:
             if c["id"] in cited:
                 continue
-            since = _newly_reaches(conn, c, markets, judged_at)
+            since = _newly_reaches(conn, c, markets, judged_at,
+                                   judgment_seq=order.get(row["id"]))
             if since:
                 after_rules.append({"correction_id": c["id"], "text": c["text"],
                                     "since": since})
@@ -336,7 +340,8 @@ def _rules_cited(saved: dict) -> set:
     return {_cited_by(finding) for finding in (saved.get("findings") or [])} - {None}
 
 
-def _newly_reaches(conn, rule: dict, markets: list, judged_at: float) -> Optional[str]:
+def _newly_reaches(conn, rule: dict, markets: list, judged_at: float, *,
+                   judgment_seq: Optional[int] = None) -> Optional[str]:
     """WHY this rule reaches this brief now and did not on the day it was judged, or None.
 
     Three answers, not one, because they are three different things for a reader to do
@@ -374,7 +379,8 @@ def _newly_reaches(conn, rule: dict, markets: list, judged_at: float) -> Optiona
     history = store.correction_scope_history(conn, rule["id"])
     if not history:
         return "became_standing" if confirmed_after else None
-    then = store.correction_scope_at(conn, rule["id"], judged_at)
+    then = store.correction_scope_at(conn, rule["id"], judged_at,
+                                     judgment_seq=judgment_seq)
     if (then and then["standing"]
             and _applies(then["expected_in"], markets,
                          everywhere=then["applies_everywhere"])):

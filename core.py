@@ -4353,18 +4353,26 @@ def load_declared_corrections(conn, *, confirmed_by: str) -> dict:
     for entry in declared:
         existing = corrections.find(conn, entry["text"])
         if existing and existing["correction_id"] in handled:
-            # WHY they are one rule, and it is not always the same reason. Somebody may have
-            # answered `same_rule` about them — a decision — or the two lines may differ only
-            # in case or punctuation, which `corrections._normalise` folds with nobody asked.
-            # Reporting the second as the first states a human judgment that never happened,
-            # which is exactly the `judged` / `heuristic` distinction this product turns on.
+            # WHY THESE TWO are one rule, and it is not always the same reason. Somebody may
+            # have answered `same_rule` about them — a decision — or the two lines may differ
+            # only in case or punctuation, which `corrections._normalise` folds with nobody
+            # asked. Reporting the second as the first states a human judgment that never
+            # happened, which is exactly the `judged` / `heuristic` distinction this product
+            # turns on.
+            #
+            # Asked of THE PAIR, which is what the sentence is about: two lines that are the
+            # same string once case and punctuation are folded are one rule by normalisation,
+            # and two lines that are different strings can only have become one because
+            # somebody answered `same_rule`. Asked of the target instead — "has anything ever
+            # been merged into it" — two lines differing by a full stop were reported as
+            # somebody's decision because an unrelated alias had been folded in years earlier.
+            collides_with = handled[existing["correction_id"]]
             same_rule_on_file.append(
-                {"declared": entry["text"], "same_as": handled[existing["correction_id"]],
+                {"declared": entry["text"], "same_as": collides_with,
                  "correction_id": existing["correction_id"],
-                 "basis": "judged" if existing.get("merged_into") or [
-                     row for row in corrections.all_of_them(conn)
-                     if row.get("merged_into") == existing["correction_id"]]
-                 else "heuristic"})
+                 "basis": ("heuristic"
+                           if corrections.same_wording(entry["text"], collides_with)
+                           else "judged")})
             continue
         if existing:
             handled[existing["correction_id"]] = entry["text"]

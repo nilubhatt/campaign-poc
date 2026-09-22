@@ -330,6 +330,17 @@ def _public(row: Optional[dict]) -> Optional[dict]:
             "what_it_means": _WHAT_A_STANDING_CORRECTION_IS}
 
 
+def same_wording(one: str, other: str) -> bool:
+    """Whether these two are the same words once case and punctuation are folded.
+
+    The narrow test `_normalise` makes, exposed because the answer is a REASON somebody is
+    shown: two rulebook lines that are one rule here are one rule either because this folded
+    them — nobody asked — or because a person answered `same_rule`, and those must not read
+    alike. The fold itself stays private; what a caller can ask is whether it fired.
+    """
+    return _normalise(one) == _normalise(other)
+
+
 def find(conn, text: str) -> Optional[dict]:
     import store
     return _public(store.correction_by_text(conn, _normalise(text)))
@@ -497,7 +508,7 @@ def _offers(correction_id: str, text: str, similar: Optional[dict]) -> list:
     return actions.trim(offers)
 
 
-def declared_in_the_rulebook(text: str) -> Optional[dict]:
+def declared_in_the_rulebook(conn, correction_id: str) -> Optional[dict]:
     """The customer's own declaration of this rule, if their rulebook has one (§12.3).
 
     Asked HERE rather than taken from the caller, because the caller is usually a tool the
@@ -506,12 +517,27 @@ def declared_in_the_rulebook(text: str) -> Optional[dict]:
     test, which exists for a rule this library INFERRED and which the loader will not apply to
     this one — and the preview under it was computed from the market it happened to be heard
     in rather than the markets it is about to apply to.
+
+    Matched by ROW, not by the row's words, and the difference is a rule somebody folded. A
+    declaration can carry a wording that was merged into this row — `same_rule`, which this
+    product offers — and comparing the file's text against the canonical text alone missed it:
+    the loader, which resolves each line through `find`, promoted that rule correctly while
+    `correction_status` told the customer their own declared rule needed three campaigns and
+    offered no preview at all. The file is resolved the same way here as there.
     """
     import rulebook
 
-    wanted = _normalise(text)
-    return next((entry for entry in rulebook.corrections()
-                 if _normalise(entry["text"]) == wanted), None)
+    entry = describe(conn, correction_id)
+    wanted = _normalise(entry["text"]) if entry else None
+    for declared in rulebook.corrections():
+        if wanted and _normalise(declared["text"]) == wanted:
+            return declared
+        # Only then the lookup that costs a query: the declaration's own wording may be one
+        # this row absorbed, and `find` follows a merge exactly as the loader does.
+        found = find(conn, declared["text"])
+        if found and found["correction_id"] == correction_id:
+            return declared
+    return None
 
 
 def graduation(conn, correction_id: str, *, from_rulebook: Optional[str] = None) -> dict:
@@ -522,7 +548,7 @@ def graduation(conn, correction_id: str, *, from_rulebook: Optional[str] = None)
     entry = describe(conn, correction_id)
     if not entry:
         raise ValueError(f"{correction_id!r} is not a correction on file")
-    declared = declared_in_the_rulebook(entry["text"])
+    declared = declared_in_the_rulebook(conn, correction_id)
     from_rulebook = from_rulebook or (
         (rulebook.overlay() or rulebook.version()) if declared else None)
     # What confirming would actually put in force: what the file says, or — for a rule the
@@ -659,7 +685,7 @@ def graduate(conn, correction_id: str, *, confirmed_by: str,
     # because the caller supplied no scope and the fallback is where the rule was overheard.
     # Only when nothing was stated: the loader states both, and what it states wins.
     if markets is None and not everywhere:
-        declared = declared_in_the_rulebook(describe(conn, correction_id)["text"])
+        declared = declared_in_the_rulebook(conn, correction_id)
         if declared:
             markets = declared["markets"] or None
             everywhere = not declared["markets"]

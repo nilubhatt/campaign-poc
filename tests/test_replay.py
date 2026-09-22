@@ -1152,3 +1152,69 @@ def test_a_reopened_rule_does_not_accuse_a_judgment_that_never_cited_it(conn):
 
     assert replay.run(conn)["judgments"] == [], (
         "a rule this judgment WAS checked against came back as never applied")
+
+
+def test_a_rule_widened_in_the_same_tick_as_a_judgment_does_not_hide_it(conn):
+    """Two tables, two wall-clock floats, and no order between them when the floats are equal
+    — which Windows makes reachable, measuring `time.time()` in whole milliseconds. Read
+    through the timestamp alone, a rule widened in the same tick as a judgment counted as
+    already in force, and the brief it was never checked against vanished from the report.
+
+    The scope row records which judgments already existed when it was written, so the two are
+    ordered by what happened rather than by a float comparison that cannot decide."""
+    cid = _standing_rule(conn)                       # LATAM, SEA, EMEA
+    subject = _campaign(conn, "Japan v1", market="Japan")
+    eid = _judged(conn, subject, title="Japan v1")
+    judged_at = store.get_evaluation(conn, eid)["created_at"]
+
+    # The widening lands on the judgment's own timestamp, and is written after it.
+    store.graduate_correction(conn, cid, markets=["LATAM", "SEA", "EMEA", "Japan"],
+                              confirmed_by="R. Vega")
+    conn.execute("UPDATE correction_scope SET changed_at = ? "
+                 "WHERE correction_id = ? AND changed_at = "
+                 "(SELECT MAX(changed_at) FROM correction_scope WHERE correction_id = ?)",
+                 (judged_at, cid, cid))
+    conn.commit()
+
+    rows = replay.run(conn)["judgments"]
+    assert [r["subject_title"] for r in rows] == ["Japan v1"], (
+        "a brief judged before the widening, in the same tick, is not on the report")
+
+
+def test_a_judgment_written_after_a_same_tick_change_is_not_listed(conn):
+    """The other side of the same tie: the change was written FIRST and the judgment landed on
+    the same float. It was checked, and saying otherwise is the accusing direction."""
+    cid = _standing_rule(conn)
+    store.graduate_correction(conn, cid, markets=["LATAM", "SEA", "EMEA", "Japan"],
+                              confirmed_by="R. Vega")
+    subject = _campaign(conn, "Japan v1", market="Japan")
+    eid = _judged(conn, subject, title="Japan v1")
+    changed_at = store.correction_scope_history(conn, cid)[-1]["changed_at"]
+    conn.execute("UPDATE evaluations SET created_at = ? WHERE id = ?", (changed_at, eid))
+    conn.commit()
+
+    assert replay.run(conn)["judgments"] == []
+
+
+def test_a_reconstructed_past_is_older_than_every_judgment_on_file(conn):
+    """A seeded row describes a past, not a change somebody just made — so it cannot be
+    "written after" a judgment, even one saved in the same tick as the confirmation it is
+    dated from. Given the ordering of the write that triggered it, the rule would read as
+    having started applying after a brief it had already been applied to."""
+    subject = _campaign(conn, "Colombia v1")
+    cid = _standing_rule(conn)
+    eid = _judged(conn, subject, title="Colombia v1")
+    judged_at = store.get_evaluation(conn, eid)["created_at"]
+    # The rule was confirmed in the same tick the judgment was saved, which is all the tie
+    # rule needs — and the seed is dated from `confirmed_at`.
+    conn.execute("UPDATE corrections SET confirmed_at = ? WHERE id = ?", (judged_at, cid))
+    conn.execute("DELETE FROM correction_scope")       # an install from before the history
+    conn.commit()
+
+    store.graduate_correction(conn, cid, markets=["LATAM", "SEA", "EMEA", "Japan"],
+                              confirmed_by="R. Vega")
+
+    seeded = store.correction_scope_history(conn, cid)[0]
+    assert seeded["basis"] == "heuristic" and seeded["after_evaluation"] == 0
+    assert replay.run(conn)["judgments"] == [], (
+        "a brief this rule had already been applied to came back as never checked")

@@ -670,7 +670,16 @@ CREATE TABLE IF NOT EXISTS correction_scope (
     -- database written before this table, assumed to have held since it was confirmed. That
     -- is the assumption this report made before the history existed, and marking it is what
     -- keeps a derived past distinguishable from a recorded one (§2.4's `basis`).
-    seeded        INTEGER NOT NULL DEFAULT 0
+    seeded        INTEGER NOT NULL DEFAULT 0,
+    -- The highest `evaluations` rowid at the moment this change was written, which is the one
+    -- thing that ORDERS a scope change against a judgment. Two rows in two tables carrying
+    -- wall-clock floats have no order between them when the floats are equal — and Windows
+    -- measures `time.time()` in whole milliseconds, so equal is reachable. Read through the
+    -- timestamp alone, a rule widened in the same tick as a judgment counted as already in
+    -- force and the brief it was never checked against vanished from the report. 0 on a row
+    -- written before this column, and on a seeded one, both of which mean "older than every
+    -- judgment on file" — which is what they are.
+    after_evaluation INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS metric_values (
     id            TEXT PRIMARY KEY,
@@ -3024,7 +3033,9 @@ def correction_scope_history(conn, correction_id: str) -> list:
              # is the only thing that wrote one: standing.
              "standing": bool(row["standing"]) if "standing" in row.keys() else True,
              "basis": ("heuristic" if ("seeded" in row.keys() and row["seeded"])
-                       else "computed")}
+                       else "computed"),
+             "after_evaluation": (row["after_evaluation"]
+                                  if "after_evaluation" in row.keys() else 0)}
             for row in conn.execute(
                 # `rowid`, not `id`: the ids are random, and two changes inside one clock tick
                 # — which Windows measures in whole milliseconds — would then order
@@ -3033,7 +3044,20 @@ def correction_scope_history(conn, correction_id: str) -> list:
                 "ORDER BY changed_at, rowid", (correction_id,))]
 
 
-def correction_scope_at(conn, correction_id: str, when: float) -> Optional[dict]:
+def evaluation_order(conn) -> dict:
+    """`{evaluation_id: rowid}` — the order judgments were actually written in.
+
+    The one ordering a wall-clock float cannot give when two of them are equal. Fetched once
+    per report rather than per judgment: this answers a question about every row at once.
+    """
+    if not _columns(conn, "evaluations"):
+        return {}
+    return {row["id"]: row["seq"]
+            for row in conn.execute("SELECT id, rowid AS seq FROM evaluations")}
+
+
+def correction_scope_at(conn, correction_id: str, when: float, *,
+                        judgment_seq: Optional[int] = None) -> Optional[dict]:
     """What this rule applied to at `when` — including `standing: False` for withdrawn — or
     None if nothing on file covers that date at all.
 
@@ -3047,6 +3071,12 @@ def correction_scope_at(conn, correction_id: str, when: float) -> Optional[dict]
     for change in correction_scope_history(conn, correction_id):
         if change["changed_at"] > when:
             break
+        # The same instant, and `judgment_seq` says which of the two was written first: a
+        # change recorded when this judgment already existed came after it, whatever the two
+        # floats say.
+        if (change["changed_at"] == when and judgment_seq is not None
+                and change["after_evaluation"] >= judgment_seq):
+            break
         in_effect = change
     return in_effect
 
@@ -3056,11 +3086,16 @@ def _write_correction_scope(conn, correction_id: str, *, when: float, markets: l
                             seeded: bool = False) -> None:
     if not _columns(conn, "correction_scope"):
         return
+    # WHICH JUDGMENTS ALREADY EXISTED. A seeded row describes a past older than anything on
+    # file, so it claims nothing: 0 sorts before every judgment.
+    after = 0 if seeded else (conn.execute(
+        "SELECT COALESCE(MAX(rowid), 0) AS n FROM evaluations").fetchone()["n"]
+        if _columns(conn, "evaluations") else 0)
     conn.execute(
         "INSERT INTO correction_scope (id, correction_id, changed_at, expected_in, "
-        "applies_everywhere, standing, seeded) VALUES (?,?,?,?,?,?,?)",
+        "applies_everywhere, standing, seeded, after_evaluation) VALUES (?,?,?,?,?,?,?,?)",
         (_id("scope"), correction_id, when, json.dumps(sorted(markets)),
-         1 if applies_everywhere else 0, 1 if standing else 0, 1 if seeded else 0))
+         1 if applies_everywhere else 0, 1 if standing else 0, 1 if seeded else 0, after))
 
 
 def withdraw_correction_scope(conn, correction_id: str) -> None:

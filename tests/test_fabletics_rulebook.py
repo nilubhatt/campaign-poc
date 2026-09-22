@@ -1185,3 +1185,78 @@ def test_two_lines_folded_by_punctuation_are_not_reported_as_somebody_s_decision
     assert [m["basis"] for m in out["same_rule_on_file"]] == ["heuristic"]
     assert "somebody answered" not in out["what_it_means"]
     assert "differ only in case or punctuation" in out["what_it_means"]
+
+
+def test_a_declaration_reaches_the_rule_it_was_folded_into(conn):
+    """`same_rule` is an answer this product offers, so a customer can end up with their
+    rulebook's wording living as an alias of another rule. The loader resolves each line
+    through `find` and promotes the right rule; `correction_status` compared the file's text
+    against the row's canonical text and found nothing — so it told the customer their own
+    declared rule was "seen in 1 campaign, needs 3" and offered no preview at all. Two lookups
+    of one fact, disagreeing."""
+    import corrections
+    import core
+    import rulebook
+
+    alias = "Seeding boxes carry one colourway."
+    canonical = "Only one colourway per seeding box."
+    path = rulebook.overlay_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("version: fab-1.0\ndescribes: an alias\ncorrections:\n"
+                    f"  - text: {alias}\n    provenance: Client call, 3 March\n",
+                    encoding="utf-8")
+    rulebook.load.cache_clear()
+
+    cid = core.ingest_campaign(conn, title="Lima", market="Peru", status="concluded",
+                               detail="A launch.", confirm=True)["campaign_id"]
+    first = corrections.note(conn, text=alias, campaign_id=cid,
+                             provenance="Deck")["correction_id"]
+    second = corrections.note(conn, text=canonical, campaign_id=cid,
+                              provenance="Deck")["correction_id"]
+    corrections.resolve(conn, first, decision="same_rule", same_as=second)
+    live = corrections.find(conn, alias)["correction_id"]
+
+    gate = corrections.graduation(conn, live)
+
+    assert gate["eligible"], gate["what_it_means"]
+    assert gate["code"] == "declared_by_the_customer"
+    assert gate.get("if_confirmed"), "no preview for a rule the customer's own file declares"
+    # And confirming it by hand applies what the file says, not where it was overheard.
+    corrections.graduate(conn, live, confirmed_by="R. Vega")
+    assert corrections.describe(conn, live)["applies_everywhere"]
+
+
+def test_an_unrelated_old_merge_does_not_make_a_punctuation_fold_a_decision(conn):
+    """The `basis` is about the PAIR of lines being reported, not about the row's history.
+    Asked of the row — "has anything ever been merged into it" — two lines differing by a full
+    stop were credited to a person because an unrelated alias had been folded in long before,
+    and the response said somebody had answered `same_rule` about lines nobody was ever
+    shown."""
+    import core
+    import corrections
+    import rulebook
+
+    text = "Seeding boxes carry one colourway."
+    path = rulebook.overlay_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("version: fab-1.0\ndescribes: two spellings\ncorrections:\n"
+                    f"  - text: {text}\n    provenance: Client call\n"
+                    "    markets: ['Mexico']\n"
+                    "  - text: seeding boxes carry one colourway\n"
+                    "    provenance: Client email\n    markets: ['Japan']\n",
+                    encoding="utf-8")
+    rulebook.load.cache_clear()
+
+    cid = core.ingest_campaign(conn, title="Lima", market="Peru", status="concluded",
+                               detail="A launch.", confirm=True)["campaign_id"]
+    unrelated = corrections.note(conn, text="Something else entirely about pricing.",
+                                 campaign_id=cid, provenance="Deck")["correction_id"]
+    target = corrections.note(conn, text=text, campaign_id=cid,
+                              provenance="Deck")["correction_id"]
+    corrections.resolve(conn, unrelated, decision="same_rule", same_as=target)
+
+    out = core.load_declared_corrections(conn, confirmed_by="R. Vega")
+
+    assert [m["basis"] for m in out["same_rule_on_file"]] == ["heuristic"], (
+        "an old merge of a different rule made this pair somebody's decision")
+    assert "somebody answered" not in out["what_it_means"]
