@@ -2220,21 +2220,39 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       would MECHANICALLY meet, and each row carries that as a `consequence` from a closed
       vocabulary: `stated_basis_withdrawn` (the verdict rested only on rules somebody has
       since set aside — the most urgent row this report can produce), `rests_on_withdrawn`,
-      `gap_appears` (the subject has no measured value for something that became expected
-      after it was judged), `rule_not_applied`. Each is a fact about the EVIDENCE, computed
+      `gap_appears` (the subject has no measured value for something that applies to it
+      now and did not then), `rule_not_applied`. Each row says WHICH of the reasons it is —
+      confirmed since, or retired at the time and put back; became standing since, standing
+      but out of scope until its scope changed, or set aside at the time — because "became
+      expected after this was judged" about something confirmed months earlier is how a reader
+      concludes the report is broken. Each is a fact about the EVIDENCE, computed
       identically for every reader. A check that would simply pass is not listed at all.
       **The review's premise does not hold yet and the implementation does not rest on it.**
       *"Every verdict is stamped with its rulebook version"* — and `RULEBOOK_VERSION` is one
       literal string, identical on every judgment, until §12.1 ships a rulebook. The report is
-      built from WHEN each measure and rule was confirmed instead, which says *which* rule
-      arrived and when rather than only that something did. D115 records what breaks when a
-      real rulebook lands.
-      **The backlog is grouped by who to ask and what for**, because one conversation per
-      partner per measure is the unit of work the review describes. Campaigns that have not
+      built from what was IN FORCE on the day each judgment was written instead, which says
+      *which* rule arrived and when rather than only that something did. Not from the
+      confirmation date: that is preserved across a re-confirmation on purpose, so a measure
+      retired while a brief was judged, or a rule whose scope moved later, read as having
+      applied throughout. Rules carry an in-force history and measures read §12.4's
+      retirement occasions; `store.after_judgment` orders the two tables against each other,
+      over a sequence SQLite never reuses, because two wall-clock floats cannot be ordered
+      when they are equal and Windows measures them in whole milliseconds. D115 records what
+      breaks when a real rulebook lands.
+      **The backlog is grouped by who to ask and what for** — one row per market per measure,
+      which is as close to the review's "one conversation per partner" as the data supports:
+      every campaign carries a market and not every one carries a partner. Campaigns that have not
       concluded are counted separately rather than listed: you cannot ask a partner for a
       number that does not exist yet, and dropping them silently would confuse "nothing to
       chase" with "I did not look".
-      Closes **D104** — the blast radius, on the offer where somebody actually decides.
+      Closes **D104** — the blast radius, on the offer where somebody actually decides. That
+      offer is also where review found the sharpest instance of this item's recurring defect:
+      the preview described a graduation keyed on markets while the graduation it previews
+      keys on the campaign type, so it named the one record the confirmation would never check
+      and told the reader it would change nothing about a library it was about to flag. Every
+      P1 on this item across eight rounds was the same shape — the report answering a question
+      the live path already answers, and answering it differently — and the last of them
+      closed the sources rather than the instances.
       *Found by review:* **`replay.run()` wrote twelve rows on its first call.** The metric
       registry seeded itself on first read, so a report whose entire claim is that it writes
       nothing wrote — on exactly the database a customer meets first, an upgraded library
