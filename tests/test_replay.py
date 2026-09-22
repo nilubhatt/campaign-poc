@@ -1218,3 +1218,53 @@ def test_a_reconstructed_past_is_older_than_every_judgment_on_file(conn):
     assert seeded["basis"] == "heuristic" and seeded["after_evaluation"] == 0
     assert replay.run(conn)["judgments"] == [], (
         "a brief this rule had already been applied to came back as never checked")
+
+
+def test_a_measure_confirmed_in_the_judgment_s_tick_is_not_hidden(conn):
+    """The rules half got the cross-table ordering and the measures half did not, so the two
+    answered differently about the same instant. A measure confirmed after a judgment — in the
+    same clock tick — is a gap that judgment was never checked for."""
+    subject = _campaign(conn, "Colombia v1")
+    eid = _judged(conn, subject, title="Colombia v1")
+    name = _expect_measure(conn)
+    judged_at = store.get_evaluation(conn, eid)["created_at"]
+    conn.execute("UPDATE metric_registry SET confirmed_at = ? WHERE canonical = ?",
+                 (judged_at, name))
+    conn.commit()
+
+    rows = [r for r in replay.run(conn)["judgments"] if r["evaluation_id"] == eid]
+    assert rows, "a measure confirmed after this judgment, in its tick, is not on the report"
+    assert name in rows[0]["not_checked_against"]["measures"]
+
+
+def test_a_measure_confirmed_before_a_judgment_in_one_tick_stays_off_the_report(conn):
+    """The other direction of the same tie: confirmed first, judged in the same tick. That
+    brief WAS checked for it."""
+    name = _expect_measure(conn)
+    subject = _campaign(conn, "Colombia v1")
+    eid = _judged(conn, subject, title="Colombia v1")
+    confirmed_at = store.metric_registry(conn)[name]["confirmed_at"]
+    conn.execute("UPDATE evaluations SET created_at = ? WHERE id = ?", (confirmed_at, eid))
+    conn.commit()
+
+    assert [r for r in replay.run(conn)["judgments"] if r["evaluation_id"] == eid] == []
+
+
+def test_a_rule_first_confirmed_in_the_judgment_s_tick_is_not_blamed_on_its_scope(conn):
+    """The rule is on the report for the right reason and described with the wrong one: it
+    had no scope to change, because nobody had confirmed it yet. `confirmed_at > judged_at` is
+    false on equality, so the one comparison that decides WHICH sentence a reader gets was
+    still deciding it on a float."""
+    subject = _campaign(conn, "Colombia v1")
+    eid = _judged(conn, subject, title="Colombia v1")
+    cid = _standing_rule(conn)
+    judged_at = store.get_evaluation(conn, eid)["created_at"]
+    conn.execute("UPDATE corrections SET confirmed_at = ? WHERE id = ?", (judged_at, cid))
+    conn.execute("UPDATE correction_scope SET changed_at = ? WHERE correction_id = ?",
+                 (judged_at, cid))
+    conn.commit()
+
+    row = [r for r in replay.run(conn)["judgments"] if r["evaluation_id"] == eid][0]
+    assert [c["since"] for c in row["not_checked_against"]["corrections"]] == [
+        "became_standing"], "a rule that had no scope yet was reported as having changed one"
+    assert "scope changed" not in row["what_it_means"]

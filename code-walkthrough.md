@@ -283,6 +283,12 @@ history rather than one "scope changed at" timestamp, because a single timestamp
 widening from narrowing — and re-listing a judgment a rule HAD been applied to is the more
 damaging of the two errors.
 
+Both halves — measures and rules — settle a tie the same way. Two timestamps from two
+tables have no order between them when they are equal, and Windows measures
+`time.time()` in whole milliseconds, so every row that can be compared against a
+judgment records which judgments already existed when it was written. `store.after_judgment`
+is the one place that question is answered.
+
 ### `agreement.py` — the instrument
 
 "Consistency is a number, not a feeling." Runs the same judgment repeatedly and reports

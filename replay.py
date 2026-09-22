@@ -204,7 +204,12 @@ def _judgments(conn, *, market: Optional[str] = None) -> list:
             continue
         after_measures = sorted(
             name for name, entry in measures.items()
-            if entry["confirmed_at"] > judged_at
+            # The same tie rule the rules half uses. Read through the timestamp alone, a
+            # measure confirmed in the same tick as a judgment counted as already expected and
+            # the brief it was never checked for vanished from the report — the ordering
+            # reached one of the three comparisons that ask this question.
+            if store.after_judgment(entry["confirmed_at"], entry.get("after_evaluation"),
+                                    judged_at, order.get(row["id"]))
             # A MEASURE, which is expected where the evidence put it: there is no such
             # thing as one a customer declared for every market.
             and _applies(entry["expected_in"], markets, everywhere=False))
@@ -375,10 +380,18 @@ def _newly_reaches(conn, rule: dict, markets: list, judged_at: float, *,
     if not _applies(rule["expected_in"], markets,
                     everywhere=bool(rule.get("applies_everywhere"))):
         return None                       # it does not reach this brief even now
-    confirmed_after = rule["confirmed_at"] > judged_at
     history = store.correction_scope_history(conn, rule["id"])
     if not history:
-        return "became_standing" if confirmed_after else None
+        return ("became_standing"
+                if store.after_judgment(rule["confirmed_at"], None, judged_at, judgment_seq)
+                else None)
+    # WHEN IT BECAME STANDING, from the history rather than from `confirmed_at`, so the tie
+    # is settled by the same ordering the rest of this function uses. Compared on the
+    # timestamp alone, a rule first confirmed in the judgment's own tick read as already
+    # standing — and the report then blamed its SCOPE for a rule that had none yet.
+    became = next((change for change in history if change["standing"]), None)
+    confirmed_after = bool(became) and store.after_judgment(
+        became["changed_at"], became["after_evaluation"], judged_at, judgment_seq)
     then = store.correction_scope_at(conn, rule["id"], judged_at,
                                      judgment_seq=judgment_seq)
     if (then and then["standing"]

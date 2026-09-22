@@ -221,6 +221,12 @@ CREATE TABLE IF NOT EXISTS metric_registry (
                                          -- requirement nobody's name is against is one nobody
                                          -- can question later
     confirmed_at  REAL,
+    -- The highest `evaluations` rowid when this measure was confirmed, for the same reason
+    -- `correction_scope` carries one: §8.7 compares `confirmed_at` against when a judgment was
+    -- saved, and two floats from two tables cannot be ordered when they are equal. A measure
+    -- confirmed in the same tick as a judgment counted as already expected, and the brief it
+    -- was never checked for vanished from the report.
+    after_evaluation INTEGER NOT NULL DEFAULT 0,
     retired_at    REAL,                  -- §8.5 demotes and NEVER deletes: "we used to track
                                          -- this" is an answer, "we never did" is a lie
     surfaced      INTEGER NOT NULL DEFAULT 0,  -- §8.2 asks ONCE; this is what makes that true
@@ -3044,6 +3050,27 @@ def correction_scope_history(conn, correction_id: str) -> list:
                 "ORDER BY changed_at, rowid", (correction_id,))]
 
 
+def after_judgment(at: Optional[float], after_evaluation: Optional[int],
+                   judged_at: float, judgment_seq: Optional[int]) -> bool:
+    """Whether something confirmed or changed at `at` happened AFTER that judgment.
+
+    The tie is the whole of this function. Two wall-clock floats from two tables have no order
+    between them when they are equal, and Windows measures `time.time()` in whole
+    milliseconds, so equal is reachable rather than theoretical. `after_evaluation` — the
+    highest evaluation rowid when the row was written — settles it: a row recorded when the
+    judgment already existed came after it.
+
+    One definition, because there were three comparisons asking this question — the measure
+    registry, the scope history, and whether a rule was even standing yet — and the ordering
+    reached one of them. The other two then disagreed with it about the same instant.
+    """
+    if at is None:
+        return False
+    if at != judged_at:
+        return at > judged_at
+    return judgment_seq is not None and (after_evaluation or 0) >= judgment_seq
+
+
 def evaluation_order(conn) -> dict:
     """`{evaluation_id: rowid}` — the order judgments were actually written in.
 
@@ -3071,11 +3098,9 @@ def correction_scope_at(conn, correction_id: str, when: float, *,
     for change in correction_scope_history(conn, correction_id):
         if change["changed_at"] > when:
             break
-        # The same instant, and `judgment_seq` says which of the two was written first: a
-        # change recorded when this judgment already existed came after it, whatever the two
-        # floats say.
-        if (change["changed_at"] == when and judgment_seq is not None
-                and change["after_evaluation"] >= judgment_seq):
+        # The same instant, and `judgment_seq` says which of the two was written first.
+        if after_judgment(change["changed_at"], change["after_evaluation"], when,
+                          judgment_seq):
             break
         in_effect = change
     return in_effect
@@ -3536,6 +3561,14 @@ def graduate_metric(conn, canonical: str, *, markets: list, confirmed_by: str,
     fields = ("status = 'expected', expected_in = ?, answered = 1, surfaced = 1, "
               "confirmed_by = ?, confirmed_at = COALESCE(confirmed_at, ?), retired_at = NULL")
     params: list = [json.dumps(sorted(markets)), confirmed_by, _now()]
+    # WHICH JUDGMENTS ALREADY EXISTED when this was confirmed. Coalesced like `confirmed_at`,
+    # and for the same reason: the first confirmation is the one §8.7 compares against.
+    if "after_evaluation" in _columns(conn, "metric_registry"):
+        fields += (", after_evaluation = CASE WHEN confirmed_at IS NULL THEN ? "
+                   "ELSE after_evaluation END")
+        params.append(conn.execute(
+            "SELECT COALESCE(MAX(rowid), 0) AS n FROM evaluations").fetchone()["n"]
+            if _columns(conn, "evaluations") else 0)
     # §12.4/D102, and guarded on the column because an upgraded database gets it from
     # `_add_missing_columns` and this runs on every promotion.
     if "expected_for_types" in _columns(conn, "metric_registry"):
