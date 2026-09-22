@@ -695,8 +695,13 @@ def graduation(conn, name: str) -> dict:
     # nobody asked for.
     if out["eligible"]:
         import replay
-        out["if_confirmed"] = replay.if_graduated(conn, measure=name,
-                                                  markets=out["seen_in"])
+        # WHAT CONFIRMING WOULD ACTUALLY KEY ON, computed the way `graduate` computes it — the
+        # preview asked its own market question and so described a different graduation from
+        # the one the button performs.
+        out["if_confirmed"] = replay.if_graduated(
+            conn, measure=name, markets=out["seen_in"],
+            campaign_types=store.breadth_of(
+                conn, campaigns_with(conn, name, measured_only=True))["one_type"])
     return out
 
 
@@ -768,6 +773,8 @@ def graduate(conn, name: str, *, confirmed_by: str) -> dict:
     # the same kind of campaign. That makes the checklist key "store launch" rather than
     # "Peru" — the review's own sentence — so it reaches store launches in every market and
     # stops reaching seeding briefs that never had footfall to uplift.
+    # The same question the preview asked, and it has to be the same answer: `if_confirmed`
+    # told somebody what confirming would do, and this is the confirming.
     on_type = store.breadth_of(
         conn, campaigns_with(conn, gate["measure"], measured_only=True))["one_type"]
     store.graduate_metric(conn, gate["measure"], markets=gate["seen_in"],
@@ -832,30 +839,63 @@ def expected_for(conn, *, market: Optional[str] = None, markets: Optional[list] 
 
     wanted = {store.fold_market(m) for m in (markets or ([market] if market else []))}
     wanted.discard(None)
-    mine = store.fold_campaign_type(campaign_type)
-    out = []
-    for name, entry in sorted(_registry(conn).items()):
-        if entry["status"] != "expected":
-            continue               # retired, provisional, ignored and known are not checklists
-        by_type = {store.fold_campaign_type(t) for t in entry.get("expected_for_types") or []}
-        by_type.discard(None)
-        if by_type:
-            if mine in by_type:
-                out.append(name)
-            continue
-        # §13.5: `learning.in_force`, the one folded membership test. This and
-        # `corrections.standing_for` are the two functions that decide what a brief is CHECKED
-        # AGAINST, on the two paths D114 is about; each wrote it out until this round, and the
-        # third copy — in `replay` — was the one that never heard about `applies_everywhere`.
-        #
-        # No `everywhere` here, and that is the distinction rather than an omission: a measure
-        # is a thing this library WATCHED recur, so it is expected where the evidence put it,
-        # and there is no such thing as a declared measure for a customer to scope to all
-        # markets. The day there is, this is the line that has to learn about it.
-        if not learning.in_force(entry["expected_in"], wanted, everywhere=False):
-            continue
-        out.append(name)
-    return out
+    return sorted(name for name, entry in _registry(conn).items()
+                  # retired, provisional, ignored and known are not checklists
+                  if entry["status"] == "expected"
+                  and keyed_on_reaches(expected_in=entry["expected_in"],
+                                       expected_for_types=entry.get("expected_for_types"),
+                                       markets=wanted, campaign_type=campaign_type))
+
+
+def keyed_on_reaches(*, expected_in, expected_for_types, markets, campaign_type) -> bool:
+    """Whether a checklist entry scoped this way reaches a brief like this (§12.4/D102).
+
+    The two keys a checklist can hang on, and which one WINS. A measure that graduated when
+    every campaign carrying it was the same kind of campaign is keyed on the TYPE — "that
+    makes the checklist key 'store launch' rather than 'Peru'", the review's own sentence — so
+    it reaches store launches in every market, including markets it has never been seen in,
+    and stops reaching other kinds of brief in the markets it has.
+
+    A FUNCTION, because the graduation preview needs the same answer about a measure that has
+    not graduated yet, and asked it with its own market test instead. So the sentence somebody
+    reads at the moment they confirm named the one record the graduation guarantees it will
+    never check, and said "this would change nothing" about a library holding a brief it was
+    about to flag. §12.4's own sentence, inverted, on both halves at once.
+
+    No `everywhere` in the market branch, and that is the distinction rather than an omission:
+    a measure is a thing this library WATCHED recur, so it is expected where the evidence put
+    it, and there is no such thing as a declared measure for a customer to scope to all
+    markets. The day there is, this is the line that has to learn about it.
+    """
+    import store
+
+    by_type = {store.fold_campaign_type(t) for t in expected_for_types or []} - {None}
+    if by_type:
+        return store.fold_campaign_type(campaign_type) in by_type
+    return learning.in_force(expected_in, markets, everywhere=False)
+
+
+def measured(rows) -> list:
+    """The RESULTS among a record's metric rows — what happened, not what was aimed at.
+
+    Same distinction as `carries`, asked of a list that is already in hand. Written out at
+    each surface that needed it, which is how "this record has results" came to be answered
+    from four places.
+    """
+    return [row for row in rows or [] if row["metric_type"] == "actual"]
+
+
+def carries(conn, campaign_id: str, name: str) -> bool:
+    """Whether this record holds a MEASURED value for this measure (§8.1).
+
+    A target is what somebody is aiming at, not what happened, and counting one as carried
+    told a concluded campaign holding nothing but targets that it "carries all of them" — a
+    clean bill of health for a record with no results at all. That distinction is this
+    module's founding one, and the test for it was written out in four places: here, the
+    replay's gap list, the graduation preview, and the evidence `missing` weighs. One of them
+    drifting is a record that has results on one surface and none on another.
+    """
+    return any(row["metric_type"] == "actual" for row in values_for(conn, campaign_id, name))
 
 
 def expected_check(conn, campaign_id: str) -> dict:
@@ -884,9 +924,7 @@ def expected_check(conn, campaign_id: str) -> dict:
     expected = expected_for(conn, markets=named, campaign_type=kind)
     carried, missing = [], []
     for name in expected:
-        measured = [r for r in values_for(conn, campaign_id, name)
-                    if r["metric_type"] == "actual"]
-        (carried if measured else missing).append(name)
+        (carried if carries(conn, campaign_id, name) else missing).append(name)
     return {
         "market": ", ".join(named),
         "markets": named,

@@ -703,8 +703,18 @@ CREATE TABLE IF NOT EXISTS metric_values (
     metric_type   TEXT NOT NULL DEFAULT 'actual',
     created_at    REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS write_order (
+    -- A number that is never reused, for ordering rows in DIFFERENT tables against each
+    -- other. `evaluations.id` is TEXT, so that table's rowid is implicit and REUSABLE: delete
+    -- the newest judgment and the next insert takes its number back, which silently reverses
+    -- the order a scope change and a judgment are compared in. AUTOINCREMENT is the one thing
+    -- SQLite promises never to reuse, and this table exists for that promise alone.
+    id INTEGER PRIMARY KEY AUTOINCREMENT
+);
 CREATE TABLE IF NOT EXISTS evaluations (
     id            TEXT PRIMARY KEY,
+    -- Where this judgment falls in the order things were written. See `write_order`.
+    seq           INTEGER,
     campaign_id   TEXT REFERENCES campaigns(id) ON DELETE SET NULL,  -- may be a not-yet-stored proposal
     subject_title TEXT NOT NULL,   -- what was evaluated
     cited_ids     TEXT,            -- JSON list of campaign ids Claude reasoned from
@@ -800,7 +810,12 @@ CREATE TABLE IF NOT EXISTS measure_history (
     canonical TEXT NOT NULL,
     what      TEXT NOT NULL,      -- retired | revived
     why       TEXT NOT NULL,      -- what the library observed, in its own words
-    at        REAL NOT NULL
+    at        REAL NOT NULL,
+    -- The highest `evaluations` rowid when this occasion was recorded, for the reason
+    -- `correction_scope` and `metric_registry` carry one: §8.7 asks whether this measure was
+    -- in force when a brief was judged, and two floats from two tables cannot be ordered when
+    -- they are equal.
+    after_evaluation INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -1142,6 +1157,44 @@ def init_db() -> None:
     vectorstore.init(conn)   # "campaign" space (text chunks, dim=config.EMBED_DIM)
     vectorstore.init(conn, space="asset", dim=config.CLIP_EMBED_DIM)  # CLIP image vectors
     conn.close()
+
+
+def _highest_write_order(conn) -> int:
+    """The newest judgment on file, in the order things were written. 0 when there are none,
+    which is what "older than every judgment" means."""
+    if not _columns(conn, "evaluations"):
+        return 0
+    column = "COALESCE(seq, rowid)" if "seq" in _columns(conn, "evaluations") else "rowid"
+    return int(conn.execute(
+        f"SELECT COALESCE(MAX({column}), 0) AS n FROM evaluations").fetchone()["n"])
+
+
+def next_write_order(conn) -> int:
+    """The next number in the one sequence that is never reused.
+
+    Seeded above the highest existing rowid the first time it is asked, so numbers handed out
+    after an upgrade cannot collide with the rowids an older release was ordered by.
+    """
+    if not _columns(conn, "write_order"):
+        return 0
+    if not conn.execute("SELECT 1 FROM write_order LIMIT 1").fetchone():
+        # ABOVE EVERY NUMBER ALREADY IN USE, and the rowids are not all of them. Rows in the
+        # three tables that record "which judgments existed when I was written" hold markers
+        # from the old rowid regime, and a rowid can have been deleted since — so seeding
+        # above the surviving rowids alone handed the first post-upgrade judgment a number a
+        # marker already claimed, which at a tie reports that judgment as missing a measure
+        # confirmed before it.
+        highest = conn.execute(
+            "SELECT COALESCE(MAX(rowid), 0) AS n FROM evaluations").fetchone()["n"]
+        for table in ("metric_registry", "measure_history", "correction_scope"):
+            if "after_evaluation" in _columns(conn, table):
+                highest = max(highest, conn.execute(
+                    f"SELECT COALESCE(MAX(after_evaluation), 0) AS n FROM {table}"
+                ).fetchone()["n"])
+        conn.execute("INSERT INTO write_order (id) VALUES (?)", (highest + 1,))
+        return highest + 1
+    conn.execute("INSERT INTO write_order DEFAULT VALUES")
+    return int(conn.execute("SELECT last_insert_rowid() AS n").fetchone()["n"])
 
 
 def _now() -> float:
@@ -2187,14 +2240,15 @@ def insert_evaluation(conn, *, subject_title, verdict, summary, findings,
         """INSERT INTO evaluations (id, campaign_id, subject_title, cited_ids, verdict,
                                     summary, findings, resolved, closest_precedent,
                                     approve_if, evidence, provenance, predictions,
-                                    created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                    created_at, seq)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (eid, campaign_id, subject_title, json.dumps(cited_ids or []), verdict, summary,
          json.dumps(findings), json.dumps(resolved or []),
          json.dumps(closest_precedent) if closest_precedent else None, approve_if,
          json.dumps(evidence) if evidence else None,
          json.dumps(provenance) if provenance else None,
-         json.dumps(predictions) if predictions is not None else None, _now()),
+         json.dumps(predictions) if predictions is not None else None, _now(),
+         next_write_order(conn)),
     )
     conn.commit()
     return eid
@@ -3079,8 +3133,11 @@ def evaluation_order(conn) -> dict:
     """
     if not _columns(conn, "evaluations"):
         return {}
-    return {row["id"]: row["seq"]
-            for row in conn.execute("SELECT id, rowid AS seq FROM evaluations")}
+    # The never-reused number where there is one, the rowid for rows written before it
+    # existed. The seed keeps the two ranges from overlapping.
+    column = "COALESCE(seq, rowid)" if "seq" in _columns(conn, "evaluations") else "rowid"
+    return {row["id"]: row["n"]
+            for row in conn.execute(f"SELECT id, {column} AS n FROM evaluations")}
 
 
 def correction_scope_at(conn, correction_id: str, when: float, *,
@@ -3113,9 +3170,7 @@ def _write_correction_scope(conn, correction_id: str, *, when: float, markets: l
         return
     # WHICH JUDGMENTS ALREADY EXISTED. A seeded row describes a past older than anything on
     # file, so it claims nothing: 0 sorts before every judgment.
-    after = 0 if seeded else (conn.execute(
-        "SELECT COALESCE(MAX(rowid), 0) AS n FROM evaluations").fetchone()["n"]
-        if _columns(conn, "evaluations") else 0)
+    after = 0 if seeded else _highest_write_order(conn)
     conn.execute(
         "INSERT INTO correction_scope (id, correction_id, changed_at, expected_in, "
         "applies_everywhere, standing, seeded, after_evaluation) VALUES (?,?,?,?,?,?,?,?)",
@@ -3566,16 +3621,27 @@ def graduate_metric(conn, canonical: str, *, markets: list, confirmed_by: str,
     if "after_evaluation" in _columns(conn, "metric_registry"):
         fields += (", after_evaluation = CASE WHEN confirmed_at IS NULL THEN ? "
                    "ELSE after_evaluation END")
-        params.append(conn.execute(
-            "SELECT COALESCE(MAX(rowid), 0) AS n FROM evaluations").fetchone()["n"]
-            if _columns(conn, "evaluations") else 0)
+        params.append(_highest_write_order(conn))
     # §12.4/D102, and guarded on the column because an upgraded database gets it from
     # `_add_missing_columns` and this runs on every promotion.
     if "expected_for_types" in _columns(conn, "metric_registry"):
         fields += ", expected_for_types = ?"
         params.append(json.dumps(sorted(set(campaign_types or []))))
+    was_retired = (metric_entry(conn, canonical) or {}).get("status") == "retired"
     conn.execute(f"UPDATE metric_registry SET {fields} WHERE canonical = ?",
                  params + [canonical])
+    # D106'S OCCASION, on the second route back. `revive_metric` records one and this did
+    # not — and confirming a retired measure again is a route the product OFFERS: the gate
+    # answers "eligible" for it and `graduate_measure` accepts it. So the history ended on
+    # `retired` while the registry said `expected`, and §8.7, which reads that history to ask
+    # whether a measure was in force when a brief was judged, answered no for every judgment
+    # made afterwards. The report then accused briefs that had been checked against it, which
+    # is the damaging direction. A later retirement appended `retired` to `retired`, a history
+    # asserting an event that did not happen — the thing `retire_metric` guards its own
+    # rowcount against.
+    if was_retired:
+        _record_measure_history(conn, canonical, "revived",
+                                "confirmed again after being retired")
     conn.commit()
 
 
@@ -3583,19 +3649,56 @@ def _record_measure_history(conn, canonical: str, what: str, why: str) -> None:
     """One occasion, appended (§12.4/D106)."""
     if not _columns(conn, "measure_history"):
         return
-    conn.execute("INSERT INTO measure_history (id, canonical, what, why, at) "
-                 "VALUES (?,?,?,?,?)",
-                 (_id("mhist"), canonical, what, " ".join((why or "").split()), _now()))
+    ordering = "after_evaluation" in _columns(conn, "measure_history")
+    after = _highest_write_order(conn) if ordering else 0
+    conn.execute(
+        f"INSERT INTO measure_history (id, canonical, what, why, at"
+        f"{', after_evaluation' if ordering else ''}) "
+        f"VALUES (?,?,?,?,?{',?' if ordering else ''})",
+        (_id("mhist"), canonical, what, " ".join((why or "").split()), _now())
+        + ((after,) if ordering else ()))
 
 
 def measure_history(conn, canonical: str) -> list:
     """Every time this measure was retired or revived, oldest first (§12.4/D106)."""
     if not _columns(conn, "measure_history"):
         return []
-    return [{"what": row["what"], "why": row["why"], "at": row["at"], "basis": "computed"}
+    ordering = ("after_evaluation" in _columns(conn, "measure_history"))
+    return [{"what": row["what"], "why": row["why"], "at": row["at"], "basis": "computed",
+             "after_evaluation": row["after_evaluation"] if ordering else 0}
             for row in conn.execute(
-                "SELECT what, why, at FROM measure_history WHERE canonical = ? "
+                f"SELECT what, why, at{', after_evaluation' if ordering else ''} "
+                "FROM measure_history WHERE canonical = ? "
                 "ORDER BY at, rowid", (canonical,)).fetchall()]
+
+
+def measure_in_force_at(conn, canonical: str, when: float,
+                        judgment_seq: Optional[int] = None) -> bool:
+    """Whether this measure was expected of briefs at `when` (§8.7/§12.4).
+
+    `confirmed_at` alone cannot answer it. It is COALESCEd on purpose — the first confirmation
+    is when the measure became a rule, and rewriting it would make a measure graduated, judged
+    against, retired and graduated again look NEWER than the judgment that WAS checked against
+    it. The cost of keeping it is that the intervals disappear: confirm, retire, judge a brief,
+    revive, and the report compared one preserved date against the judgment and said the brief
+    had been checked for something nobody was asking for at the time.
+
+    §12.4 already records every retirement and revival, for exactly the reason D106 gives —
+    "we used to track this" is an answer somebody will need. This reads those occasions rather
+    than adding a second record of them, which is the correction twin's shape: one history,
+    asked a question.
+    """
+    entry = metric_entry(conn, canonical) or {}
+    if not entry.get("confirmed_at"):
+        return False
+    in_force = not after_judgment(entry["confirmed_at"], entry.get("after_evaluation"),
+                                  when, judgment_seq)
+    for occasion in measure_history(conn, canonical):
+        if after_judgment(occasion["at"], occasion.get("after_evaluation"), when,
+                          judgment_seq):
+            break
+        in_force = occasion["what"] != "retired"
+    return in_force
 
 
 def retire_metric(conn, canonical: str, *, why: str = "") -> None:

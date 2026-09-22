@@ -19,10 +19,10 @@ confident unfounded assertion this whole review is written against, with the ser
 behind it.
 
 What the server knows exactly is what a judgment was **not checked against**: which measures
-became expected after it was saved, which rules started APPLYING TO IT after it was saved — a
-rule can become standing later, or be standing and reach this brief's markets only after its
-scope changes, and both are the same fact about the judgment — and whether a rule it actually
-rested on has since been withdrawn. All three are `computed` in §2.4's sense
+and rules APPLY TO IT NOW and did not on the day it was written — a measure can be confirmed
+later, or have been retired while the brief was judged; a rule can become standing later, be
+standing and reach this brief's markets only after its scope changes, or have been set aside at
+the time — and whether a rule it actually rested on is no longer standing. All three are `computed` in §2.4's sense
 — identical for every reader, so a difference is a bug. And they are the thing a person can act
 on, because the answer to "would it change" is *judge it again*, which is an offer.
 
@@ -48,8 +48,18 @@ _MAX_JUDGMENTS = 20        # judgment rows returned, most consequential first
 # prediction about the verdict — each of these is a fact about the evidence package, computed
 # the same way for every reader. Ordered most consequential first, which is the order the rows
 # come back in.
-CONSEQUENCES = ("stated_basis_withdrawn", "rests_on_withdrawn", "gap_appears",
-                "rule_not_applied")
+# WHAT EACH CONSEQUENCE IS, most urgent first — and this order is the report's sort. One
+# tuple, because the names were typed out here and the decision written out again below, with
+# `CONSEQUENCES.index` raising on any name the two disagreed about: a rename in one place
+# would have turned every report into a crash.
+_CONSEQUENCES = (
+    # `sole`: every not-debatable finding cites a rule that is no longer standing.
+    ("stated_basis_withdrawn", lambda sole, rested, gaps, rules: sole),
+    ("rests_on_withdrawn", lambda sole, rested, gaps, rules: bool(rested)),
+    ("gap_appears", lambda sole, rested, gaps, rules: bool(gaps)),
+    ("rule_not_applied", lambda sole, rested, gaps, rules: bool(rules)),
+)
+CONSEQUENCES = tuple(name for name, _ in _CONSEQUENCES)
 
 
 def run(conn, *, market: Optional[str] = None) -> dict:
@@ -70,10 +80,7 @@ def run(conn, *, market: Optional[str] = None) -> dict:
     #
     # It could not be built until there were rulebook versions to compare, and §12.2's stamp
     # is what makes them comparable: before it, every judgment carried one literal string.
-    stamps = [row["v"] for row in conn.execute(
-        "SELECT DISTINCT json_extract(provenance, '$.rulebook_version') AS v "
-        "FROM evaluations WHERE provenance IS NOT NULL "
-        "AND json_extract(provenance, '$.rulebook_version') IS NOT NULL ORDER BY v")]
+    stamps = _rulebooks_seen(conn, market)
     return {
         "rulebook_version": core.rulebook_version(),
         "rulebooks_seen": stamps,
@@ -88,10 +95,11 @@ def run(conn, *, market: Optional[str] = None) -> dict:
              "One rulebook throughout, so nothing below is explained by the rules having "
              "moved.")
             + " Everything else here is built from what was IN FORCE on the day each "
-              "judgment was written rather than from the stamp — for a measure that is when "
-              "it was confirmed, and for a rule it is when the rule started applying to that "
-              "brief's markets, which is a different date whenever a rule's scope has "
-              "changed since."),
+              "judgment was written rather than from the stamp — for a measure, whether it "
+              "had been confirmed and not retired by then, and for a rule, whether it had "
+              "started applying to that brief's markets. Both are different dates from the "
+              "one a measure or a rule shows as its confirmation, whenever it has been "
+              "retired, set aside or re-scoped since."),
         "basis": "computed",
         "backlog": backlog,
         "judgments": judgments[:_MAX_JUDGMENTS],
@@ -100,7 +108,32 @@ def run(conn, *, market: Optional[str] = None) -> dict:
     }
 
 
-def _backlog(conn, *, market: Optional[str] = None) -> list:
+def _rulebooks_seen(conn, market: Optional[str]) -> list:
+    """The rulebook versions the judgments IN SCOPE were made under (§12.2).
+
+    Scoped, because everything else in the report is and this sentence claims to outrank all
+    of it — "a bigger difference than anything below and nothing else here can see it". Asked
+    unscoped, a report about Peru announced that the rules themselves had changed under these
+    judgments on the strength of a Japanese judgment stamped with another rulebook, about a
+    market whose every judgment was made under one.
+    """
+    import store
+
+    seen = {}
+    for row in store.list_evaluations(conn):
+        if market and not learning.reaches(_where_it_ran(conn, row.get("campaign_id")),
+                                           market):
+            continue
+        saved = store.get_evaluation(conn, row["id"]) or {}
+        stamp = (saved.get("provenance") or {}).get("rulebook_version")
+        if stamp:
+            seen.setdefault(stamp, row.get("created_at") or 0)
+    # By when each was first seen rather than by name: `v0.10` sorts before `v0.9` as a
+    # string, and the order a reader wants is the order they happened in.
+    return [stamp for stamp, _ in sorted(seen.items(), key=lambda pair: pair[1])]
+
+
+def _backlog(conn, *, market: Optional[str] = None) -> dict:
     """Stored campaigns that do not carry what is now expected of them.
 
     The review's own framing is what makes this useful: *"that is the backlog of things to go
@@ -139,8 +172,10 @@ def _backlog(conn, *, market: Optional[str] = None) -> list:
                                   )["campaigns"].append(
                     {"campaign_id": record["id"], "title": record["title"]})
 
-    # One conversation per partner per measure is the unit of work the review describes, so
-    # that is the shape: "LATAM: 14 campaigns missing footfall uplift", with names.
+    # One conversation per MARKET per measure, which is the key below — the review describes
+    # the unit of work as one per partner, and `campaigns.partner` exists, but a market is
+    # what every campaign carries and a partner is not. Named rather than left to be read off
+    # the key, because the two are easy to confuse and one of them is a promise.
     out = []
     for group in sorted(groups.values(), key=lambda g: (-len(g["campaigns"]), g["market"],
                                                         g["measure"])):
@@ -149,6 +184,8 @@ def _backlog(conn, *, market: Optional[str] = None) -> list:
             "market": group["market"],
             "measure": group["measure"],
             "campaigns_missing_it": total,
+            # Every one of them, for counting; `campaigns` is the named few a reader sees.
+            "campaigns_all": group["campaigns"],
             "campaigns": group["campaigns"][:_MAX_NAMED],
             "more": max(0, total - _MAX_NAMED),
             "what_it_means": (
@@ -157,8 +194,19 @@ def _backlog(conn, *, market: Optional[str] = None) -> list:
                 f"That is one conversation to have with whoever ran "
                 f"{'them' if total != 1 else 'it'}."),
         })
-    return {"groups": out[:_MAX_GROUPS],
+    shown = [{k: v for k, v in group.items() if k != "campaigns_all"}
+             for group in out[:_MAX_GROUPS]]
+    return {"groups": shown,
             "groups_total": len(out),
+            # THE CAMPAIGNS, counted once each and over every group rather than the truncated
+            # eight. Summing `campaigns_missing_it` counts a campaign once per measure it is
+            # missing AND once per market it ran in, so the sentence read "12 things covering
+            # 84 concluded campaigns" about a library holding 15 such campaigns and 33 in
+            # total — a per-market-per-measure overcount, truncated, presented as a count of
+            # campaigns. It is the defect this module's own comment says it closed when
+            # `what_it_means` added up two populations, one key along.
+            "campaigns_total": len({c["campaign_id"] for group in out
+                                    for c in group["campaigns_all"]}),
             "campaigns_still_running": not_yet}
 
 
@@ -179,40 +227,57 @@ def _judgments(conn, *, market: Optional[str] = None) -> list:
         most urgent row this report can produce and read identically to the least urgent.
     """
     import actions
+    import metrics
     import store
 
     # Which judgment was written first, for the one comparison two wall-clock floats cannot
     # settle between them. Once per report.
     order = store.evaluation_order(conn)
-    measures = {name: entry for name, entry in metrics_registry(conn).items()
-                if entry["status"] == "expected" and entry.get("confirmed_at")}
     all_rules = store.corrections(conn)
-    rules = [c for c in all_rules if c["status"] == "expected" and c.get("confirmed_at")]
+    # The same selection `corrections.standing_for` makes, and no stricter. Requiring
+    # `confirmed_at` too made this report's idea of "standing" narrower than the live one: on a
+    # row without it the live path applies the rule to the brief and this returned an empty
+    # report. No write produces that row today, which is exactly how a second copy of a
+    # selection waits.
+    rules = [c for c in all_rules if c["status"] == "expected"]
     # Anything that is not standing. A rule set aside and then REOPENED is `provisional` —
     # still applied to nothing — and keying on `ignored` alone made a judgment whose blocking
     # finding cites it vanish from the report entirely at the moment somebody reopened it.
     withdrawn = {c["id"]: c for c in all_rules if c["status"] != "expected"}
 
     out = []
-    for row in store.list_evaluations(conn):
+    judgments_on_file = store.list_evaluations(conn)
+    for row in judgments_on_file:
         judged_at = row.get("created_at")
         if judged_at is None:
             continue                   # a legacy row with no timestamp cannot be compared
         subject = row.get("campaign_id")
-        markets = _markets_of_subject(conn, subject)
-        if market and not learning.reaches(markets, market):
+        # TWO DIFFERENT QUESTIONS, and collapsing them silenced the most urgent row this
+        # report has. "Is this judgment one the reader asked about" is about where the record
+        # RAN — a Peru reference record is a Peru row whatever any checklist thinks of it —
+        # while "what is this brief checked against" goes through the live gate, which refuses
+        # a reference record entirely. Filtered on the gated answer, a judgment about Peru
+        # brand guidelines whose whole stated basis had been withdrawn appeared in the
+        # unfiltered report and vanished from `market="Peru"`.
+        markets, checklist = _subject_checklist(conn, subject)
+        if market and not learning.reaches(_where_it_ran(conn, subject), market):
             continue
-        after_measures = sorted(
-            name for name, entry in measures.items()
-            # The same tie rule the rules half uses. Read through the timestamp alone, a
-            # measure confirmed in the same tick as a judgment counted as already expected and
-            # the brief it was never checked for vanished from the report — the ordering
-            # reached one of the three comparisons that ask this question.
-            if store.after_judgment(entry["confirmed_at"], entry.get("after_evaluation"),
-                                    judged_at, order.get(row["id"]))
-            # A MEASURE, which is expected where the evidence put it: there is no such
-            # thing as one a customer declared for every market.
-            and _applies(entry["expected_in"], markets, everywhere=False))
+        # WHAT THIS BRIEF IS CHECKED FOR NOW, asked of the function that decides it for a live
+        # judgment. This file kept its own market test and never learned about the other half
+        # of §12.4: a measure that graduated on store launches is keyed on the TYPE, not on
+        # the markets it happened to be seen in. So the report flagged a Peru seeding brief
+        # for a store-launch measure it is not expected to carry, and stayed silent about a
+        # Vietnam store launch that is — two wrong answers from one missing condition, and the
+        # live surface had them both right.
+        # THE MEASURES HALF NEEDS THE REFUSAL ITSELF, not just an empty market list, and the
+        # rules half does not — which is not an inconsistency but §12.4: a measure keyed on
+        # the campaign TYPE matches with no market at all, so nothing else would stop it
+        # reaching a record the checklist refuses. A rule is scoped to markets or declared for
+        # every market, and neither reaches a subject that has none.
+        after_measures = [] if not checklist else _newly_expected(
+            conn, metrics.expected_for(
+                conn, markets=markets, campaign_type=_type_of_subject(conn, subject)),
+            judged_at, order.get(row["id"]))
         saved = store.get_evaluation(conn, row["id"]) or {}
         rested_on, sole = _withdrawn_rules_cited(saved, withdrawn)
         # THE RULES THIS JUDGMENT ACTUALLY CITES, excluded — the guard that came back.
@@ -239,11 +304,22 @@ def _judgments(conn, *, market: Optional[str] = None) -> list:
         # Only the measures the subject does not actually carry. The rest are checks that
         # would pass, and a report that lists a passing check beside a real gap is one nobody
         # reads twice.
-        gaps = _not_carried(conn, subject, after_measures)
+        gaps = _not_carried(conn, subject, [m["measure"] for m in after_measures])
 
         consequence = _consequence(sole, rested_on, gaps, after_rules)
         if consequence is None:
             continue
+        # LATER, settled by the order things were written rather than by two equal floats —
+        # the comparison this file spent two rounds replacing everywhere else, written out
+        # again here. A judgment's own place in that order is one past the judgments that
+        # existed when it was saved, which is what `after_judgment` takes.
+        revisited = bool(subject) and any(
+            other.get("campaign_id") == subject
+            and other["id"] != row["id"]
+            and store.after_judgment(other.get("created_at"),
+                                     (order.get(other["id"]) or 1) - 1,
+                                     judged_at, order.get(row["id"]))
+            for other in judgments_on_file)
         out.append({
             "evaluation_id": row["id"],
             "subject_title": row["subject_title"],
@@ -255,8 +331,15 @@ def _judgments(conn, *, market: Optional[str] = None) -> list:
             "gaps_that_would_appear": gaps,
             "rests_on_withdrawn": rested_on,
             "basis": "computed",
+            # WHETHER SOMEBODY HAS JUDGED THIS SUBJECT AGAIN — the fact, not a conclusion
+            # drawn from it. "Nobody has revisited it" was asserted on a row stamped
+            # `computed` with nothing behind it; this is computed, from the order things were
+            # written in. What it does NOT say is whether that later judgment met what this
+            # row reports, because the report cannot see that without knowing when each change
+            # happened, and it got that wrong in the withdrawn-basis case the first time.
+            "revisited": revisited,
             "what_it_means": _judgment_sentence(consequence, gaps, after_measures,
-                                                after_rules, rested_on),
+                                                after_rules, rested_on, revisited),
             # An OFFER. The answer to "would this verdict change" is judging it again, and
             # judging it again is the model's work, not the server's — so the report stops at
             # the question and hands over the one call that answers it.
@@ -270,20 +353,25 @@ def _judgments(conn, *, market: Optional[str] = None) -> list:
                 subject_title=row["subject_title"],
                 campaign_id=subject)]) if subject else [],
         })
+    # NO INFERENCE FROM "a later judgment is not on this report" TO "it met what this row
+    # reports". That reading was wrong for the row that matters most: a judgment written
+    # BEFORE somebody withdrew a rule is absent from the report because it cites nothing
+    # withdrawn, and it cannot have met a withdrawal that had not happened. Making the test
+    # right needs the date of every change each row reports — more machinery, on a report
+    # whose only job here is to hand over one offer.
+    #
+    # So the report states the fact it has (`revisited`, and the sentence that goes with it)
+    # and leaves the conclusion to the reader, who knows what they judged and when. An offer
+    # nobody needs costs a glance; an offer withdrawn because the server inferred something
+    # false costs the one row §8.7 exists for.
     return sorted(out, key=lambda r: (CONSEQUENCES.index(r["consequence"]), -r["judged_at"]))
 
 
 def _consequence(sole: bool, rested_on: list, gaps: list, after_rules: list):
-    """Which of the four, or None when judging it again would meet nothing new."""
-    if sole:
-        return "stated_basis_withdrawn"
-    if rested_on:
-        return "rests_on_withdrawn"
-    if gaps:
-        return "gap_appears"
-    if after_rules:
-        return "rule_not_applied"
-    return None
+    """Which of the four, or None when judging it again would meet nothing new. In the order
+    they are declared, which is the order they are reported in."""
+    return next((name for name, holds in _CONSEQUENCES
+                 if holds(sole, rested_on, gaps, after_rules)), None)
 
 
 def _not_carried(conn, campaign_id: Optional[str], names: list) -> list:
@@ -292,9 +380,7 @@ def _not_carried(conn, campaign_id: Optional[str], names: list) -> list:
 
     if not campaign_id:
         return []
-    return [name for name in names
-            if not [v for v in metrics.values_for(conn, campaign_id, name)
-                    if v["metric_type"] == "actual"]]
+    return [name for name in names if not metrics.carries(conn, campaign_id, name)]
 
 
 def metrics_registry(conn) -> dict:
@@ -302,12 +388,48 @@ def metrics_registry(conn) -> dict:
     return store.metric_registry(conn)
 
 
-def _markets_of_subject(conn, campaign_id: Optional[str]) -> list:
+def _subject_checklist(conn, campaign_id: Optional[str]) -> tuple:
+    """`(markets, whether a checklist applies to this subject at all)`.
+
+    `learning.subject_markets`' three answers, which are the live path's: no such record, not
+    a campaign, no market named — or here are the markets. Both live surfaces go through it,
+    `expected_check` for measures and `standing_for` for rules, and this report read the
+    record's markets directly. So it claimed a reference record's judgment had missed a
+    store-launch measure that the live checklist refuses to apply to a reference record at
+    all, and a market-less record the same: a type-keyed measure needs no market to match, so
+    nothing stopped it.
+
+    A refusal is not an empty market list. A checklist that does not apply cannot be something
+    a judgment failed to check against, and saying otherwise is this report accusing somebody
+    of missing a check the product would never have made.
+    """
+    if not campaign_id:
+        return [], False
+    named, refusal = learning.subject_markets(conn, campaign_id)
+    return ([], False) if refusal else (named, True)
+
+
+def _type_of_subject(conn, campaign_id: Optional[str]) -> Optional[str]:
+    """The kind of campaign this judgment was about, for §12.4's type-keyed checklist."""
     import store
 
-    if not campaign_id:
-        return []
-    record = store.get_campaign(conn, campaign_id) or {}
+    record = store.get_campaign(conn, campaign_id) if campaign_id else None
+    return (record or {}).get("campaign_type")
+
+
+def _where_it_ran(conn, campaign_id: Optional[str]) -> list:
+    """Where the subject RAN, for scoping a report — not for deciding what it is checked
+    against. `_subject_checklist` answers that, and answers it differently: a reference record
+    has markets and has no checklist."""
+    import store
+
+    # `or {}` on BOTH counts, and the guard is the point rather than defensive habit. A
+    # judgment can carry no `campaign_id` at all — §8.6's "judge this new pitch", a proposal
+    # that is not a record yet, which `save_evaluation` accepts deliberately — and a judgment
+    # can outlive the record it was about. `markets_of(None)` raises `AttributeError`, which
+    # reaches a marketer as "Error executing tool replay_rules" with the reason discarded, and
+    # only when they scope the report to a market.
+    record = (store.get_campaign(conn, campaign_id) if campaign_id else None) or {}
     return [m for m in store.markets_of(record) if m]
 
 
@@ -330,19 +452,47 @@ def _applies(expected_in, markets, *, everywhere: bool) -> bool:
 
 
 def _cited_by(finding: dict) -> Optional[str]:
-    """The correction this finding quotes as precedent, if any.
+    """`corrections.cited_by`, which is where the definition lives — the two other readers of
+    this are the ones that decide how a verdict is voiced."""
+    import corrections
 
-    One definition of "this finding cites a rule", because there were three lines that each
-    reached into `precedent` for a `correction_id` and the newest of them was mine, written
-    while closing a round about two implementations of one rule.
-    """
-    return ((finding.get("precedent") or {}).get("correction_id")
-            if isinstance(finding, dict) else None) or None
+    return corrections.cited_by(finding)
 
 
 def _rules_cited(saved: dict) -> set:
     """Every correction a saved judgment's findings quote as precedent."""
     return {_cited_by(finding) for finding in (saved.get("findings") or [])} - {None}
+
+
+def _newly_expected(conn, names: list, judged_at: float,
+                    judgment_seq: Optional[int] = None) -> list:
+    """The measures this brief is checked for now and was not when it was judged, and WHY.
+
+    The rules half has carried its reason since the round that split "became standing" from
+    "its scope changed"; this half got the mechanism — `measure_in_force_at`, which walks
+    §12.4's retirements and revivals — and kept the old sentence. So a brief judged while a
+    measure was retired was told the measure "became expected here after this was judged",
+    about a measure confirmed months before it. That is the reading whose own docstring says a
+    reader "concludes the report is broken. Which is what happened."
+
+    Dicts rather than names, which is what made the explanation impossible to carry: the
+    corrections half of the same key has been a list of dicts since it learned to say why.
+    """
+    import store
+
+    out = []
+    for name in names:
+        if store.measure_in_force_at(conn, name, judged_at, judgment_seq):
+            continue
+        entry = store.metric_entry(conn, name) or {}
+        out.append({
+            "measure": name,
+            "since": ("became_expected"
+                      if store.after_judgment(entry.get("confirmed_at"),
+                                              entry.get("after_evaluation"),
+                                              judged_at, judgment_seq)
+                      else "was_retired")})
+    return sorted(out, key=lambda m: m["measure"])
 
 
 def _newly_reaches(conn, rule: dict, markets: list, judged_at: float, *,
@@ -422,10 +572,21 @@ def _withdrawn_rules_cited(saved: dict, withdrawn: dict) -> tuple:
         if cited in withdrawn and cited not in seen:
             seen.add(cited)
             out.append({"correction_id": cited, "text": withdrawn[cited]["text"],
+                        # WHICH not-standing state, because the two are different things to
+                        # tell somebody. A rule that is `provisional` was set aside and then
+                        # REOPENED — the user clicked the product's own "put this rule back
+                        # if that was not what you meant" — and reading the row as "since been
+                        # set aside" tells them the opposite of what they just did.
+                        "status": withdrawn[cited].get("status"),
                         "finding": finding.get("finding")})
     # The MODEL's findings only. §7.8's computed ones are the server's own facts about the
     # brief — they are not part of what the judgment argued, so counting them would mean a
     # verdict could never rest solely on anything.
+    #
+    # And this rests on an invariant written elsewhere: `core.save_evaluation` refuses a
+    # `note`-severity `guardrail_breach` ("a guardrail breach cannot be a note"), so every
+    # breach is one of the severities tested below. Named here because a change there would
+    # make `sole` quietly unreachable, and nothing would fail.
     argued = [f for f in findings if (f.get("basis") or "judged") == "judged"]
     breaches = [f for f in argued if f.get("kind") == "guardrail_breach"]
     sole = bool(
@@ -438,26 +599,59 @@ def _withdrawn_rules_cited(saved: dict, withdrawn: dict) -> tuple:
     return out, sole
 
 
+def _how_withdrawn(withdrawn: list) -> str:
+    """Set aside, or set aside and put back but not confirmed again — one sentence for two
+    states told somebody the opposite of what they had just done."""
+    states = {c.get("status") for c in withdrawn}
+    if states == {"provisional"}:
+        return ("reopened, and applies to nothing until somebody confirms it"
+                if len(withdrawn) == 1 else
+                "reopened, and applying to nothing until somebody confirms them")
+    if "provisional" in states:
+        return "some set aside, some reopened and not confirmed again"
+    return "set aside" if len(withdrawn) == 1 else "set aside"
+
+
+def _and_a_stop(text: str) -> str:
+    """A rule is a sentence and usually ends in a period; a second one reads as a typo."""
+    return text if text.rstrip().endswith((".", "!", "?")) else f"{text}."
+
+
 def _judgment_sentence(consequence: str, gaps: list, measures: list, rules: list,
-                       withdrawn: list) -> str:
+                       withdrawn: list, revisited: bool = False) -> str:
     """One sentence per consequence, and none of them says the verdict would change."""
     if consequence == "stated_basis_withdrawn":
-        return (f"Everything this verdict rests on is a rule that has since been set aside: "
-                f"{'; '.join(c['text'] for c in withdrawn)}. The judgment is unchanged and "
-                f"nobody has revisited it — but its whole stated basis is no longer a rule "
-                f"here.")
+        return (f"Everything this verdict rests on is a rule that is no longer standing "
+                f"({_how_withdrawn(withdrawn)}): "
+                f"{_and_a_stop('; '.join(c['text'] for c in withdrawn))} The judgment is "
+                f"unchanged, but its whole stated basis is no longer a rule here."
+                + ("" if revisited else " Nobody has judged this subject again since."))
     if consequence == "rests_on_withdrawn":
         return (f"This judgment cites {len(withdrawn)} standing correction"
                 f"{'s' * (len(withdrawn) != 1)} that "
-                f"{'have' if len(withdrawn) != 1 else 'has'} since been set aside, so "
+                f"{'are' if len(withdrawn) != 1 else 'is'} no longer standing "
+                f"({_how_withdrawn(withdrawn)}), so "
                 f"{'those findings are' if len(withdrawn) != 1 else 'that finding is'} "
                 f"anchored to something that is no longer a rule. The rest of it stands.")
     if consequence == "gap_appears":
+        # WHY each gap is new, for the reason the rules half says it: a measure confirmed long
+        # before this judgment, retired while it was made and revived since, is not one that
+        # "became expected after this was judged" — and a reader who checks the date concludes
+        # the report is broken.
+        since = {m["measure"]: m["since"] for m in measures}
+        fresh = [g for g in gaps if since.get(g) != "was_retired"]
+        back = [g for g in gaps if since.get(g) == "was_retired"]
+        how = []
+        if fresh:
+            how.append(f"{', '.join(fresh)} became expected here after this was judged")
+        if back:
+            how.append(f"{', '.join(back)} {'was' if len(back) == 1 else 'were'} retired when "
+                       f"this was judged and {'has' if len(back) == 1 else 'have'} since been "
+                       f"put back")
         return (f"The subject has no measured {', '.join(gaps)} on file, and "
-                f"{'those became' if len(gaps) != 1 else 'that became'} expected here after "
-                f"this was judged. Judging it again would see a gap this judgment did not. "
-                f"That is a difference in the evidence, not a verdict — whether it changes "
-                f"anything is the judgment's to make.")
+                f"{' and '.join(how)}. Judging it again would see a gap this judgment did "
+                f"not. That is a difference in the evidence, not a verdict — whether it "
+                f"changes anything is the judgment's to make.")
     named = [c["text"] for c in rules]
     # WHY each one is newly here, because a reader who is told a rule "became standing after
     # this was judged" and then finds a confirmation date from before it concludes the report
@@ -476,12 +670,14 @@ def _judgment_sentence(consequence: str, gaps: list, measures: list, rules: list
     if back:
         how.append(f"{len(back)} {'was' if len(back) == 1 else 'were'} set aside when this was "
                    f"judged and {'has' if len(back) == 1 else 'have'} since been put back")
+    listed = "; ".join(named[:2])
+    # "and others" ends the list when there are more than two, so the stop belongs after THAT
+    # — measured on the rendered string rather than on the last rule, which is what made the
+    # guard wrong for exactly the case it was written for: the upgraded install, where ten
+    # house rules become standing at once ("…creative. and others Whether…").
     return (f"{' and '.join(how)}, so it was never checked against "
-            f"{'them' if len(named) != 1 else 'it'}: {'; '.join(named[:2])}"
-            f"{' and others' if len(named) > 2 else ''}"
-            # A rule is a sentence and usually ends in a period, so a second one read as a
-            # typo in the middle of the report ("…all recipients.. Whether…").
-            f"{'' if named and named[min(len(named), 2) - 1].endswith('.') else '.'}"
+            f"{'them' if len(named) != 1 else 'it'}: "
+            f"{_and_a_stop(listed + (' and others' if len(named) > 2 else ''))}"
             f" Whether this brief breaks "
             f"{'any of them' if len(named) != 1 else 'it'} is a judgment, so the library does "
             f"not guess — judge it again to find out.")
@@ -498,7 +694,7 @@ def _sentence(conn, backlog: dict, judgments: list) -> str:
                 "nothing to replay. A measure or a rule joins once it has been seen across "
                 "markets and a person has confirmed it.")
 
-    chase = sum(g["campaigns_missing_it"] for g in backlog["groups"])
+    chase = backlog["campaigns_total"]
     still = backlog["campaigns_still_running"]
     urgent = [j for j in judgments if j["consequence"] == "stated_basis_withdrawn"]
     return (
@@ -519,7 +715,8 @@ def _sentence(conn, backlog: dict, judgments: list) -> str:
 def if_graduated(conn, *, measure: Optional[str] = None,
                  correction_id: Optional[str] = None,
                  markets: Optional[list] = None,
-                 everywhere: bool = False) -> dict:
+                 everywhere: bool = False,
+                 campaign_types: Optional[list] = None) -> dict:
     """What promoting this would do to the library, without promoting it (§8.7, D104).
 
     *"This makes 14 LATAM records show as missing it."* The person confirming is exactly who
@@ -543,7 +740,7 @@ def if_graduated(conn, *, measure: Optional[str] = None,
             raise ValueError(f"{name!r} is not a measure on file")
         where = markets if markets is not None else metrics.graduation(conn, name)["seen_in"]
         affected = [r for r in store.list_campaigns(conn)
-                    if _would_miss(conn, r, where, name)]
+                    if _would_miss(conn, r, where, name, campaign_types=campaign_types)]
         return {
             "measure": name,
             "markets": where,
@@ -571,8 +768,12 @@ def if_graduated(conn, *, measure: Optional[str] = None,
     # honest number is not "how many fail it" but how many were judged WITHOUT it, which is
     # what a person is deciding to leave unexamined.
     affected = [r for r in _judgments_before(conn)
-                if _applies(where, _markets_of_subject(conn, r.get("campaign_id")),
-                            everywhere=everywhere)]
+                # The CHECKLIST question — would this rule reach that judgment's subject —
+                # so it goes through the gate rather than through where the record ran. The
+                # refusal is read rather than discarded: a gated subject comes back with no
+                # markets, and relying on `in_force` to answer False for an empty list would
+                # make this correct by the order of two lines in another module.
+                if _reaches_subject(conn, r.get("campaign_id"), where, everywhere)]
     return {
         "correction_id": entry["correction_id"],
         "text": entry["text"],
@@ -601,17 +802,33 @@ def if_graduated(conn, *, measure: Optional[str] = None,
     }
 
 
-def _would_miss(conn, record: dict, markets: list, name: str) -> bool:
-    import metrics
-    import store
+def _would_miss(conn, record: dict, markets: list, name: str,
+                campaign_types: Optional[list] = None) -> bool:
+    """Whether confirming this measure would show this record as missing it.
 
-    if record.get("record_type") not in learning.CHECKABLE_RECORDS:
+    Through the same two functions a live checklist goes through: `_subject_checklist` for
+    whether the record has one at all, and `metrics.keyed_on_reaches` for whether an entry
+    scoped this way reaches it. This hand-rolled both — a record-type test of its own and a
+    market test of its own — and never heard of §12.4's other key, so the preview described a
+    graduation keyed on markets while the graduation it previews keys on the TYPE.
+    """
+    import metrics
+
+    where, checklist = _subject_checklist(conn, record.get("id"))
+    if not checklist:
         return False
-    where = [m for m in store.markets_of(record) if m]
-    if not _applies(markets, where, everywhere=False):
+    if not metrics.keyed_on_reaches(expected_in=markets, expected_for_types=campaign_types,
+                                    markets=where,
+                                    campaign_type=record.get("campaign_type")):
         return False
-    return not [v for v in metrics.values_for(conn, record["id"], name)
-                if v["metric_type"] == "actual"]
+    return not metrics.carries(conn, record["id"], name)
+
+
+def _reaches_subject(conn, campaign_id: Optional[str], where: list,
+                     everywhere: bool) -> bool:
+    """Whether a rule scoped like this would reach that judgment's subject."""
+    markets, checklist = _subject_checklist(conn, campaign_id)
+    return checklist and _applies(where, markets, everywhere=everywhere)
 
 
 def _judgments_before(conn) -> list:

@@ -510,7 +510,8 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
     # calling a target "an outcome that ran through" something is the category error the
     # `metric_type` comment above guards — it would also corrupt §9.9, which scores
     # predictions against actuals.
-    measured = [m for m in d["metrics"] if m["metric_type"] == "actual"]
+    import metrics as metrics_module
+    measured = metrics_module.measured(d["metrics"])
     for metric in d["metrics"]:
         metric.update({"status": "not_an_outcome", "confounded": False, "confounded_by": [],
                        "ran_during": 0, "confounded_basis": "computed"})
@@ -528,7 +529,7 @@ def get_campaign(conn, campaign_id: str) -> Optional[dict]:
     # reachable. `has_metrics` counts any row — a forecast, and now a TARGET. "Has this
     # campaign been measured" is what decides whether to go and ask for its numbers, and a
     # campaign carrying only the figure somebody was aiming at has not been measured at all.
-    d["has_actual_metrics"] = any(m["metric_type"] == "actual" for m in d["metrics"])
+    d["has_actual_metrics"] = bool(metrics_module.measured(d["metrics"]))
     # §10.3: the sentences people gave about this record, in their words. The most valuable
     # content the library holds, and a table nothing reads is where it goes to die.
     d["feedback_notes"] = feedback_notes(conn, campaign_id)

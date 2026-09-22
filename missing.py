@@ -1463,7 +1463,7 @@ def missing_input_for_citations(conn, cited_ids: Optional[list]) -> Optional[dic
         return most_valuable_missing_input([])
     return most_valuable_missing_input([
         {"campaign_id": c["id"], "title": c["title"],
-         "metrics": [m for m in c["metrics"] if m["metric_type"] == "actual"]}
+         "metrics": metrics.measured(c["metrics"])}
         for c in cited])
 
 

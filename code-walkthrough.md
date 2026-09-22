@@ -289,6 +289,23 @@ tables have no order between them when they are equal, and Windows measures
 judgment records which judgments already existed when it was written. `store.after_judgment`
 is the one place that question is answered.
 
+The measures half asks `metrics.expected_for` what this brief is checked for — the same function
+the live judgment uses, so §12.4's type-keyed measures reach the report the way they reach a
+brief — and `store.measure_in_force_at` whether it was in force on the day, which reads the
+retirement and revival occasions §12.4 already keeps.
+
+The rule of the last several rounds, learned the hard way: **the report answers no question the
+live path already answers.** `learning.subject_markets` decides whether a subject has a checklist
+at all, `metrics.expected_for` and `metrics.keyed_on_reaches` decide what is on it, and
+`corrections.standing_for`'s predicate decides which rules apply. What the report owns is the
+one question nothing else asks — *was that true on the day this was judged* — and `after_evaluation`
+plus `store.write_order` order the two tables against each other so a tie is decided by what
+happened rather than by a float.
+
+Note the pair `_where_it_ran` and `_subject_checklist`: where a record ran scopes a report, what
+applies to it decides the checklist, and collapsing them (which happened) silences a withdrawn
+basis in a market-scoped report.
+
 ### `agreement.py` — the instrument
 
 "Consistency is a number, not a feeling." Runs the same judgment repeatedly and reports

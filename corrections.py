@@ -330,6 +330,19 @@ def _public(row: Optional[dict]) -> Optional[dict]:
             "what_it_means": _WHAT_A_STANDING_CORRECTION_IS}
 
 
+def cited_by(finding) -> Optional[str]:
+    """The correction this finding quotes as precedent, if any (§6.1's third slot).
+
+    One definition, in the module that owns corrections, because there were three: the
+    replay's exclusion list and two in `core` that decide how a verdict is VOICED. A finding
+    citing a rule the library inferred is voiced differently from one citing a rule the
+    customer wrote, so a drift here is a claim about whose rule was broken.
+    """
+    if not isinstance(finding, dict):
+        return None
+    return ((finding.get("precedent") or {}).get("correction_id")) or None
+
+
 def same_wording(one: str, other: str) -> bool:
     """Whether these two are the same words once case and punctuation are folded.
 

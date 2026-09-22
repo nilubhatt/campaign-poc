@@ -168,7 +168,7 @@ def test_it_names_what_a_past_judgment_was_never_checked_against(conn):
     cid = _standing_rule(conn)
 
     row = next(r for r in replay.run(conn)["judgments"] if r["evaluation_id"] == eid)
-    assert row["not_checked_against"]["measures"] == [name]
+    assert [m["measure"] for m in row["not_checked_against"]["measures"]] == [name]
     assert [c["correction_id"] for c in row["not_checked_against"]["corrections"]] == [cid]
 
 
@@ -701,7 +701,7 @@ def test_it_reaches_the_model_over_the_protocol(conn):
 
     report = asyncio.run(call("replay_rules", {}))
     assert [g for g in report["backlog"]["groups"] if g["measure"] == name]
-    assert report["judgments"][0]["not_checked_against"]["measures"] == [name]
+    assert [m["measure"] for m in report["judgments"][0]["not_checked_against"]["measures"]] == [name]
 
 
 # ── a rule that applies EVERYWHERE ──────────────────────────────────────────
@@ -1234,7 +1234,8 @@ def test_a_measure_confirmed_in_the_judgment_s_tick_is_not_hidden(conn):
 
     rows = [r for r in replay.run(conn)["judgments"] if r["evaluation_id"] == eid]
     assert rows, "a measure confirmed after this judgment, in its tick, is not on the report"
-    assert name in rows[0]["not_checked_against"]["measures"]
+    assert [m["measure"] for m in rows[0]["not_checked_against"]["measures"]] == [name]
+    assert rows[0]["not_checked_against"]["measures"][0]["since"] == "became_expected"
 
 
 def test_a_measure_confirmed_before_a_judgment_in_one_tick_stays_off_the_report(conn):
@@ -1268,3 +1269,685 @@ def test_a_rule_first_confirmed_in_the_judgment_s_tick_is_not_blamed_on_its_scop
     assert [c["since"] for c in row["not_checked_against"]["corrections"]] == [
         "became_standing"], "a rule that had no scope yet was reported as having changed one"
     assert "scope changed" not in row["what_it_means"]
+
+
+def _type_keyed_measure(conn, key="footfall_uplift_pct"):
+    """A measure §12.4 keys on the campaign TYPE, because every campaign carrying it was one
+    kind of campaign — the review's own example: footfall uplift is a store-launch question."""
+    for market in ("Peru", "Mexico", "Colombia"):
+        subject = core.ingest_campaign(conn, title=f"launch-{market}", market=market,
+                                       status="concluded", campaign_type="store_launch",
+                                       detail="A launch.", confirm=True)["campaign_id"]
+        metrics.record(conn, campaign_id=subject, key=key, value=1.0)
+    name = metrics.canonical(conn, key)
+    metrics.graduate(conn, name, confirmed_by="R. Vega")
+    assert store.metric_registry(conn)[name]["expected_for_types"] == ["store_launch"]
+    return name
+
+
+def test_a_type_keyed_measure_reaches_a_launch_in_a_market_it_never_graduated_in(conn):
+    """§12.4's whole point: "that makes the checklist key 'store launch' rather than 'Peru' —
+    so it reaches store launches in every market". The live surface had that right and this
+    report kept its own market test, so a Vietnam store launch judged before the measure
+    existed was left off the list of things it was never checked for."""
+    subject = core.ingest_campaign(conn, title="Hanoi launch", market="Vietnam",
+                                   status="concluded", campaign_type="store_launch",
+                                   detail="A launch.", confirm=True)["campaign_id"]
+    _judged(conn, subject, title="Hanoi launch")
+    name = _type_keyed_measure(conn)
+
+    rows = replay.run(conn)["judgments"]
+    assert [r["subject_title"] for r in rows] == ["Hanoi launch"]
+    assert [m["measure"] for m in rows[0]["not_checked_against"]["measures"]] == [name]
+
+
+def test_a_type_keyed_measure_does_not_reach_another_kind_of_brief(conn):
+    """The other half of the same sentence: it "stops reaching seeding briefs that never had
+    footfall to uplift". Reported against one, the row says a judgment failed to check
+    something nobody expects of it."""
+    subject = core.ingest_campaign(conn, title="Lima seeding", market="Peru",
+                                   status="concluded", campaign_type="influencer_seeding",
+                                   detail="A push.", confirm=True)["campaign_id"]
+    _judged(conn, subject, title="Lima seeding")
+    _type_keyed_measure(conn)
+
+    assert replay.run(conn)["judgments"] == [], (
+        "a seeding brief was flagged for a store-launch measure")
+
+
+def test_a_measure_retired_when_a_brief_was_judged_is_listed_when_it_comes_back(conn):
+    """Confirm, retire, judge, revive. `confirmed_at` is COALESCEd on purpose — rewriting it
+    would make a measure graduated, judged against, retired and graduated again look newer
+    than the judgment that WAS checked against it — so the intervals live in §12.4's history
+    and this report has to read them. Compared against the preserved date alone, a brief judged
+    while nobody was asking for the measure read as having been checked for it."""
+    name = _expect_measure(conn)
+    store.retire_metric(conn, name, why="nobody reported it")
+    subject = _campaign(conn, "Colombia v1")
+    _judged(conn, subject, title="Colombia v1")
+    assert replay.run(conn)["judgments"] == [], "it is not expected of anything right now"
+
+    store.revive_metric(conn, name, why="measured again")
+
+    rows = replay.run(conn)["judgments"]
+    assert [r["subject_title"] for r in rows] == ["Colombia v1"]
+    assert [(m["measure"], m["since"]) for m in
+            rows[0]["not_checked_against"]["measures"]] == [(name, "was_retired")]
+    assert "was retired when this was judged and has since been put back" in (
+        rows[0]["what_it_means"]), rows[0]["what_it_means"]
+
+
+def test_a_measure_in_force_throughout_is_not_relisted_by_a_later_retirement(conn):
+    """The other direction, and the damaging one: this brief WAS checked for the measure. A
+    retirement and revival afterwards change nothing about that."""
+    name = _expect_measure(conn)
+    subject = _campaign(conn, "Colombia v1")
+    _judged(conn, subject, title="Colombia v1")
+
+    store.retire_metric(conn, name, why="quiet quarter")
+    store.revive_metric(conn, name, why="measured again")
+
+    assert replay.run(conn)["judgments"] == []
+
+
+def test_a_measure_retired_in_the_judgment_s_own_tick_is_ordered_not_guessed(conn):
+    """The same tie as everywhere else: a retirement recorded in the millisecond a brief was
+    judged, after it. The brief was checked; the retirement came later."""
+    name = _expect_measure(conn)
+    subject = _campaign(conn, "Colombia v1")
+    eid = _judged(conn, subject, title="Colombia v1")
+    judged_at = store.get_evaluation(conn, eid)["created_at"]
+    store.retire_metric(conn, name, why="quiet quarter")
+    store.revive_metric(conn, name, why="measured again")
+    conn.execute("UPDATE measure_history SET at = ? WHERE what = 'retired'", (judged_at,))
+    conn.commit()
+
+    assert replay.run(conn)["judgments"] == [], (
+        "a retirement recorded after this judgment, in its tick, hid a brief that was checked")
+
+
+def test_a_reference_record_is_not_told_it_missed_a_checklist(conn):
+    """Brand guidelines are not a brief. `learning.subject_markets` is the gate both live
+    surfaces go through — `expected_check` for measures, `standing_for` for rules — and it
+    refuses a reference record outright. This report read the record's markets straight from
+    the row, so it reported a judgment about brand guidelines as having missed a store-launch
+    measure the product would never have checked it for."""
+    ref = core.ingest_campaign(conn, title="Brand guidelines v4", market="Peru",
+                               record_type="reference", campaign_type="store_launch",
+                               status="concluded", detail="Guidelines.",
+                               confirm=True)["campaign_id"]
+    _judged(conn, ref, title="Brand guidelines v4")
+    _type_keyed_measure(conn)
+    _standing_rule(conn)
+
+    assert metrics.expected_check(conn, ref)["code"] == "not_a_campaign"
+    assert replay.run(conn)["judgments"] == [], (
+        "a reference record was reported as having missed a checklist")
+
+
+def test_a_record_naming_no_market_is_not_told_it_missed_a_checklist(conn):
+    """The same gate's third answer. A type-keyed measure needs no market to match, so nothing
+    else would have stopped it — and the live checklist says in writing that this is not a
+    pass but a reason: "add a market to see what briefs like it usually carry"."""
+    nowhere = core.ingest_campaign(conn, title="Untitled pitch", status="concluded",
+                                   campaign_type="store_launch", detail="A pitch.",
+                                   confirm=True)["campaign_id"]
+    _judged(conn, nowhere, title="Untitled pitch")
+    _type_keyed_measure(conn)
+
+    assert metrics.expected_check(conn, nowhere)["code"] == "no_market"
+    assert replay.run(conn)["judgments"] == []
+
+
+def test_the_gate_does_not_silence_a_withdrawn_rule_a_judgment_rested_on(conn):
+    """The refusal is about what a brief is CHECKED against, and a rule this judgment actually
+    cited being withdrawn is a fact about the judgment rather than about a market. Gating that
+    away would lose the most urgent row this report produces, on exactly the records whose
+    judgments nobody can re-derive."""
+    ref = core.ingest_campaign(conn, title="Brand guidelines v4", market="Peru",
+                               record_type="reference", status="concluded",
+                               detail="Guidelines.", confirm=True)["campaign_id"]
+    cid = _standing_rule(conn)
+    eid = core.save_evaluation(
+        conn, subject_title="Brand guidelines v4", campaign_id=ref, verdict="revise",
+        summary="Seeds four.", approve_if="Seed one colourway.",
+        findings=[{"severity": "blocking", "kind": "guardrail_breach",
+                   "finding": "Seeds four colourways", "fix": "Seed one",
+                   "precedent": {"correction_id": cid, "quote": SEEDING}}])["evaluation_id"]
+    corrections.set_aside(conn, cid)
+
+    rows = [r for r in replay.run(conn)["judgments"] if r["evaluation_id"] == eid]
+    assert rows and rows[0]["consequence"] == "stated_basis_withdrawn"
+
+
+def test_a_scoped_report_still_carries_a_withdrawn_basis_for_a_reference_record(conn):
+    """Two questions that look alike and are not. "Is this judgment one the reader asked
+    about" is about where the record RAN — a Peru reference record is a Peru row whatever a
+    checklist thinks of it — and "what is this brief checked against" goes through the gate
+    that refuses reference records. Filtered on the gated answer, the most urgent row this
+    report produces appeared unfiltered and vanished from `market="Peru"`."""
+    ref = core.ingest_campaign(conn, title="Brand guidelines v4", market="Peru",
+                               record_type="reference", status="concluded",
+                               detail="Guidelines.", confirm=True)["campaign_id"]
+    for market in ("Peru", "Mexico", "Colombia"):
+        corrections.note(conn, text=SEEDING, provenance=f"{market} slide 4",
+                         campaign_id=_campaign(conn, f"said-{market}", market=market))
+    cid = corrections.find(conn, SEEDING)["correction_id"]
+    corrections.graduate(conn, cid, confirmed_by="R. Vega")
+    core.save_evaluation(
+        conn, subject_title="Brand guidelines v4", campaign_id=ref, verdict="revise",
+        summary="Seeds four.", approve_if="Seed one colourway.",
+        findings=[{"severity": "blocking", "kind": "guardrail_breach",
+                   "finding": "Seeds four colourways", "fix": "Seed one",
+                   "precedent": {"correction_id": cid, "quote": SEEDING}}])
+    corrections.set_aside(conn, cid)
+
+    everywhere = replay.run(conn)["judgments"]
+    scoped = replay.run(conn, market="Peru")["judgments"]
+
+    assert [r["consequence"] for r in everywhere] == ["stated_basis_withdrawn"]
+    assert [r["consequence"] for r in scoped] == ["stated_basis_withdrawn"], (
+        "asking about Peru hid a Peru judgment whose whole basis was withdrawn")
+
+
+def test_a_scoped_report_does_not_claim_a_reference_record_missed_a_checklist(conn):
+    """The other half of that separation: scoping by where it ran must not put the checklist
+    back. The Peru row is in the Peru report, and it is in it for the withdrawn rule it cited
+    — not for measures or rules it was never going to be checked against."""
+    ref = core.ingest_campaign(conn, title="Brand guidelines v4", market="Peru",
+                               record_type="reference", campaign_type="store_launch",
+                               status="concluded", detail="Guidelines.",
+                               confirm=True)["campaign_id"]
+    _judged(conn, ref, title="Brand guidelines v4")
+    _type_keyed_measure(conn)
+    _standing_rule(conn)
+
+    assert replay.run(conn, market="Peru")["judgments"] == []
+
+
+def test_a_scoped_report_survives_a_judgment_with_no_stored_subject(conn):
+    """A judgment can carry no `campaign_id` — §8.6's "judge this new pitch", which
+    `save_evaluation` accepts on purpose — and a judgment can outlive the record it was about.
+    Neither has markets, and asking where it ran must answer "nowhere", not raise: the crash
+    reached a marketer as "Error executing tool replay_rules" with the reason discarded, and
+    only when they scoped the report to a market."""
+    _judged(conn, None, title="A proposal not stored yet")
+    gone = _campaign(conn, "Lima flagship", market="Peru")
+    _judged(conn, gone, title="Lima flagship")
+    conn.execute("DELETE FROM campaigns WHERE id = ?", (gone,))
+    conn.commit()
+
+    assert replay.run(conn, market="Peru")["judgments"] == []
+    assert replay.run(conn)["judgments"] == []
+
+
+def test_a_judgment_with_no_stored_subject_still_reports_a_withdrawn_basis(conn):
+    """And the row that survives having no subject at all: what a judgment RESTED on is a
+    fact about the judgment. Scoped to a market it cannot claim, it is correctly absent —
+    unscoped, it is the most urgent row in the report."""
+    cid = _standing_rule(conn)
+    eid = core.save_evaluation(
+        conn, subject_title="A proposal not stored yet", campaign_id=None, verdict="revise",
+        summary="Seeds four.", approve_if="Seed one colourway.",
+        findings=[{"severity": "blocking", "kind": "guardrail_breach",
+                   "finding": "Seeds four colourways", "fix": "Seed one",
+                   "precedent": {"correction_id": cid, "quote": SEEDING}}])["evaluation_id"]
+    corrections.set_aside(conn, cid)
+
+    rows = [r for r in replay.run(conn)["judgments"] if r["evaluation_id"] == eid]
+    assert [r["consequence"] for r in rows] == ["stated_basis_withdrawn"]
+    assert replay.run(conn, market="LATAM")["judgments"] == []
+
+
+def test_confirming_a_retired_measure_again_records_that_it_came_back(conn):
+    """Two routes put a retired measure back: `revive_metric`, when somebody records it
+    again, and confirming it a second time — which the product OFFERS, since the gate answers
+    "eligible" for a retired measure and `graduate_measure` accepts it. Only the first
+    recorded the occasion, so the history ended on `retired` while the registry said
+    `expected`, and §8.7 — which reads that history to ask whether a measure was in force when
+    a brief was judged — answered no for every judgment made afterwards.
+
+    A brief judged with the measure live on its own checklist was then accused of never having
+    been checked for it."""
+    name = _expect_measure(conn)
+    store.retire_metric(conn, name, why="skipped by the last five campaigns")
+    metrics.graduate(conn, name, confirmed_by="R. Vega")
+
+    subject = _campaign(conn, "Bogota v2")
+    assert name in metrics.expected_check(conn, subject)["expected"]
+    _judged(conn, subject, title="Bogota v2")
+
+    assert [h["what"] for h in store.measure_history(conn, name)] == ["retired", "revived"]
+    assert replay.run(conn)["judgments"] == [], (
+        "a brief judged with this measure on its checklist is reported as never checked")
+
+    # And a later retirement is one occasion, not a second `retired` beside the first.
+    store.retire_metric(conn, name, why="quiet again")
+    assert [h["what"] for h in store.measure_history(conn, name)] == [
+        "retired", "revived", "retired"]
+
+
+def test_the_preview_describes_the_graduation_it_previews(conn):
+    """"The person confirming needs that number BEFORE they confirm; afterwards it is a
+    surprise rather than a decision" — `if_graduated`'s own docstring. It asked its own market
+    question while `graduate` keys a type-coherent measure on the TYPE, so both halves of
+    §12.4's sentence came out inverted: the preview named the one record the graduation is
+    guaranteed never to check, and said "this would change nothing" about a library holding a
+    brief it was about to flag."""
+    for market in ("Peru", "Mexico", "Colombia"):
+        launch = core.ingest_campaign(conn, title=f"launch-{market}", market=market,
+                                      status="concluded", campaign_type="store_launch",
+                                      detail="A launch.", confirm=True)["campaign_id"]
+        metrics.record(conn, campaign_id=launch, key="footfall_uplift_pct", value=1.0)
+    seeding = core.ingest_campaign(conn, title="Lima seeding", market="Peru",
+                                   status="concluded", campaign_type="influencer_seeding",
+                                   detail="A push.", confirm=True)["campaign_id"]
+    vietnam = core.ingest_campaign(conn, title="Hanoi launch", market="Vietnam",
+                                   status="concluded", campaign_type="store_launch",
+                                   detail="A launch.", confirm=True)["campaign_id"]
+    name = metrics.canonical(conn, "footfall_uplift_pct")
+
+    preview = metrics.graduation(conn, name)["if_confirmed"]
+    titles = [e["title"] for e in preview["examples"]]
+
+    metrics.graduate(conn, name, confirmed_by="R. Vega")
+    really_missing = [r["title"] for r in store.list_campaigns(conn)
+                      if name in metrics.expected_check(conn, r["id"])["missing"]]
+
+    assert titles == really_missing == ["Hanoi launch"], (
+        f"the preview named {titles} and confirming showed {really_missing}")
+    assert preview["campaigns_affected"] == 1
+    assert "Lima seeding" not in titles
+    assert seeding and vietnam
+
+
+def test_the_preview_counts_only_records_that_have_a_checklist(conn):
+    """The same gate the live path applies. A reference record is not a brief, so confirming a
+    measure cannot show it as missing one — and mutation found nothing watching this."""
+    for market in ("LATAM", "SEA", "EMEA"):
+        seen = _campaign(conn, f"seen-{market}", market=market)
+        metrics.record(conn, campaign_id=seen, key="footfall_uplift_pct", value=1.0)
+    core.ingest_campaign(conn, title="Brand guidelines v4", market="LATAM",
+                         record_type="reference", status="concluded",
+                         detail="Guidelines.", confirm=True)
+    name = metrics.canonical(conn, "footfall_uplift_pct")
+
+    preview = metrics.graduation(conn, name)["if_confirmed"]
+
+    assert "Brand guidelines v4" not in [e["title"] for e in preview["examples"]]
+
+
+def test_the_blast_radius_for_a_rule_counts_only_records_with_a_checklist(conn):
+    """The correction half of the same question, and the mutation survivor from the last
+    round: `if_graduated` asks what a rule would reach, which is the checklist question, so a
+    reference record's judgment is not in the count."""
+    ref = core.ingest_campaign(conn, title="Brand guidelines v4", market="LATAM",
+                               record_type="reference", status="concluded",
+                               detail="Guidelines.", confirm=True)["campaign_id"]
+    _judged(conn, ref, title="Brand guidelines v4")
+    subject = _campaign(conn, "Colombia v1")
+    _judged(conn, subject, title="Colombia v1")
+    for market in ("LATAM", "SEA", "EMEA"):
+        corrections.note(conn, text=SEEDING, provenance=f"{market} slide 4",
+                         campaign_id=_campaign(conn, f"said-{market}", market=market))
+    cid = corrections.find(conn, SEEDING)["correction_id"]
+
+    preview = replay.if_graduated(conn, correction_id=cid)
+
+    assert [e["subject_title"] for e in preview["examples"]] == ["Colombia v1"]
+    assert preview["judgments_affected"] == 1
+
+
+def test_the_summary_counts_campaigns_once_and_counts_all_of_them(conn):
+    """"12 things to go and ask partners for, covering 84 concluded campaigns" — about a
+    library holding 15 such campaigns. The count summed `campaigns_missing_it` across the
+    TRUNCATED eight groups, which counts a campaign once per measure it is missing and once
+    per market it ran in. Three separate errors in one number, and this module's own comment
+    says it closed exactly this defect one key along."""
+    names = []
+    for key in ("footfall_uplift_pct", "sell_through_pct", "engagement_rate_pct"):
+        for market in ("LATAM", "SEA", "EMEA"):
+            seen = _campaign(conn, f"seen-{key}-{market}", market=market)
+            metrics.record(conn, campaign_id=seen, key=key, value=1.0)
+        name = metrics.canonical(conn, key)
+        metrics.graduate(conn, name, confirmed_by="R. Vega")
+        names.append(name)
+
+    # Three campaigns that carry none of the three measures, one of them in two markets.
+    bare = [_campaign(conn, "Bogota v1"), _campaign(conn, "Lima v1"),
+            core.ingest_campaign(conn, title="Andes v1", markets=["LATAM", "SEA"],
+                                 status="concluded", detail="A launch.",
+                                 confirm=True)["campaign_id"]]
+
+    report = replay.run(conn)
+    missing_anything = {r["id"] for r in store.list_campaigns(conn)
+                        if metrics.expected_check(conn, r["id"])["missing"]
+                        and r.get("status") == "concluded" and not r.get("is_superseded")}
+
+    assert report["backlog"]["campaigns_total"] == len(missing_anything)
+    assert f"covering {len(missing_anything)} concluded campaign" in report["what_it_means"]
+    assert len(bare) == 3 and names
+
+
+def test_a_rule_put_back_is_not_described_as_still_set_aside(conn):
+    """`withdrawn` deliberately includes a reopened rule — it is `provisional`, so it applies
+    to nothing — but the sentence said "has since been set aside" about a rule the user had
+    just put back, using the product's own "put this rule back if that was not what you
+    meant". The status is in hand; the report was not reading it."""
+    cid = _standing_rule(conn)
+    subject = _campaign(conn, "Colombia v1")
+    core.save_evaluation(
+        conn, subject_title="Colombia v1", campaign_id=subject, verdict="revise",
+        summary="Seeds four.", approve_if="Seed one colourway.",
+        findings=[{"severity": "blocking", "kind": "guardrail_breach",
+                   "finding": "Seeds four colourways", "fix": "Seed one",
+                   "precedent": {"correction_id": cid, "quote": SEEDING}}])
+    corrections.set_aside(conn, cid)
+    assert "set aside" in replay.run(conn)["judgments"][0]["what_it_means"]
+
+    corrections.reopen(conn, cid)
+
+    said = replay.run(conn)["judgments"][0]["what_it_means"]
+    assert "reopened, and applies to nothing until somebody confirms it" in said, said
+    assert "has since been set aside" not in said
+    # And the rule text ends in one period, not two.
+    assert ".. " not in said
+
+
+def test_the_report_does_not_claim_nobody_revisited_a_subject_that_was(conn):
+    """A clause stamped `basis: computed` and computed from nothing. `list_evaluations` can
+    see the later judgment, and until it did the report kept offering to judge again a subject
+    somebody had already judged again."""
+    cid = _standing_rule(conn)
+    subject = _campaign(conn, "Colombia v1")
+    finding = [{"severity": "blocking", "kind": "guardrail_breach",
+                "finding": "Seeds four colourways", "fix": "Seed one",
+                "precedent": {"correction_id": cid, "quote": SEEDING}}]
+    first = core.save_evaluation(conn, subject_title="Colombia v1", campaign_id=subject,
+                                 verdict="revise", summary="Seeds four.",
+                                 approve_if="Seed one colourway.",
+                                 findings=finding)["evaluation_id"]
+    corrections.set_aside(conn, cid)
+
+    row = next(r for r in replay.run(conn)["judgments"] if r["evaluation_id"] == first)
+    assert row["revisited"] is False
+    assert "Nobody has judged this subject again since." in row["what_it_means"]
+
+    core.save_evaluation(conn, subject_title="Colombia v1", campaign_id=subject,
+                         verdict="approve", summary="Fixed.", findings=[])
+
+    row = next(r for r in replay.run(conn)["judgments"] if r["evaluation_id"] == first)
+    assert row["revisited"] is True
+    # The FACT, and no conclusion drawn from it: whether that later judgment met what this row
+    # reports is something the report cannot see, and inferring it was wrong for exactly this
+    # row — a judgment written before the withdrawal cannot have met the withdrawal.
+    assert "Nobody has judged this subject again since." not in row["what_it_means"]
+    assert [a["tool"] for a in row["next_actions"]] == ["prepare_evaluation"]
+
+
+def test_three_new_rules_do_not_produce_a_stray_word_in_the_sentence(conn):
+    """The upgraded-install shape this feature exists for: ten house rules become standing at
+    once. The stop was measured on the last rule's text while the rendered list ends in "and
+    others", so the sentence read "…creative. and others Whether this brief breaks…" — the
+    exact typo the guard was written to remove, in the case it was written for."""
+    subject = _campaign(conn, "Colombia v1")
+    _judged(conn, subject, title="Colombia v1")
+    for n, text in enumerate(("Seed a single colourway across all recipients.",
+                              "No price promises in client-facing creative.",
+                              "Every deliverable names its posting date.")):
+        _declared_everywhere(conn, text)
+
+    said = replay.run(conn)["judgments"][0]["what_it_means"]
+
+    assert "and others Whether" not in said, said
+    assert "and others. Whether" in said
+
+
+def test_the_rulebook_note_is_scoped_like_everything_else_in_the_report(conn):
+    """The loudest sentence in the report — "a bigger difference than anything below and
+    nothing else here can see it" — was computed from every judgment on file while the rest of
+    the report was scoped to one market. A Peru report announced that the rules themselves had
+    changed under these judgments on the strength of a Japanese one."""
+    peru = _campaign(conn, "Lima v1", market="Peru")
+    _judged(conn, peru, title="Lima v1")
+    japan = _campaign(conn, "Tokyo v1", market="Japan")
+    eid = _judged(conn, japan, title="Tokyo v1")
+    conn.execute("UPDATE evaluations SET provenance = ? WHERE id = ?",
+                 ('{"rulebook_version": "v0.0.1-old"}', eid))
+    conn.commit()
+
+    everywhere = replay.run(conn)
+    assert everywhere["rulebook_changed"] is True
+    assert len(everywhere["rulebooks_seen"]) == 2
+
+    scoped = replay.run(conn, market="Peru")
+    assert scoped["rulebook_changed"] is False, scoped["rulebook_note"]
+    assert scoped["rulebooks_seen"] == ["core-1.0"]
+    assert "One rulebook throughout" in scoped["rulebook_note"]
+
+
+def test_the_rulebook_stamps_read_in_the_order_they_happened(conn):
+    """Sorted by name, `v0.10` comes before `v0.9`. The order a reader wants is the order the
+    judgments were made in, which is the only order that means anything here."""
+    first = _campaign(conn, "Lima v1", market="Peru")
+    one = _judged(conn, first, title="Lima v1")
+    second = _campaign(conn, "Lima v2", market="Peru")
+    two = _judged(conn, second, title="Lima v2")
+    conn.execute("UPDATE evaluations SET provenance = ? WHERE id = ?",
+                 ('{"rulebook_version": "v0.10"}', one))
+    conn.execute("UPDATE evaluations SET provenance = ? WHERE id = ?",
+                 ('{"rulebook_version": "v0.9"}', two))
+    conn.commit()
+
+    assert replay.run(conn)["rulebooks_seen"] == ["v0.10", "v0.9"]
+
+
+def test_the_report_calls_a_rule_standing_when_the_live_path_does(conn):
+    """Two selections of one set. This report required `confirmed_at` as well as the status,
+    so a standing rule without one applied to the brief on the live path and produced an empty
+    report here. Nothing writes that row today — which is how a second copy of a selection
+    waits for the write that will."""
+    subject = _campaign(conn, "Colombia v1")
+    _judged(conn, subject, title="Colombia v1")
+    cid = _standing_rule(conn)
+    conn.execute("UPDATE corrections SET confirmed_at = NULL WHERE id = ?", (cid,))
+    conn.commit()
+
+    live = corrections.standing_for(conn, campaign_id=subject)["standing"]
+    listed = [c for r in replay.run(conn)["judgments"]
+              for c in r["not_checked_against"]["corrections"]]
+
+    assert [c["correction_id"] for c in live] == [cid]
+    assert [c["correction_id"] for c in listed] == [cid], (
+        "the live path applies this rule to the brief and the report does not know it exists")
+
+
+def test_the_order_of_writes_survives_a_deleted_judgment(conn):
+    """`evaluations.id` is TEXT, so that table's rowid is implicit and REUSABLE: delete the
+    newest judgment and the next insert takes its number back. Everything that records "which
+    judgments existed when I was written" then compares against a number that has moved
+    backwards, and a brief judged AFTER a measure was confirmed is reported as never checked
+    for it — silently, and in the accusing direction.
+
+    The order comes from a sequence SQLite promises never to reuse. The tie is forced here
+    because that is the only comparison the number decides."""
+    first = _judged(conn, _campaign(conn, "Bogota v1"), title="Bogota v1")
+    doomed = _judged(conn, _campaign(conn, "Lima v1"), title="Lima v1")
+    name = _expect_measure(conn)                       # confirmed with two judgments on file
+    conn.execute("DELETE FROM evaluations WHERE id = ?", (doomed,))
+    conn.commit()
+
+    later = _judged(conn, _campaign(conn, "Colombia v3"), title="Colombia v3")
+    confirmed_at = store.metric_registry(conn)[name]["confirmed_at"]
+    conn.execute("UPDATE evaluations SET created_at = ? WHERE id = ?", (confirmed_at, later))
+    conn.commit()
+
+    order = store.evaluation_order(conn)
+    assert order[later] > order[first], "the newest judgment took a number back"
+    listed = [r["evaluation_id"] for r in replay.run(conn)["judgments"]]
+    assert later not in listed, (
+        "a brief judged after this measure was confirmed is reported as never checked for it")
+    assert first in listed, "and the one judged before it still is"
+
+
+def test_an_upgraded_database_hands_out_numbers_above_the_ones_it_had(conn):
+    """The sequence starts above the highest rowid on file, because an older release ordered
+    by rowid and the two ranges must not overlap."""
+    for n in range(3):
+        _judged(conn, _campaign(conn, f"v{n}"), title=f"v{n}")
+    conn.execute("DELETE FROM write_order")          # as a database from before it looked
+    conn.execute("UPDATE evaluations SET seq = NULL")
+    conn.commit()
+
+    highest_before = max(store.evaluation_order(conn).values())
+    fresh = _judged(conn, _campaign(conn, "v3"), title="v3")
+
+    assert store.evaluation_order(conn)[fresh] > highest_before
+
+
+def test_a_second_judgment_in_the_same_tick_counts_as_a_revisit(conn):
+    """The comparison this file spent two rounds replacing, written out again in the newest
+    code: two judgments about one subject in the same clock tick, and the report told the
+    reader nobody had judged it again — while the write order it had just been given says
+    which came second."""
+    cid = _standing_rule(conn)
+    subject = _campaign(conn, "Colombia v1")
+    finding = [{"severity": "blocking", "kind": "guardrail_breach", "finding": "Seeds four",
+                "fix": "Seed one", "precedent": {"correction_id": cid, "quote": SEEDING}}]
+    first = core.save_evaluation(conn, subject_title="Colombia v1", campaign_id=subject,
+                                 verdict="revise", summary="Seeds four.",
+                                 approve_if="Seed one.", findings=finding)["evaluation_id"]
+    second = core.save_evaluation(conn, subject_title="Colombia v1", campaign_id=subject,
+                                  verdict="approve", summary="Fixed.",
+                                  findings=[])["evaluation_id"]
+    at = store.get_evaluation(conn, first)["created_at"]
+    conn.execute("UPDATE evaluations SET created_at = ? WHERE id = ?", (at, second))
+    conn.commit()
+    corrections.set_aside(conn, cid)
+
+    row = next(r for r in replay.run(conn)["judgments"] if r["evaluation_id"] == first)
+
+    assert row["revisited"] is True, "the later judgment shares the tick and came second"
+    assert "Nobody has judged this subject again since." not in row["what_it_means"]
+
+
+def test_the_offer_stands_for_a_revisit_that_predates_the_withdrawal(conn):
+    """The report does not decide that a later judgment RESOLVED this row. It cannot see
+    that: a judgment written before somebody withdrew a rule is absent from the report because
+    it cites nothing withdrawn, and it cannot have met a withdrawal that had not happened. The
+    first version of this inference withdrew the offer from exactly the row §8.7 exists for."""
+    subject = _campaign(conn, "Colombia v1")
+    first = _judged(conn, subject, title="Colombia v1")
+    second = _judged(conn, subject, title="Colombia v1")
+    _standing_rule(conn)                       # becomes standing after BOTH judgments
+
+    rows = {r["evaluation_id"]: r for r in replay.run(conn)["judgments"]}
+
+    assert set(rows) == {first, second}, "both were written before the rule became standing"
+    assert rows[first]["revisited"] is True
+    assert [a["tool"] for a in rows[first]["next_actions"]] == ["prepare_evaluation"]
+    assert "met all of it" not in rows[first]["what_it_means"]
+
+
+def test_the_write_order_clears_markers_an_older_release_persisted(conn):
+    """The sequence is seeded above every number already in use, and the rowids are not all of
+    them: a measure confirmed under the old release recorded the rowid it saw, and that rowid
+    can have been deleted since. Seeded above the survivors alone, the first post-upgrade
+    judgment took a number a marker already claimed — and at a tie was reported as missing a
+    measure confirmed before it."""
+    keep = _judged(conn, _campaign(conn, "v0"), title="v0")
+    doomed = _judged(conn, _campaign(conn, "v1"), title="v1")
+    name = _expect_measure(conn)
+    marker = store.metric_registry(conn)[name]["after_evaluation"]
+    conn.execute("DELETE FROM evaluations WHERE id = ?", (doomed,))
+    conn.execute("UPDATE evaluations SET seq = NULL")       # as an older release left it
+    conn.execute("DELETE FROM write_order")
+    conn.commit()
+
+    assert store.next_write_order(conn) > marker, (
+        "the first judgment after the upgrade takes a number a marker already holds")
+    assert keep and marker
+
+
+def test_a_judgment_written_before_a_withdrawal_does_not_resolve_it(conn):
+    """The blocker this inference introduced, pinned so it cannot come back: judge, judge
+    again, and only THEN set the rule aside. The second judgment is absent from the report
+    because it cites nothing withdrawn — not because it met the withdrawal, which had not
+    happened when it was written. Read as "met all of it", the report withdrew its own offer
+    from the row whose whole stated basis is gone."""
+    cid = _standing_rule(conn)
+    subject = _campaign(conn, "Colombia v1")
+    first = core.save_evaluation(
+        conn, subject_title="Colombia v1", campaign_id=subject, verdict="revise",
+        summary="Seeds four.", approve_if="Seed one colourway.",
+        findings=[{"severity": "blocking", "kind": "guardrail_breach",
+                   "finding": "Seeds four colourways", "fix": "Seed one",
+                   "precedent": {"correction_id": cid, "quote": SEEDING}}])["evaluation_id"]
+    core.save_evaluation(conn, subject_title="Colombia v1", campaign_id=subject,
+                         verdict="approve", summary="Fixed.", findings=[])
+    corrections.set_aside(conn, cid)
+
+    row = next(r for r in replay.run(conn)["judgments"] if r["evaluation_id"] == first)
+
+    assert row["consequence"] == "stated_basis_withdrawn"
+    assert [a["tool"] for a in row["next_actions"]] == ["prepare_evaluation"], (
+        "the offer was withdrawn from the row this report exists for")
+    assert "met all of it" not in row["what_it_means"]
+
+
+def test_a_target_is_not_a_result_anywhere_the_report_looks(conn):
+    """§8.1's founding distinction: a target is what somebody is aiming at, and counting one
+    as carried tells a concluded campaign holding nothing but targets that it carries
+    everything. The test for it was written out at four surfaces; this pins the one they
+    share, through the two that reach it from this report."""
+    name = _expect_measure(conn)
+    subject = _campaign(conn, "Colombia v1")
+    metrics.record(conn, campaign_id=subject, key="footfall_uplift_pct", value=12.0,
+                   metric_type="target")
+
+    assert metrics.carries(conn, subject, name) is False
+    assert metrics.expected_check(conn, subject)["missing"] == [name]
+    assert replay._not_carried(conn, subject, [name]) == [name]
+    # And the graduation preview counts it as missing the measure, for the same reason.
+    assert metrics.measured([{"metric_type": "target"}, {"metric_type": "actual"}]) == [
+        {"metric_type": "actual"}]
+
+
+def test_the_most_urgent_consequence_is_the_one_reported(conn):
+    """The four are ranked, and the ranking is the report's sort. A judgment whose whole
+    stated basis was withdrawn AND which a new rule now applies to is the first of those
+    things, not the last — the urgent row is the one that must survive truncation."""
+    cid = _standing_rule(conn)
+    subject = _campaign(conn, "Colombia v1")
+    core.save_evaluation(
+        conn, subject_title="Colombia v1", campaign_id=subject, verdict="revise",
+        summary="Seeds four.", approve_if="Seed one colourway.",
+        findings=[{"severity": "blocking", "kind": "guardrail_breach",
+                   "finding": "Seeds four colourways", "fix": "Seed one",
+                   "precedent": {"correction_id": cid, "quote": SEEDING}}])
+    corrections.set_aside(conn, cid)
+    _declared_everywhere(conn, "No price promises in client-facing creative.")
+    _expect_measure(conn)
+
+    row = replay.run(conn)["judgments"][0]
+
+    assert row["consequence"] == "stated_basis_withdrawn", (
+        "a withdrawn basis outranks a new rule and a new gap")
+    assert row["not_checked_against"]["corrections"], "and the lesser facts are still carried"
+    assert row["gaps_that_would_appear"]
+
+
+def test_a_new_gap_outranks_a_new_rule_on_the_same_judgment(conn):
+    """The two lower ranks, which the previous test cannot separate: a gap in the EVIDENCE is
+    something the server computed about the record, and a rule that now applies is a question
+    only a judgment can answer. The first is reported, because the sort is what survives
+    truncation and the computed fact is the one a person can act on without re-judging."""
+    subject = _campaign(conn, "Colombia v1")
+    _judged(conn, subject, title="Colombia v1")
+    _expect_measure(conn)                      # the subject carries no measured value
+    _standing_rule(conn)                       # and a rule becomes standing too
+
+    row = replay.run(conn)["judgments"][0]
+
+    assert row["gaps_that_would_appear"] and row["not_checked_against"]["corrections"]
+    assert row["consequence"] == "gap_appears"

@@ -1357,8 +1357,7 @@ def _how_to_say_it(by_class: dict, findings: list) -> str:
         # is still not a matter of opinion, because a person stood behind it, but stating an
         # inference back to the customer as their own authored rule is the confident unfounded
         # claim this whole review is about, arriving in the voicing rather than in a finding.
-        learned = [f for f in findings
-                   if (f.get("precedent") or {}).get("correction_id")]
+        learned = [f for f in findings if corrections.cited_by(f)]
         if learned and len(learned) >= by_class["not_debatable"]:
             parts.append(
                 "State the breach(es) plainly, and say where the rule came from: this is a "
@@ -1870,7 +1869,7 @@ def _confounded_silence(conn, cited_ids, written: str) -> dict:
         record = store.get_campaign(conn, cid)
         if not record:
             continue
-        actual = [m for m in record.get("metrics") or [] if m["metric_type"] == "actual"]
+        actual = metrics.measured(record.get("metrics"))
         if any(m.get("confounded") for m in actual):
             unaddressed.append(record["title"])
     if not unaddressed:
@@ -1958,7 +1957,7 @@ def _confounded_at_save(conn, cited_ids: Optional[list]) -> list:
         record = store.get_campaign(conn, cid)
         if not record:
             continue
-        actual = [m for m in record.get("metrics") or [] if m["metric_type"] == "actual"]
+        actual = metrics.measured(record.get("metrics"))
         if actual and actual[0].get("confounded"):
             marked.append({"campaign_id": cid,
                            "events": [{"id": e["id"], "description": e["description"],
@@ -2444,8 +2443,7 @@ def _disconfirming_search(conn, *, verdict: str, subject_text: str, query_basis:
     # well is the single best evidence that the inference is wrong, and it is the only channel
     # by which a wrongly-graduated correction could ever be caught. Extending a rulebook-shaped
     # exemption to inferred content would have switched off the one check that watches it.
-    rests_on_learned = any((f.get("precedent") or {}).get("correction_id")
-                           for f in (findings or []))
+    rests_on_learned = any(corrections.cited_by(f) for f in (findings or []))
     if (verdict != "approve" and by_class and set(by_class) == {"not_debatable"}
             and not rests_on_learned):
         return outcome(
@@ -5651,7 +5649,7 @@ def _say_the_calendar(clash: dict) -> str:
 def _confounded_note(conn, campaign_id: str) -> dict:
     """Whether this campaign's measured outcomes ran through anything (§9.8)."""
     record = store.get_campaign(conn, campaign_id) or {}
-    actual = [m for m in record.get("metrics") or [] if m["metric_type"] == "actual"]
+    actual = metrics.measured(record.get("metrics"))
     if not actual or not actual[0].get("confounded"):
         return {"confounded": False}
     return {"confounded": True,
@@ -6979,7 +6977,7 @@ def _the_record_that_ran(conn, campaign_id: Optional[str]) -> tuple:
     judged = store.get_campaign(conn, campaign_id)
     if judged is None:
         return None, None, None
-    if any(m["metric_type"] == "actual" for m in judged.get("metrics") or []):
+    if metrics.measured(judged.get("metrics")):
         return judged, judged["id"], None
     seen, walking = {campaign_id}, campaign_id
     while True:
@@ -6990,7 +6988,7 @@ def _the_record_that_ran(conn, campaign_id: Optional[str]) -> tuple:
         record = store.get_campaign(conn, later)
         if record is None:
             return judged, judged["id"], None
-        if any(m["metric_type"] == "actual" for m in record.get("metrics") or []):
+        if metrics.measured(record.get("metrics")):
             return record, record["id"], judged["id"]
         walking = later
 
