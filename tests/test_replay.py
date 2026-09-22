@@ -702,3 +702,70 @@ def test_it_reaches_the_model_over_the_protocol(conn):
     report = asyncio.run(call("replay_rules", {}))
     assert [g for g in report["backlog"]["groups"] if g["measure"] == name]
     assert report["judgments"][0]["not_checked_against"]["measures"] == [name]
+
+
+# ── a rule that applies EVERYWHERE ──────────────────────────────────────────
+#
+# §12.3/D108: a correction the customer DECLARED, which has graduated in no market because it
+# was seen in none. `expected_in = []` and `applies_everywhere = 1`, and that flag is the only
+# thing that says the rule is in force at all. `prepare_evaluation` reads it. This report did
+# not, and the two disagreeing about the same rule is what D114 is about: the tool that offers
+# the replay is the one that puts the rule in force.
+
+
+def _declared_everywhere(conn, text="No price promises in client-facing creative."):
+    """A house rule, promoted the way the rulebook loader promotes one."""
+    cid = corrections.note(conn, text=text, campaign_id=None,
+                           provenance="the house rules (declared in rulebook fab-1.0)",
+                           )["correction_id"]
+    corrections.graduate(conn, cid, confirmed_by="R. Vega", from_rulebook="fab-1.0",
+                         everywhere=True, markets=None)
+    return cid
+
+
+def test_a_judgment_is_listed_against_a_rule_that_applies_everywhere(conn):
+    """The rule graduated in no market, so a market list can never match it. Read through
+    `expected_in` alone, every judgment ever saved vanished from this report the moment a
+    house rule was loaded — and the graduation had just offered this very report."""
+    subject = _campaign(conn, "Peru v1", market="Peru")
+    _judged(conn, subject)
+    _declared_everywhere(conn)
+
+    rows = replay.run(conn)["judgments"]
+    assert rows, "a house rule in force everywhere reached no saved judgment at all"
+    assert rows[0]["consequence"] == "rule_not_applied"
+    assert [c["text"] for c in rows[0]["not_checked_against"]["corrections"]] == [
+        "No price promises in client-facing creative."]
+
+
+def test_a_rule_that_applies_everywhere_reaches_a_market_it_never_graduated_in(conn):
+    """The point of `everywhere`, on the axis this report gets wrong: no overlap with the
+    market a rule was seen in, because there is no market it was seen in."""
+    _judged(conn, _campaign(conn, "Japan v1", market="Japan"), title="Japan v1")
+    _judged(conn, _campaign(conn, "Peru v1", market="Peru"), title="Peru v1")
+    _declared_everywhere(conn)
+
+    assert sorted(r["subject_title"] for r in replay.run(conn)["judgments"]) == [
+        "Japan v1", "Peru v1"]
+
+
+def test_a_scoped_rule_still_reaches_only_its_own_markets(conn):
+    """The other half, and the one `everywhere` must not quietly swallow: a rule the library
+    INFERRED is expected only where the evidence put it (§8.3). A judgment about a Japanese
+    brief was not "unchecked" against a rule that graduated on LATAM."""
+    _judged(conn, _campaign(conn, "Japan v1", market="Japan"), title="Japan v1")
+    _standing_rule(conn)               # LATAM, SEA, EMEA — not Japan
+
+    assert replay.run(conn)["judgments"] == []
+
+
+def test_a_judgment_with_no_record_is_not_listed_against_a_rule_that_applies_everywhere(conn):
+    """"Everywhere" is every MARKET, and a judgment about a brief nobody stored has none. The
+    live side refuses the same way — `standing_for` will not apply a house rule to a brief
+    with no market rather than applying all of them — so listing one here would be the two
+    surfaces disagreeing again, in the direction that puts every unstored judgment in the
+    library on every house rule's list. Mutation found nothing was watching this."""
+    _judged(conn, None, title="A brief that was never stored")
+    _declared_everywhere(conn)
+
+    assert replay.run(conn)["judgments"] == []

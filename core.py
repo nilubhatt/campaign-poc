@@ -4249,6 +4249,42 @@ def _markets_of(campaign: dict) -> list:
 # capability statement nobody can act on is a disclaimer.
 
 
+_DECLARED_MARK = "(declared in rulebook "
+
+
+def _came_from_a_rulebook(conn, correction_id: str) -> bool:
+    """Whether any mention of this rule says a rulebook is where it came from.
+
+    The drift report is built on this: a rule that stands and is no longer declared can only
+    be reported if the library can tell it WAS declared. So the loader has to write that mark
+    on every row it puts in force from a file — including a rule the library had already
+    learned for itself, which the loader widens to every market and, before this, left citing
+    three decks. Deleting that line from the rulebook afterwards withdrew nothing and reported
+    nothing: the row was declared-by-behaviour and learned-by-provenance at once.
+    """
+    return any(_DECLARED_MARK in (sighting.get("provenance") or "")
+               for sighting in corrections.sightings(conn, correction_id))
+
+
+def _no_longer_declared(conn, declared_now: set) -> list:
+    """Standing rules that came from a rulebook and are not in it any more (§12.3).
+
+    A customer edits the wording or deletes a line, and the old rule keeps applying — eleven
+    standing for ten declared, neither wrong on its face. Reported rather than retired
+    automatically: a typo in a file must not silently withdraw a rule that saved judgments
+    already cite.
+
+    Here rather than inside the loop, because the loop is not the only caller and the one that
+    was missing is the worst case: a rulebook whose `corrections:` a customer has EMPTIED
+    returned early, before any of this ran, so deleting one rule of ten was reported and
+    deleting all ten was not.
+    """
+    return [row["text"] for row in corrections.all_of_them(conn)
+            if row.get("status") == "expected"
+            and row["text"].casefold() not in declared_now
+            and _came_from_a_rulebook(conn, row["id"])]
+
+
 def load_declared_corrections(conn, *, confirmed_by: str) -> dict:
     """Put the standing corrections from the customer's own rulebook in force (§12.3/D108).
 
@@ -4277,16 +4313,78 @@ def load_declared_corrections(conn, *, confirmed_by: str) -> dict:
         return {"loaded": 0, "already": 0, "basis": "computed",
                 "what_it_means": f"No corrections were loaded: {bad}"}
     if not declared:
+        # STILL SWEEP FOR DRIFT. Emptying `corrections:` is the largest edit a customer can
+        # make to this file and it was the one edit nothing reported: ten rules loaded from a
+        # rulebook went on being applied to every brief, and the loader answered "your
+        # rulebook declares no standing corrections" as though the library agreed. Deleting
+        # one line of ten was reported; deleting all ten was not.
+        orphaned = _no_longer_declared(conn, set())
         return {"loaded": 0, "already": 0, "basis": "computed",
+                **({"no_longer_declared": orphaned} if orphaned else {}),
                 "what_it_means": (
                     f"Your rulebook declares no standing corrections, so none were loaded. "
                     f"They go in {rulebook.overlay_path()} under `corrections:`, each with "
-                    f"the rule itself and where it came from.")}
+                    f"the rule itself and where it came from."
+                    + (f" {len(orphaned)} rule(s) that CAME from a rulebook are still in "
+                       f"force and are no longer declared in it: "
+                       f"{'; '.join(repr(t[:60]) for t in orphaned[:3])}"
+                       + (f" and {len(orphaned) - 3} more" if len(orphaned) > 3 else "")
+                       + ". They were not withdrawn automatically, because judgments already "
+                         "cite them. Retire each one you meant to drop."
+                       if orphaned else ""))}
 
     version = rulebook.overlay() or rulebook.version()
-    loaded, already, repaired, follow_on = [], 0, [], []
+    loaded, already, repaired, follow_on, set_aside = [], 0, [], [], []
+    # Which ROW each declaration landed on. Two declarations can be one row: `find` follows a
+    # merge, so a customer who wrote both wordings down and then answered `same_rule` about
+    # them — §8.2's own answer, offered by this product — has one rule on file and two lines
+    # in the file, with two scopes. Reconciling both meant reconciling it back and forth on
+    # every start: the same id twice in `repaired`, "2 rule(s) now apply where your rulebook
+    # says" on every restart, and two more authorship rows each time, forever. The first
+    # declaration wins, because one of them has to and file order is the only order there is.
+    handled: dict = {}
+    same_rule_on_file = []
     for entry in declared:
         existing = corrections.find(conn, entry["text"])
+        if existing and existing["correction_id"] in handled:
+            same_rule_on_file.append(
+                {"declared": entry["text"], "same_as": handled[existing["correction_id"]],
+                 "correction_id": existing["correction_id"]})
+            continue
+        if existing:
+            handled[existing["correction_id"]] = entry["text"]
+            # SAY ON THE ROW THAT A RULEBOOK DECLARES IT, once, whatever state it is in. The
+            # drift report is built on that mark, so without it a rule the library had
+            # LEARNED and the customer then wrote down was widened to every market on the
+            # file's authority while still citing three decks — and deleting the line
+            # afterwards withdrew nothing and reported nothing. It was written on exactly one
+            # of the three branches below, the one that creates the row.
+            if existing["status"] != "ignored" and not _came_from_a_rulebook(
+                    conn, existing["correction_id"]):
+                corrections.note(
+                    conn, text=entry["text"], campaign_id=None,
+                    provenance=f"{entry['provenance']} {_DECLARED_MARK}{version})")
+        if existing and existing["status"] == "ignored":
+            # SOMEBODY SET THIS ONE ASIDE, through the tool built for exactly that, and the
+            # file still declares it. Promoting it raised out of the gate — `was set aside, so
+            # it will not be asked for` — which aborted the whole load, so the rules AFTER it
+            # were never reconciled and a customer who had used a documented tool could not
+            # load their own rulebook again.
+            #
+            # Reported, not overturned, and not skipped in silence either. The other direction
+            # already works this way: a line deleted from the file does not withdraw a
+            # standing rule, because judgments cite it — it is reported for somebody to retire
+            # deliberately. A person's set-aside is the same kind of decision, and a file is
+            # not allowed to reverse it while nobody is looking.
+            set_aside.append(existing["text"])
+            follow_on.append(actions.action(
+                f"Start applying “{existing['text'][:50]}” again",
+                "reopen_correction",
+                why="Your rulebook declares this rule and somebody set it aside here, so the "
+                    "file and the library disagree about it. Reopening puts it back on file "
+                    "as provisional; the alternative is to delete the line from the rulebook.",
+                consent="ask", correction_id=existing["correction_id"]))
+            continue
         if existing and existing["status"] == "expected":
             # ALREADY IN FORCE — but in force WHERE? A fix that only works on a fresh database
             # is not a fix. An install that ran an earlier loader has these rows already, and
@@ -4296,10 +4394,17 @@ def load_declared_corrections(conn, *, confirmed_by: str) -> dict:
             # checklist" — so those rules reached no market at all, the loader reported "10
             # already", and nothing said otherwise. Reconciled rather than skipped: what the
             # rulebook declares now is what applies now.
-            if corrections.reconcile_declared(
-                    conn, existing["correction_id"], markets=entry["markets"] or [],
-                    everywhere=not entry["markets"], confirmed_by=who):
+            fixed = corrections.reconcile_declared(
+                conn, existing["correction_id"], markets=entry["markets"] or [],
+                everywhere=not entry["markets"], confirmed_by=who)
+            if fixed:
                 repaired.append(existing["correction_id"])
+                # The same offer a rule loaded fresh makes, for the better reason: these were
+                # in force in no market a moment ago and are in force everywhere now, so the
+                # judgments written without them are exactly what somebody has to look at.
+                # Collected only from `loaded`, the repair said what it had done and pointed
+                # at nothing.
+                follow_on.extend(fixed.get("next_actions") or [])
             else:
                 already += 1
             continue
@@ -4316,7 +4421,7 @@ def load_declared_corrections(conn, *, confirmed_by: str) -> dict:
                 # WHERE it came from, naming the file. A judgment citing this must not read
                 # identically to one citing a rule the library inferred and a person confirmed
                 # after three campaigns: those are different claims about how much is known.
-                provenance=f"{entry['provenance']} (declared in rulebook {version})",
+                provenance=f"{entry['provenance']} {_DECLARED_MARK}{version})",
             )["correction_id"]
         promoted = corrections.graduate(
             conn, correction_id, confirmed_by=who, from_rulebook=version,
@@ -4334,12 +4439,7 @@ def load_declared_corrections(conn, *, confirmed_by: str) -> dict:
     # for ten declared, neither wrong on its face, and the offer goes quiet because everything
     # declared is on file. Reported rather than retired automatically: a typo in a file must
     # not silently withdraw a rule that saved judgments already cite.
-    declared_now = {entry["text"].casefold() for entry in declared}
-    stale = [row["text"] for row in corrections.all_of_them(conn)
-             if row.get("status") == "expected"
-             and row["text"].casefold() not in declared_now
-             and any("(declared in rulebook " in (sighting.get("provenance") or "")
-                     for sighting in corrections.sightings(conn, row["id"]))]
+    stale = _no_longer_declared(conn, {entry["text"].casefold() for entry in declared})
 
     return {
         "loaded": len(loaded), "already": already, "basis": "computed",
@@ -4348,6 +4448,10 @@ def load_declared_corrections(conn, *, confirmed_by: str) -> dict:
         **({"repaired": repaired} if repaired else {}),
         "rulebook": version, "confirmed_by": who,
         **({"no_longer_declared": stale} if stale else {}),
+        # The mirror of `no_longer_declared`: declared here, set aside there.
+        **({"set_aside": set_aside} if set_aside else {}),
+        # Two lines in the file, one rule in the library, because somebody folded them.
+        **({"same_rule_on_file": same_rule_on_file} if same_rule_on_file else {}),
         # What promoting a rule offers next. Going around `corrections.graduate` dropped
         # these silently, along with the replay entry it writes.
         **({"next_actions": actions.trim(follow_on)} if follow_on else {}),
@@ -4355,6 +4459,28 @@ def load_declared_corrections(conn, *, confirmed_by: str) -> dict:
             f"{len(loaded)} standing correction(s) from your rulebook ({version}) are now in "
             f"force, on {who}'s confirmation"
             + (f"; {already} were already on file." if already else ".")
+            # A repair is not "already on file", and reporting it as one is what the previous
+            # version did. It is the row CHANGING — the markets it applies to are not the
+            # markets it applied to an instant ago — and it belongs in the sentence beside the
+            # count, not only in a key a reader has to go looking for.
+            # No claim about WHY the row differed. It reads as "an earlier version of this
+            # loader left it wrong", which is true of an upgraded install and false of a rule
+            # the library learned for itself and this file has just widened — and a sentence
+            # that asserts a cause it cannot check is the thing this product is built against.
+            + (f" {len(repaired)} rule(s) already on file now apply where your rulebook says "
+               f"they do; nothing already judged is rewritten."
+               if repaired else "")
+            + (f" {len(same_rule_on_file)} line(s) in your rulebook are one rule here, "
+               f"because somebody answered `same_rule` about them: only the first of each is "
+               f"applied, and the others are listed under `same_rule_on_file`. Give them one "
+               f"wording in the file, or the scopes you wrote against them cannot both hold."
+               if same_rule_on_file else "")
+            + (f" {len(set_aside)} rule(s) your rulebook declares were set aside here and "
+               f"were NOT put back: that was somebody's decision and a file does not reverse "
+               f"it — reopen each one you meant to keep, or delete the line. "
+               f"{'; '.join(repr(t[:60]) for t in set_aside[:3])}"
+               + (f" and {len(set_aside) - 3} more" if len(set_aside) > 3 else "") + "."
+               if set_aside else "")
             + (f" {len(stale)} rule(s) that came from a rulebook are still in force and are "
                f"NO LONGER IN YOUR RULEBOOK — edited or deleted since they were loaded: "
                f"{'; '.join(repr(t) for t in stale[:3])}"

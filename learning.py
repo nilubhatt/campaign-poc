@@ -91,6 +91,10 @@ def reaches(markets, one_market) -> bool:
     §12.2 changed what folding a market means, and a change like that has to reach every copy
     or two surfaces answer the same question differently about the same brief.
 
+    None of those four remain: the rule-scope callers go through `in_force` below, which wraps
+    this one, and what still calls `reaches` directly is the different question of whether a
+    subject is in the market a REPORT was asked about.
+
     `one_market` falsy means the subject has no market, which reaches nothing: a rule that
     graduated on LATAM does not apply to a record that says where it ran nowhere, and saying
     otherwise would put every unmarked record on every rule's list.
@@ -102,9 +106,37 @@ def reaches(markets, one_market) -> bool:
     return store.fold_market(one_market) in {store.fold_market(m) for m in (markets or [])}
 
 
+def in_force(scope, markets, *, everywhere: bool = False) -> bool:
+    """Whether a rule scoped to `scope` reaches a subject in `markets` (§12.3/D108).
+
+    `reaches` answers it for ONE market, and every caller that has a subject needs it answered
+    for the several a campaign runs in — so this is the shape all of them actually wanted, and
+    the fifth copy of `reaches` was about to be written inside the sixth.
+
+    `everywhere` is the customer's own declaration, and it is a different fact from where a
+    rule graduated. A declared house rule has been seen in no campaign at all, so its
+    `expected_in` is empty and no market list can ever intersect it: read through `scope`
+    alone, a rule in force everywhere is a rule in force nowhere. `prepare_evaluation` had the
+    flag and the replay did not, which put the tool that OFFERS the replay and the replay
+    itself in disagreement about the same rule — the offer said "see which judgments this now
+    applies to" and the report it opened was empty.
+
+    A subject with NO market reaches nothing, declared or not. That is the live rule and not a
+    shortcut: `standing_for` refuses to apply anything to a brief with no market rather than
+    applying everything, because "checked against the house rules" about a brief nobody said
+    where it runs is a claim with nothing under it.
+    """
+    if not markets:
+        return False
+    if everywhere:
+        return True
+    return any(reaches(scope, m) for m in markets)
+
+
 def gate(*, name: str, noun: str, campaigns: int, markets: list, status: str,
          expected_in=(), confirmed_by: Optional[str] = None,
-         from_rulebook: Optional[str] = None, partners: int = 0) -> dict:
+         from_rulebook: Optional[str] = None, partners: int = 0,
+         everywhere: bool = False) -> dict:
     """Whether a learned thing has earned a place on the checklist, and what is missing if not.
 
     Status is asked BEFORE the counts, and the order matters. Asked the other way round, a
@@ -164,8 +196,12 @@ def gate(*, name: str, noun: str, campaigns: int, markets: list, status: str,
         # the one audit field this whole gate exists to create.
         return {**base, "eligible": False, "code": "already_expected",
                 "what_it_means": (
+                    # §12.3: a rule the customer declared applies EVERYWHERE has no market
+                    # list, because it has no market — and this sentence goes to the model as
+                    # a fact about what a brief is checked against. "Already expected of
+                    # briefs in no market" is the one reading of that row nobody should take.
                     f"{name} is already expected of briefs in "
-                    f"{', '.join(expected_in) or 'no market'}"
+                    f"{'every market' if everywhere else (', '.join(expected_in) or 'no market')}"
                     + (f", confirmed by {confirmed_by}." if confirmed_by else "."))}
     if status == "ignored":
         return {**base, "eligible": False, "code": "set_aside",

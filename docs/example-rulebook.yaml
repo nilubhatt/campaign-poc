@@ -230,7 +230,11 @@ scorecard:
 #
 # `provenance` is required. Without it a judgment citing the correction can say only "the
 # library says so", which is the unfounded confident claim this product is built against.
-# `markets` is optional: empty means everywhere, which is right for most house rules.
+# `markets` is optional: empty means everywhere, which is right for most house rules. Change
+# it later and the next load changes the rule's scope to match — what this file declares is
+# what applies, including when it declares nothing, and the loader says how many rules it
+# brought into line. Deleting a rule from this file does NOT withdraw it, because judgments
+# already cite it; that is reported instead, for somebody to retire deliberately.
 corrections:
   - text: Logo never sits on a photographic background without the scrim behind it.
     provenance: Brand guidelines v4, slide 12

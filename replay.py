@@ -201,7 +201,9 @@ def _judgments(conn, *, market: Optional[str] = None) -> list:
         after_rules = [
             {"correction_id": c["id"], "text": c["text"]}
             for c in rules
-            if c["confirmed_at"] > judged_at and _applies(c["expected_in"], markets)]
+            if c["confirmed_at"] > judged_at
+            and _applies(c["expected_in"], markets,
+                         everywhere=bool(c.get("applies_everywhere")))]
         saved = store.get_evaluation(conn, row["id"]) or {}
         rested_on, sole = _withdrawn_rules_cited(saved, withdrawn)
         # No "exclude the rules this judgment cites" guard here, though the first fix added
@@ -284,7 +286,7 @@ def _markets_of_subject(conn, campaign_id: Optional[str]) -> list:
     return [m for m in store.markets_of(record) if m]
 
 
-def _applies(expected_in, markets) -> bool:
+def _applies(expected_in, markets, *, everywhere: bool = False) -> bool:
     """Whether a rule that graduated in `expected_in` reaches a subject in `markets`.
 
     A judgment about a Japanese brief was not "unchecked" against a rule that graduated on
@@ -294,13 +296,12 @@ def _applies(expected_in, markets) -> bool:
     A judgment with no subject record has no market, so nothing is claimed about it: it is
     listed only for a rule it actually cited being withdrawn, which is a fact about the
     judgment rather than about a market.
-    """
-    import store
 
-    if not markets:
-        return False
-    return bool({store.fold_market(m) for m in markets}
-                & {store.fold_market(m) for m in expected_in})
+    Both of those, and `everywhere`, are `learning.in_force`'s to decide: this file held the
+    second and third copies of that test, and the copy here was the one that never learned
+    about a rule the customer declares applies everywhere.
+    """
+    return learning.in_force(expected_in, markets, everywhere=everywhere)
 
 
 def _withdrawn_rules_cited(saved: dict, withdrawn: dict) -> tuple:
@@ -397,12 +398,19 @@ def _sentence(conn, backlog: dict, judgments: list) -> str:
 
 def if_graduated(conn, *, measure: Optional[str] = None,
                  correction_id: Optional[str] = None,
-                 markets: Optional[list] = None) -> dict:
+                 markets: Optional[list] = None,
+                 everywhere: bool = False) -> dict:
     """What promoting this would do to the library, without promoting it (§8.7, D104).
 
     *"This makes 14 LATAM records show as missing it."* The person confirming is exactly who
     needs that number, and needs it BEFORE they confirm — afterwards it is a surprise rather
     than a decision. Asking costs nothing and changes nothing.
+
+    `everywhere` is §12.3's house rule, and this is the sentence somebody reads at the moment
+    they decide. Computed from the market list alone it said confirming a rule the customer
+    declares EVERYWHERE would affect the briefs of "no market" and 0 saved judgments — and the
+    report it opens afterwards listed every judgment in the library. That is the same
+    disagreement this file's `_applies` had, one surface earlier, pointing the other way.
     """
     import corrections
     import metrics
@@ -443,18 +451,30 @@ def if_graduated(conn, *, measure: Optional[str] = None,
     # honest number is not "how many fail it" but how many were judged WITHOUT it, which is
     # what a person is deciding to leave unexamined.
     affected = [r for r in _judgments_before(conn)
-                if _applies(where, _markets_of_subject(conn, r.get("campaign_id")))]
+                if _applies(where, _markets_of_subject(conn, r.get("campaign_id")),
+                            everywhere=everywhere)]
     return {
         "correction_id": entry["correction_id"],
         "text": entry["text"],
-        "markets": where,
+        # WHAT WOULD BE IN FORCE, and separately where the rule has been seen. One key
+        # carrying both is how a rule in force everywhere came to report a single market as
+        # its scope — the shape this whole round is about, in a response body.
+        "markets": [] if everywhere else where,
+        # WHERE IT WAS SEEN, from the column that records that — not from `where`, which is
+        # what would be IN FORCE and, for a rule the file scopes to markets, is the
+        # declaration rather than an observation. Repeating the conflation this round removed,
+        # in a key added by this round, one function along. The same expression
+        # `standing_for` uses, and it cannot call the gate: the gate calls this.
+        "seen_in": learning.fold_markets(entry.get("markets")),
+        "applies_everywhere": everywhere,
         "judgments_affected": len(affected),
         "examples": [{"evaluation_id": r["id"], "subject_title": r["subject_title"]}
                      for r in affected[:5]],
         "basis": "computed",
         "what_it_means": (
             f"Confirming this would make every brief in "
-            f"{', '.join(where) or 'no market'} judged against it from here on. "
+            f"{'every market' if everywhere else (', '.join(where) or 'no market')} "
+            f"judged against it from here on. "
             f"{len(affected)} saved judgment{'s' * (len(affected) != 1)} "
             f"{'were' if len(affected) != 1 else 'was'} written without it and would show in "
             f"the replay as not checked against it — none of them is rewritten."),

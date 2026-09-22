@@ -520,3 +520,501 @@ def test_an_install_that_ran_the_old_loader_is_repaired_on_upgrade(conn):
         f"{out['loaded']} loaded, {out['already']} already"
     )
     assert out.get("repaired"), "it repaired rows and did not say so"
+
+
+def _declared(conn, text, markets):
+    """A rulebook rule promoted exactly as the loader promotes one."""
+    import corrections
+
+    cid = corrections.note(conn, text=text, campaign_id=None,
+                           provenance="the house rules (declared in rulebook fab-1.0)",
+                           )["correction_id"]
+    corrections.graduate(conn, cid, confirmed_by="R. Vega", from_rulebook="fab-1.0",
+                         everywhere=not markets, markets=markets or None)
+    return cid
+
+
+def test_a_rule_that_becomes_global_stops_claiming_the_market_it_left(conn):
+    """The rulebook said Peru, then said everywhere. Keeping the old list because the new one
+    is empty leaves the row saying two different things — in force in every market, seen in
+    Peru — and `standing_for` prints the stale half back to the customer as `seen_in`. The
+    declaration is the authority on a declared rule; there is nothing else it can be."""
+    import corrections
+
+    cid = _declared(conn, "Never promise a delivery date in creative.", ["Peru"])
+    assert corrections.describe(conn, cid)["expected_in"] == ["Peru"]
+
+    assert corrections.reconcile_declared(conn, cid, markets=[], everywhere=True,
+                                          confirmed_by="R. Vega")
+    entry = corrections.describe(conn, cid)
+    assert entry["applies_everywhere"]
+    assert entry["expected_in"] == [], (
+        f"a rule the rulebook now declares everywhere still reports {entry['expected_in']}")
+
+    # And what the customer reads back names the two facts apart: this rule is in force in
+    # Japan (it is a house rule), and the library has never seen it in a campaign anywhere.
+    standing = corrections.standing_for(conn, campaign_id="", markets=["Japan"])["standing"]
+    assert [c["expected_in"] for c in standing] == [[]]
+    assert [c["seen_in"] for c in standing] == [[]]
+
+
+def test_a_rule_that_stops_being_global_takes_the_new_scope(conn):
+    """The other direction, which the same line has to get right."""
+    import corrections
+
+    cid = _declared(conn, "Never promise a delivery date in creative.", [])
+    assert corrections.reconcile_declared(conn, cid, markets=["Peru"], everywhere=False,
+                                          confirmed_by="R. Vega")
+    entry = corrections.describe(conn, cid)
+    assert not entry["applies_everywhere"]
+    assert entry["expected_in"] == ["Peru"]
+
+
+def test_reconciling_nothing_writes_nothing(conn):
+    """It runs on every start. A repair that reports itself every time is one nobody reads."""
+    import corrections
+
+    cid = _declared(conn, "Never promise a delivery date in creative.", ["Peru"])
+    assert corrections.reconcile_declared(conn, cid, markets=["Peru"], everywhere=False,
+                                          confirmed_by="R. Vega") is None
+
+
+def test_a_repair_records_who_made_the_call(conn):
+    """§11.1: the account beside the name, on the write that puts a rule in force in markets
+    it was in force in nowhere. `graduate` records it and this write is the same write — going
+    around it is how the one surface built to review human decisions comes to miss one."""
+    import corrections
+    import store
+
+    cid = _declared(conn, "Never promise a delivery date in creative.", ["Peru"])
+    before = conn.execute("SELECT COUNT(*) FROM authorship WHERE subject_key = ?",
+                          (cid,)).fetchone()[0]
+
+    corrections.reconcile_declared(conn, cid, markets=[], everywhere=True,
+                                   confirmed_by="A. Okafor")
+
+    rows = conn.execute("SELECT COUNT(*) FROM authorship WHERE subject_key = ?",
+                        (cid,)).fetchone()[0]
+    assert rows == before + 1, "the repair changed what a rule applies to and said who nowhere"
+    who = store.authorship_for(conn, "correction", cid)
+    assert who["on_behalf_of"]["name"] == "A. Okafor"
+    # And the rule's own `confirmed_by` is untouched: whoever ran the upgrade did not confirm
+    # this rule, and overwriting that name would rewrite the record of somebody's decision as
+    # a side effect of a bug fix. Mutation found this assertion missing.
+    assert corrections.describe(conn, cid)["confirmed_by"] == "R. Vega"
+    # What they SAID travels with the name, which is where §11.2 keeps it.
+    assert "rulebook" in who["on_behalf_of"]["why"].lower()
+    assert "Peru" in who["on_behalf_of"]["why"], "it did not say what the row used to be"
+
+
+def test_a_repaired_rule_offers_the_replay(conn):
+    """The offer is the whole point of the repair: these rules were in force nowhere, they are
+    in force everywhere now, and the judgments written before them are exactly what a person
+    has to go and look at. A rule loaded fresh offers it; a rule repaired offered nothing."""
+    import core
+    import corrections
+
+    _as_the_customers(conn)
+
+    real = corrections.graduate
+    corrections.graduate = lambda c, cid, **kw: real(c, cid, **{**kw, "markets": None,
+                                                                "everywhere": False})
+    try:
+        core.load_declared_corrections(conn, confirmed_by="R. Vega")
+    finally:
+        corrections.graduate = real
+
+    out = core.load_declared_corrections(conn, confirmed_by="R. Vega")
+    assert out.get("repaired")
+    assert out["loaded"] == 0, "the fixture was meant to repair, not load"
+    assert [a["tool"] for a in out.get("next_actions") or []] == ["replay_rules"], (
+        "ten rules went from in force nowhere to in force everywhere and nothing offered "
+        "the report that says which saved judgments they reach")
+
+
+
+def test_the_half_repaired_state_the_LAST_fix_left_is_repaired_too(conn):
+    """An upgrade path with two hops in it, and the middle one is a state this product
+    actually shipped: the previous fix wrote `markets or on_file`, so a rule the rulebook had
+    scoped to Peru and now declares everywhere came out of it applying in every market and
+    still reporting `seen_in: ["Peru"]`. Both halves are on file and they disagree.
+
+    The guard has to notice, which means comparing the market lists even when the new one is
+    empty — `not markets or ...` reads that row as already reconciled and leaves it saying two
+    things forever. Mutation found this: nothing else in the suite could tell the two guards
+    apart, because every other case has either the flag or the list differing."""
+    import corrections
+    import store
+
+    cid = _declared(conn, "Never promise a delivery date in creative.", ["Peru"])
+    store.graduate_correction(conn, cid, markets=["Peru"], confirmed_by="R. Vega",
+                              applies_everywhere=True)          # what the last fix left
+    assert corrections.describe(conn, cid)["expected_in"] == ["Peru"]
+
+    fixed = corrections.reconcile_declared(conn, cid, markets=[], everywhere=True,
+                                           confirmed_by="R. Vega")
+    assert fixed, "the row says it applies everywhere AND only in Peru, and nothing repaired it"
+    assert corrections.describe(conn, cid)["expected_in"] == []
+
+
+def test_the_repair_offers_a_replay_that_names_every_market(conn):
+    """The offer is what a person reads before saying yes. "Briefs in these markets" about a
+    rule that has no markets — because it applies to all of them — names nothing."""
+    import corrections
+
+    cid = _declared(conn, "Never promise a delivery date in creative.", ["Peru"])
+    fixed = corrections.reconcile_declared(conn, cid, markets=[], everywhere=True,
+                                           confirmed_by="R. Vega")
+    why = fixed["next_actions"][0]["why"]
+    assert "every market" in why, why
+    assert "these markets" not in why
+
+
+def test_a_house_rule_graduates_saying_it_applies_everywhere(conn):
+    """Same sentence, on the path a fresh install takes. `', '.join([])` is the empty string,
+    so both the offer and the confirmation read as though a market had gone missing."""
+    import corrections
+
+    cid = corrections.note(conn, text="No price promises in creative.", campaign_id=None,
+                           provenance="the house rules (declared in rulebook fab-1.0)",
+                           )["correction_id"]
+    out = corrections.graduate(conn, cid, confirmed_by="R. Vega", from_rulebook="fab-1.0",
+                               everywhere=True, markets=None)
+
+    assert "Briefs in every market are now judged against this" in out["what_it_means"]
+    assert "every market" in out["next_actions"][0]["why"]
+
+
+def test_a_repair_refuses_to_switch_a_rule_off_by_accident(conn):
+    """"No markets and not everywhere" is `expected_in = []` with the flag clear, which is the
+    exact state D108 was reopened for: standing, and in force nowhere. The loader cannot ask
+    for it, so a caller that does has made a mistake — and carrying it out quietly is how the
+    rules went dead the first time."""
+    import corrections
+    import pytest as _pytest
+
+    cid = _declared(conn, "Never promise a delivery date in creative.", ["Peru"])
+    with _pytest.raises(ValueError, match="applies EVERYWHERE"):
+        corrections.reconcile_declared(conn, cid, markets=[], everywhere=False,
+                                       confirmed_by="R. Vega")
+    assert corrections.describe(conn, cid)["expected_in"] == ["Peru"], "it wrote anyway"
+
+
+def test_a_rule_somebody_set_aside_does_not_break_the_next_load(conn):
+    """Reproduced before fixing: set aside ONE declared rule through the tool built for it,
+    and the next load of the rulebook raised `ValueError` out of `graduate`'s gate — so the
+    other nine were never reconciled, and a customer who had used a documented tool could
+    never load their own file again.
+
+    Setting one aside is a person's decision and the file is not allowed to overturn it
+    silently, which is the same rule the other direction already follows: deleting a line does
+    not withdraw a standing rule, it is reported. So this is reported too."""
+    import core
+    import corrections
+
+    _as_the_customers(conn)
+    core.load_declared_corrections(conn, confirmed_by="R. Vega")
+    standing = [r for r in corrections.all_of_them(conn) if r["status"] == "expected"]
+    corrections.set_aside(conn, standing[0]["id"], why="not ours any more")
+
+    out = core.load_declared_corrections(conn, confirmed_by="R. Vega")
+
+    assert out["already"] == 9, f"the other nine did not reconcile: {out}"
+    assert out.get("set_aside") == [standing[0]["text"]], (
+        f"nothing said the file and the library disagree about this rule: {out}")
+    assert "set aside" in out["what_it_means"]
+    assert corrections.describe(conn, standing[0]["id"])["status"] == "ignored", (
+        "the file overturned a person's decision without asking"
+    )
+    assert "reopen_correction" in [a["tool"] for a in out.get("next_actions") or []]
+
+
+def test_two_declared_rules_that_are_one_rule_on_file_do_not_ping_pong(conn):
+    """Somebody folded two wordings into one rule (`same_rule`, which is §8.2's own answer),
+    and the rulebook still declares both — with different scopes. `find` follows the merge, so
+    both declarations land on the SAME row and each start reconciled it back and forth:
+    `repaired` named one id twice, the sentence claimed a repair on every restart, and after
+    the authorship fix the §11 history for that rule grew by two rows per start, forever.
+
+    The loader cannot honour two scopes for one row. It honours the first and SAYS so."""
+    import core
+    import corrections
+    import rulebook
+
+    a = "Seeding boxes carry one colourway."
+    b = "Only one colourway per seeding box."
+    path = rulebook.overlay_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("version: fab-1.0\ndescribes: two wordings of one rule\ncorrections:\n"
+                    f"  - text: {a}\n    provenance: Client call, 3 March\n"
+                    "    markets: ['Peru']\n"
+                    f"  - text: {b}\n    provenance: Client call, 9 May\n", encoding="utf-8")
+    rulebook.load.cache_clear()
+
+    cid = core.ingest_campaign(conn, title="Lima", market="Peru", status="concluded",
+                               detail="A launch.", confirm=True)["campaign_id"]
+    first = corrections.note(conn, text=a, campaign_id=cid,
+                             provenance="Deck")["correction_id"]
+    second = corrections.note(conn, text=b, campaign_id=cid,
+                              provenance="Deck")["correction_id"]
+    corrections.resolve(conn, first, decision="same_rule", same_as=second)
+
+    core.load_declared_corrections(conn, confirmed_by="R. Vega")
+    rows = lambda: conn.execute(                                       # noqa: E731
+        "SELECT COUNT(*) FROM authorship WHERE subject_kind = 'correction'").fetchone()[0]
+    settled = rows()
+
+    out = core.load_declared_corrections(conn, confirmed_by="R. Vega")
+
+    assert not out.get("repaired"), f"it repaired a rule it had just repaired: {out}"
+    assert rows() == settled, "every start writes another authorship row for the same rule"
+    assert out.get("same_rule_on_file"), (
+        f"two declarations are one rule on file and nothing said so: {out}")
+    assert "one rule" in out["what_it_means"]
+
+
+def test_a_rule_the_library_learned_becomes_a_rule_the_rulebook_declares(conn):
+    """A rule confirmed from three decks, whose text the customer later writes into their
+    rulebook. Widening it to everywhere is right — they wrote it down, which is the whole of
+    what `applies_everywhere` means — but nothing recorded that it now comes from the file.
+
+    Two consequences, both reproduced: the drift report keys on rulebook provenance, so
+    deleting the line afterwards withdrew nothing and reported nothing; and the loader's own
+    sentence claimed it had put the row where the rulebook says, about a row whose provenance
+    still named three decks."""
+    import core
+    import corrections
+    import rulebook
+
+    text = "Captions name the product in the first line."
+    for market in ("Peru", "Mexico", "Colombia"):
+        cid = core.ingest_campaign(conn, title=f"{market} launch", market=market,
+                                   status="concluded", detail="A launch.",
+                                   confirm=True)["campaign_id"]
+        corrections.note(conn, text=text, campaign_id=cid, provenance=f"{market} slide 9")
+    learned = corrections.find(conn, text)["correction_id"]
+    corrections.graduate(conn, learned, confirmed_by="A. Okafor")
+
+    path = rulebook.overlay_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("version: fab-1.0\ndescribes: declared later\ncorrections:\n"
+                    f"  - text: {text}\n    provenance: Client email, 19 May\n",
+                    encoding="utf-8")
+    rulebook.load.cache_clear()
+    core.load_declared_corrections(conn, confirmed_by="R. Vega")
+
+    assert "rulebook" in corrections._provenance_of(conn, learned), (
+        "the rulebook widened this rule to every market and cited three decks for it")
+    # The decks are not erased by the declaration: it applies everywhere AND the library
+    # watched it recur in three markets, which are two facts and both are true.
+    standing = corrections.standing_for(conn, campaign_id="", markets=["Japan"])["standing"]
+    mine = next(c for c in standing if c["text"] == text)
+    assert sorted(mine["seen_in"]) == ["Colombia", "Mexico", "Peru"], mine["seen_in"]
+    assert mine["expected_in"] == []
+    assert corrections.describe(conn, learned)["confirmed_by"] == "A. Okafor", (
+        "the upgrade overwrote the name of the person who actually confirmed it")
+
+    path.write_text("version: fab-1.1\ndescribes: dropped\ncorrections: []\n",
+                    encoding="utf-8")
+    rulebook.load.cache_clear()
+    gone = core.load_declared_corrections(conn, confirmed_by="R. Vega")
+
+    assert gone.get("no_longer_declared") == [text], (
+        f"the customer deleted the line and nothing reported the rule still standing: {gone}")
+
+
+def test_emptying_the_rulebook_reports_the_rules_it_leaves_standing(conn):
+    """The largest edit a customer can make to this file, and the one nothing reported.
+    Deleting one line of ten was reported as drift; deleting all ten returned early — "your
+    rulebook declares no standing corrections" — while all ten went on being applied to every
+    brief. Nothing is withdrawn automatically either way: saved judgments cite these."""
+    import core
+    import corrections
+    import rulebook
+
+    _as_the_customers(conn)
+    core.load_declared_corrections(conn, confirmed_by="R. Vega")
+    standing = len([r for r in corrections.all_of_them(conn) if r["status"] == "expected"])
+    assert standing == 10
+
+    rulebook.overlay_path().write_text(
+        "version: fabletics-2026.10\ndescribes: emptied\ncorrections: []\n", encoding="utf-8")
+    rulebook.load.cache_clear()
+
+    out = core.load_declared_corrections(conn, confirmed_by="R. Vega")
+
+    assert len(out.get("no_longer_declared") or []) == 10, (
+        f"ten rules are still in force and the loader said: {out['what_it_means']}")
+    assert "no longer declared" in out["what_it_means"]
+    assert len([r for r in corrections.all_of_them(conn)
+                if r["status"] == "expected"]) == 10, "a file edit withdrew a standing rule"
+
+
+def test_a_house_rule_heard_from_a_deck_first_does_not_come_out_scoped_to_that_deck(conn):
+    """The likeliest case for a house rule, on a FRESH database: the library heard it in Peru
+    before the customer's file declared it. `graduate` fell back to `gate["seen_in"]` when the
+    declaration named no markets, so the first load produced `applies_everywhere = 1` with
+    `expected_in = ["Peru"]` — in force everywhere, reported as seen in Peru, which is the
+    state the upgrade repair exists to clean up, manufactured one start earlier by the load.
+
+    The fallback is right for a rule the library INFERRED and wrong for one the customer
+    declared, and `everywhere` is exactly the difference."""
+    import core
+    import corrections
+
+    _as_the_customers(conn)
+    import yaml
+    text = yaml.safe_load(FABLETICS.read_text(encoding="utf-8"))["corrections"][0]["text"]
+    peru = core.ingest_campaign(conn, title="Lima flagship", market="Peru",
+                                status="concluded", detail="A launch.",
+                                confirm=True)["campaign_id"]
+    cid = corrections.note(conn, text=text, campaign_id=peru,
+                           provenance="Peru slide 9")["correction_id"]
+
+    core.load_declared_corrections(conn, confirmed_by="R. Vega")
+
+    row = corrections.describe(conn, cid)
+    assert row["applies_everywhere"]
+    assert row["expected_in"] == [], (
+        f"a rule in force in every market says it graduated in {row['expected_in']}")
+    # And the same branch is the one that never marked the row as coming from a rulebook, so
+    # the drift report could not see it: declared by behaviour, learned by provenance.
+    assert "rulebook" in corrections._provenance_of(conn, cid)
+
+
+def test_the_preview_before_confirming_a_house_rule_counts_every_market(conn):
+    """`if_confirmed` is the sentence somebody reads at the moment they decide, and it read
+    the market list alone: for a rule the customer declares everywhere — which has no market
+    list, because it has no market — it said confirming would affect the briefs of "no
+    market", and 0 saved judgments. Then the report it opens afterwards lists them all.
+
+    That is the disagreement this whole round is about, pointing the other way."""
+    import core
+    import corrections
+
+    _as_the_customers(conn)
+    import yaml
+    text = yaml.safe_load(FABLETICS.read_text(encoding="utf-8"))["corrections"][0]["text"]
+    for market in ("Peru", "Japan"):
+        cid = core.ingest_campaign(conn, title=f"{market} v1", market=market,
+                                   status="concluded", detail="A launch.",
+                                   confirm=True)["campaign_id"]
+        core.save_evaluation(conn, subject_title=f"{market} v1", campaign_id=cid,
+                             verdict="approve", summary="Looks sound.", findings=[])
+    heard = corrections.note(conn, text=text, campaign_id=cid,
+                             provenance="Japan slide 9")["correction_id"]
+
+    preview = corrections.graduation(conn, heard)["if_confirmed"]
+
+    assert preview["judgments_affected"] == 2, (
+        f"the rulebook declares this everywhere and the preview counted "
+        f"{preview['judgments_affected']} of 2: {preview['what_it_means']}")
+    assert "every market" in preview["what_it_means"], preview["what_it_means"]
+    # And the payload says the same thing the sentence does: nothing is scoped, and where it
+    # has been heard is a separate fact under its own name.
+    assert preview["applies_everywhere"] and preview["markets"] == []
+    assert preview["seen_in"] == ["Japan"]
+
+
+def test_the_sentence_a_person_reads_counts_the_repairs(conn):
+    """A key a reader has to go looking for is not a report. `repaired` rows are not "already
+    on file" — the row CHANGED, and the count belongs in the sentence beside the loaded one.
+    Its own test, because it was asserted inside a test named for the replay offer."""
+    import core
+    import corrections
+
+    _as_the_customers(conn)
+    real = corrections.graduate
+    corrections.graduate = lambda c, cid, **kw: real(c, cid, **{**kw, "markets": None,
+                                                                "everywhere": False})
+    try:
+        core.load_declared_corrections(conn, confirmed_by="R. Vega")
+    finally:
+        corrections.graduate = real
+
+    out = core.load_declared_corrections(conn, confirmed_by="R. Vega")
+
+    assert "10 rule(s) already on file now apply where your rulebook says they do" in (
+        out["what_it_means"]), out["what_it_means"]
+    # And no claim about WHY they differed: "an earlier version of this loader left them" is
+    # true of an upgrade and false of a rule this library learned and the file has just
+    # widened, and the loader cannot tell those apart from here.
+    assert "earlier version" not in out["what_it_means"]
+
+
+def test_the_model_is_not_told_a_house_rule_applies_in_no_market(conn):
+    """`correction_status` is model-facing, and the gate's answer for a rule already in force
+    read "already expected of briefs in no market" — about a rule in force in all of them.
+    The fourth copy of one sentence, in the module that owns the market question. A tool that
+    hands the model a false fact about what a brief is checked against is worse than one that
+    says nothing, because the model will repeat it."""
+    import core
+    import corrections
+
+    _as_the_customers(conn)
+    core.load_declared_corrections(conn, confirmed_by="R. Vega")
+    standing = [r for r in corrections.all_of_them(conn) if r["status"] == "expected"][0]
+
+    said = corrections.graduation(conn, standing["id"])["what_it_means"]
+
+    assert "in every market" in said, said
+    assert "no market" not in said
+
+
+def test_a_quiet_house_rule_is_not_reported_as_quiet_in_no_market(conn):
+    """The retirement question, asked about a rule that applies everywhere. `expected_in` is
+    empty for one, so the sentence fell back to "in its markets" — vague where the answer is
+    known, in the one place this loop asks somebody to stop applying a rule."""
+    import core
+    import corrections
+
+    _as_the_customers(conn)
+    core.load_declared_corrections(conn, confirmed_by="R. Vega")
+    rule = [r for r in corrections.all_of_them(conn) if r["status"] == "expected"][0]
+
+    # Enough campaigns recording feedback of their OWN, after this rule was last heard, for
+    # the retirement question to be worth asking at all. The rule is not repeated in any of
+    # them, which is what "gone quiet" means.
+    # Recording feedback is what asks the question — the product asks it once, where somebody
+    # is already looking, rather than waiting to be called.
+    asked = []
+    for n in range(corrections.RETIREMENT_AFTER + 1):
+        cid = core.ingest_campaign(conn, title=f"Later {n}", market="Peru",
+                                   status="concluded", detail="A launch.",
+                                   confirm=True)["campaign_id"]
+        asked += corrections.note(conn, text=f"Something else entirely, number {n}.",
+                                  campaign_id=cid, provenance="Deck").get("gone_quiet") or []
+
+    quiet = [q for q in asked if q["correction_id"] == rule["id"]]
+    assert quiet, "the retirement question was never asked about a standing house rule"
+    assert "in every market" in quiet[0]["what_it_means"], quiet[0]["what_it_means"]
+
+
+def test_the_preview_does_not_call_a_declared_scope_a_sighting(conn):
+    """The same conflation this round removed, in a key this round added. For a rule the file
+    SCOPES to markets, what would be in force is the declaration and where it was heard is an
+    observation, and the preview was reporting the first under the name of the second."""
+    import corrections
+    import core
+    import replay
+    import rulebook
+
+    text = "Every asset naming a price carries the currency."
+    path = rulebook.overlay_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("version: fab-1.0\ndescribes: a scoped rule\ncorrections:\n"
+                    f"  - text: {text}\n    provenance: Client email, 19 May\n"
+                    "    markets: ['Peru']\n", encoding="utf-8")
+    rulebook.load.cache_clear()
+
+    japan = core.ingest_campaign(conn, title="Japan v1", market="Japan", status="concluded",
+                                 detail="A launch.", confirm=True)["campaign_id"]
+    cid = corrections.note(conn, text=text, campaign_id=japan,
+                           provenance="Japan slide 4")["correction_id"]
+
+    preview = replay.if_graduated(conn, correction_id=cid, markets=["Peru"])
+
+    assert preview["markets"] == ["Peru"], "what would be in force is what the file declares"
+    assert preview["seen_in"] == ["Japan"], (
+        f"the file's declaration was reported as where the rule was seen: "
+        f"{preview['seen_in']}")

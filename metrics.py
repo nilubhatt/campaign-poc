@@ -843,10 +843,16 @@ def expected_for(conn, *, market: Optional[str] = None, markets: Optional[list] 
             if mine in by_type:
                 out.append(name)
             continue
-        # §13.5: `learning.reaches`, the one folded membership test. This and
+        # §13.5: `learning.in_force`, the one folded membership test. This and
         # `corrections.standing_for` are the two functions that decide what a brief is CHECKED
-        # AGAINST, on the two paths D114 is about, and they each wrote it out.
-        if not any(learning.reaches(entry["expected_in"], m) for m in wanted):
+        # AGAINST, on the two paths D114 is about; each wrote it out until this round, and the
+        # third copy — in `replay` — was the one that never heard about `applies_everywhere`.
+        #
+        # No `everywhere` here, and that is the distinction rather than an omission: a measure
+        # is a thing this library WATCHED recur, so it is expected where the evidence put it,
+        # and there is no such thing as a declared measure for a customer to scope to all
+        # markets. The day there is, this is the line that has to learn about it.
+        if not learning.in_force(entry["expected_in"], wanted):
             continue
         out.append(name)
     return out

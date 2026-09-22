@@ -3046,16 +3046,24 @@ with nothing to notice because each half works perfectly alone:
       four-way tag taxonomy, the influencer criteria and red flags, the recurring partner
       feedback as evaluation logic, the 360° checklist as the six things a brief must carry
       with the words that would show each had arrived, the six-criteria scorecard, and all ten
-      standing corrections with their provenance and market scope. The presenter notes carried
-      as PDF annotations are transcribed with the sections they annotate.
+      standing corrections with their provenance. The presenter notes carried as PDF
+      annotations are transcribed with the sections they annotate. The markets the source
+      names stay in `provenance`, where the source puts them — its column is headed "Where it
+      came from", and reading that as "where this applies" scoped nine of the ten rules to
+      markets the customer never restricted them to. They are house rules: they apply
+      everywhere, which is what `applies_everywhere` is for.
       **Shipped as a customer file, which is this row's own decision.** Putting it in the
       product default was tried and reverted: 126 tests encode the empty default, because it is
       what makes the first-run and empty-library behaviour what it is, and one customer's rules
       in a generic product's default would make every install theirs. It ships beside the
       binary, so putting it in force is one `cp` into the data directory and no download. The
       source document asks for the defaults to ship populated, which for a Fabletics build is
-      right — making the INSTALLER do that copy is one line and a product decision rather than
-      a technical one, and it has not been made here. *Closes D129.*
+      right — and that decision has since been made: `campaign-intelligence init` copies the
+      shipped customer rulebook into the data directory when the customer has none of their
+      own, says so on the console, and never touches a file (or a symlink, dangling or not)
+      that is already there. v0.3 is built for this customer; a generic build ships the empty
+      default, which is still what `rulebook.yaml` in the install directory contains. *Closes
+      D129.*
       *Closes D37 and D108.* D37 moved "in market" out of the product's own synonym table —
       one agency's phrasing does not belong in a product that ships generic — and review
       caught the sweep half done, with the model-facing gloss still teaching the word `enums`
@@ -3133,10 +3141,13 @@ with nothing to notice because each half works perfectly alone:
       patterns"*, was not a missing field: §8.6 built it and nothing here said so, which is
       how work that is done still reads as owed. A standing correction carries `markets`
       (where it was seen) and `expected_in` (the markets it graduated into), and
-      `corrections.in_force` applies it only in those — with `applies_everywhere` for a rule
-      the customer declared in their own rulebook, which §12.3 added because a declared rule
-      is not scoped by where the library happened to notice it. Verified at
-      `corrections.py:610`, not assumed.
+      `corrections.standing_for` applies it only in those — with `applies_everywhere` for a
+      rule the customer declared in their own rulebook, which §12.3 added because a declared
+      rule is not scoped by where the library happened to notice it. The scope test itself is
+      `learning.in_force`, which `standing_for`, `replay` and `metrics.expected_for` all call:
+      it was written out three times, and the copy in `replay` never heard about the flag, so
+      for three rounds a rule in force everywhere reached every live judgment and no saved
+      one. Verified by executing both surfaces against one database, not by reading either.
 
 
 ## Phase 13 — The engineering work filed into a bucket

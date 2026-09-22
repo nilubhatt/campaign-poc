@@ -497,13 +497,37 @@ def _offers(correction_id: str, text: str, similar: Optional[dict]) -> list:
     return actions.trim(offers)
 
 
+def declared_in_the_rulebook(text: str) -> Optional[dict]:
+    """The customer's own declaration of this rule, if their rulebook has one (§12.3).
+
+    Asked HERE rather than taken from the caller, because the caller is usually a tool the
+    model called and the fact is a property of the rule. `correction_status` about a rule the
+    customer's own file declares was answering "seen in 1 campaign, needs 3" — the counting
+    test, which exists for a rule this library INFERRED and which the loader will not apply to
+    this one — and the preview under it was computed from the market it happened to be heard
+    in rather than the markets it is about to apply to.
+    """
+    import rulebook
+
+    wanted = _normalise(text)
+    return next((entry for entry in rulebook.corrections()
+                 if _normalise(entry["text"]) == wanted), None)
+
+
 def graduation(conn, correction_id: str, *, from_rulebook: Optional[str] = None) -> dict:
     """Whether this correction has earned a place. `learning`'s gate, not a second one."""
+    import rulebook
     import store
 
     entry = describe(conn, correction_id)
     if not entry:
         raise ValueError(f"{correction_id!r} is not a correction on file")
+    declared = declared_in_the_rulebook(entry["text"])
+    from_rulebook = from_rulebook or (
+        (rulebook.overlay() or rulebook.version()) if declared else None)
+    # What confirming would actually put in force: what the file says, or — for a rule the
+    # library inferred — where it watched it recur.
+    everywhere = bool(entry["applies_everywhere"]) or bool(declared and not declared["markets"])
     seen_on = store.correction_campaigns(conn, correction_id)
     gate = {**learning.gate(
         name=entry["text"], noun="rule",
@@ -517,17 +541,20 @@ def graduation(conn, correction_id: str, *, from_rulebook: Optional[str] = None)
         # §12.3/D108: a rule the CUSTOMER declared in their own rulebook, which does not have
         # to be seen in three campaigns first. It goes through this gate rather than around
         # it, so there is one route to `expected` and one place the conditions live.
-        from_rulebook=from_rulebook),
+        from_rulebook=from_rulebook, everywhere=everywhere),
         "correction_id": correction_id}
     if gate["eligible"]:
         import replay
-        gate["if_confirmed"] = replay.if_graduated(conn, correction_id=correction_id,
-                                                   markets=gate["seen_in"])
+        gate["if_confirmed"] = replay.if_graduated(
+            conn, correction_id=correction_id,
+            markets=(declared["markets"] if declared and declared["markets"]
+                     else gate["seen_in"]),
+            everywhere=everywhere)
     return gate
 
 
 def reconcile_declared(conn, correction_id: str, *, markets: list, everywhere: bool,
-                       confirmed_by: str) -> bool:
+                       confirmed_by: str) -> Optional[dict]:
     """Bring a correction already in force into line with what the rulebook declares NOW.
 
     A fix that only works on a fresh database is not a fix. An install that ran an earlier
@@ -540,8 +567,17 @@ def reconcile_declared(conn, correction_id: str, *, markets: list, everywhere: b
     HERE rather than in the loader, because `store.graduate_correction` is what writes a
     correction to `expected` and this module is the only one that may call it — D108's first
     version built that route twice and the second copy silently dropped the replay entry, the
-    next-actions and the sentence a person reads. Returns whether anything changed, so an
-    upgrade can say what it repaired.
+    next-actions and the sentence a person reads. Returns what changed, or None when nothing
+    did, so an upgrade can say what it repaired and offer what a graduation offers.
+
+    THE DECLARATION IS THE AUTHORITY, including when it declares nothing. Keeping the old
+    market list because the new one is empty — which is right for a rule the library INFERRED
+    and wrong for one the customer declared — left a rule that moved from Peru-only to
+    everywhere saying
+    both at once: in force in every market, `seen_in: ["Peru"]`, which is the half the
+    customer reads back. Nothing is lost by dropping it: where a rule was actually SEEN is
+    recomputed from the sightings by `graduation`, and this column is the checklist rather
+    than the history.
     """
     import store
 
@@ -549,16 +585,45 @@ def reconcile_declared(conn, correction_id: str, *, markets: list, everywhere: b
     # so does this: a repair that puts a rule in force in a market it was in force in nowhere
     # is a write about who decided things, and "the loader already checked" is how a second
     # door gets built.
-    confirmed_by = learning.require_a_person(confirmed_by)
+    who = learning.require_a_person(confirmed_by)
+    # The one combination the authority rule turns into a silent withdrawal: no markets and
+    # not everywhere is "no checklist", which is a standing rule that reaches nothing while
+    # still reading as standing. The loader cannot ask for it — `everywhere=not markets` —
+    # and a caller that does has made a mistake this function must not carry out quietly.
+    if not markets and not everywhere:
+        raise ValueError(
+            "A declared correction with no markets applies EVERYWHERE. Reconciling one to no "
+            "markets and not everywhere would leave it standing and in force nowhere.")
+    # `markets` here means WHAT THE FILE DECLARES, and an empty list is an answer — which is
+    # the whole difference from `graduate`, where the same argument means "unspecified, use
+    # what was observed". Said once, here, so the line that writes it can read `markets=...`
+    # and the contract is in the code rather than in this docstring.
+    markets = list(markets or [])
     entry = describe(conn, correction_id)
     on_file = entry.get("expected_in") or []
     if (bool(entry.get("applies_everywhere")) == everywhere
-            and (not markets or sorted(on_file) == sorted(markets))):
-        return False
-    store.graduate_correction(conn, correction_id, markets=markets or on_file,
-                              confirmed_by=entry.get("confirmed_by") or confirmed_by,
+            and sorted(on_file) == sorted(markets)):
+        return None
+    store.graduate_correction(conn, correction_id, markets=markets,
+                              # WHO CONFIRMED the rule is not who repaired the row. The rule
+                              # is the same rule and somebody already put their name to it;
+                              # overwriting that with whoever ran the upgrade would rewrite
+                              # the record of a decision as a side effect of a bug fix.
+                              confirmed_by=entry.get("confirmed_by") or who,
                               applies_everywhere=everywhere)
-    return True
+    # §11.1, for the same reason `graduate` does it: this write changes what a rule applies
+    # to, and a change to that with nobody's name on it is the one thing §11 refuses. It is a
+    # second row rather than an edit — the graduation's own authorship stays on file.
+    store.record_authorship(conn, subject_kind="correction", subject_key=correction_id,
+                            on_behalf_of=who,
+                            note=f"Reconciled against the rulebook: now in force in "
+                                 f"{'every market' if everywhere else ', '.join(markets)}, "
+                                 f"was {', '.join(on_file) or 'no market'}.")
+    fixed = describe(conn, correction_id)
+    return {**fixed, "repaired": True, "was": on_file,
+            "next_actions": actions.after_graduation(what=fixed["text"],
+                                                     markets=fixed["expected_in"],
+                                                     everywhere=everywhere)}
 
 
 def graduate(conn, correction_id: str, *, confirmed_by: str,
@@ -587,7 +652,15 @@ def graduate(conn, correction_id: str, *, confirmed_by: str,
     gate = graduation(conn, correction_id, from_rulebook=from_rulebook)
     if not gate["eligible"]:
         raise ValueError(gate["what_it_means"])
-    store.graduate_correction(conn, correction_id, markets=markets or gate["seen_in"],
+    # `gate["seen_in"]` is where this library WATCHED the rule recur, and it is the right
+    # answer for a rule the library inferred. It is the wrong answer for one the customer
+    # declared everywhere, and that case is the likeliest a house rule has: the library
+    # usually hears the rule from a deck before the file declares it, so on a FRESH database
+    # the first load produced `applies_everywhere = 1` with `expected_in = ["Peru"]` — in
+    # force in every market, reported as graduated in Peru. That is the contradictory row the
+    # upgrade repair exists to clean up, manufactured one start earlier by the load itself.
+    store.graduate_correction(conn, correction_id,
+                              markets=markets or ([] if everywhere else gate["seen_in"]),
                               confirmed_by=who, applies_everywhere=everywhere)
     # §11.1: the account beside the name, on the write that puts a rule in front of every
     # future brief in its markets.
@@ -596,9 +669,12 @@ def graduate(conn, correction_id: str, *, confirmed_by: str,
     entry = describe(conn, correction_id)
     return {**entry, "graduated": True,
             "next_actions": actions.after_graduation(what=entry["text"],
-                                                     markets=entry["expected_in"]),
+                                                     markets=entry["expected_in"],
+                                                     everywhere=everywhere),
             "what_it_means": (
-                f"Briefs in {', '.join(entry['expected_in'])} are now judged against this, on "
+                f"Briefs in "
+                f"{'every market' if everywhere else ', '.join(entry['expected_in'])} "
+                f"are now judged against this, on "
                 f"{who}'s confirmation. It is shown with the judgment as a standing correction "
                 f"with its provenance, so a finding can cite where the rule came from.")}
 
@@ -690,7 +766,6 @@ def standing_for(conn, campaign_id: str, *, markets: Optional[list] = None) -> d
                 "one — so none were applied. This is not a pass: pass `market`, or store the "
                 "brief and pass `campaign_id`.")), "standing": []}
 
-    wanted = {store.fold_market(m) for m in markets}
     standing = []
     for entry in store.corrections(conn):
         if entry["status"] != "expected":
@@ -703,16 +778,26 @@ def standing_for(conn, campaign_id: str, *, markets: Optional[list] = None) -> d
         # A rule the library INFERRED is still expected only where the evidence put it. That
         # is §8.3's anti-capture argument and nothing here touches it: only somebody who wrote
         # the rule down can say "everywhere", because only they know.
-        if not entry.get("applies_everywhere"):
-            # §13.5: the same `learning.reaches` its metric twin uses.
-            if not any(learning.reaches(entry["expected_in"], m) for m in wanted):
-                continue
+        #
+        # §13.5: the same market test its metric twin uses, and now the same one the REPLAY
+        # uses — that was the copy the flag below never reached.
+        if not learning.in_force(entry["expected_in"], markets,
+                                 everywhere=bool(entry.get("applies_everywhere"))):
+            continue
         standing.append({
             "correction_id": entry["id"],
             "text": entry["text"],
             "provenance": _provenance_of(conn, entry["id"]),
             "confirmed_by": entry["confirmed_by"],
-            "seen_in": entry["expected_in"],
+            # WHERE IT WAS SEEN, which is the `markets` column — kept by `touch_correction`
+            # from the sightings, and the same list `learning.gate` reports under this name.
+            # This read `expected_in`, which is the CHECKLIST: the key said "seen in" and the
+            # value was "graduated into", two facts this schema separates on purpose. It went
+            # unnoticed while they usually matched, and stopped matching the moment a rule
+            # could apply everywhere — a house rule read "seen in no market" to the customer
+            # who had just watched the library learn it from their own decks.
+            "seen_in": learning.fold_markets(entry["markets"]),
+            "expected_in": entry["expected_in"],
             "times_seen": entry["times_seen"],
         })
     return {
@@ -804,7 +889,8 @@ def gone_quiet(conn) -> list:
             "campaigns_without_it": skipped,
             "what_it_means": (
                 f"This has not come up in the last {skipped} campaigns in "
-                f"{', '.join(entry['expected_in']) or 'its markets'}. That may mean it is "
+                f"{'every market' if entry['applies_everywhere'] else (', '.join(entry['expected_in']) or 'its markets')}"
+                f". That may mean it is "
                 f"being followed, or that it stopped mattering — the library cannot tell "
                 f"which, so it is still being applied until somebody says otherwise."),
             "next_actions": actions.trim([

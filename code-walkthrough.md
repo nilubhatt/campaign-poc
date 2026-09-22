@@ -215,8 +215,12 @@ judgment; `vocabulary()` declares the tag vocabulary that comparison resolves sy
 
 The gate both metric keys and client rules pass through. `gate()` counts **breadth**
 (`distinct_briefs`, `subject_markets`, partners) rather than repetition; `require_a_person()`
-enforces that graduation is always somebody's decision; `fold_markets()` and `reaches()` are the
-*one* folded market-membership test, extracted after the same loop was found in seven places.
+enforces that graduation is always somebody's decision; `fold_markets()`, `reaches()` and
+`in_force()` are the *one* folded market-membership test, extracted after the same loop was
+found in seven places. `reaches()` answers it for one market; `in_force()` answers it for the
+several a campaign runs in, and carries the `applies_everywhere` flag a customer's declared
+house rule sets — the eighth copy was the one in `replay` that had never heard of that flag, so
+a rule in force in every market reached no judgment in the report.
 
 ### `metrics.py` — the metric registry
 
@@ -261,9 +265,14 @@ knows without anyone typing it.
 
 ### `replay.py` — replay as a report
 
-`run()` re-applies today's rules to past briefs and reports what *would* have been flagged.
-`if_graduated()` answers "what would change if this rule became standing" — so graduating a rule
-is a decision somebody can see the consequences of first.
+`run()` reports what a saved judgment was **not checked against** — which measures and rules
+became expected after it was written, and whether a rule it actually cited has since been
+withdrawn. It does not say what would have been flagged and deliberately cannot: whether a
+brief breaks a rule is a judgment, the server cannot re-run the model, and the offer to judge
+it again is the honest version of that question. `if_graduated()` answers "what would change if
+this rule became standing" — so graduating a rule is a decision somebody can see the
+consequences of first, and for a house rule the customer declared it counts every market
+rather than the one the rule happened to be overheard in.
 
 ### `agreement.py` — the instrument
 

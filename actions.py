@@ -355,15 +355,19 @@ def _note_what_the_client_said(campaign_id: str, commentary: Optional[list],
     return out
 
 
-def after_graduation(*, what: str, markets: list) -> list[dict]:
+def after_graduation(*, what: str, markets: list, everywhere: bool = False) -> list[dict]:
     """After a measure or a rule joins the checklist (§8.7).
 
     This is the exact instant the replay becomes non-empty, and it was the only instant
     nothing pointed at it. `replay_rules` was referenced nowhere in the product but its own
     definition — the third time this phase has shipped a tool the model would have to know
     existed and spontaneously call (§8.3's gate, §8.6's `note_correction`, and this).
+
+    `everywhere` is §12.3's declared house rule, which has no market list precisely because it
+    has no market: offering "briefs in these markets are checked against it" about a rule that
+    applies to all of them names nothing a reader can hold on to.
     """
-    where = ", ".join(markets) or "these markets"
+    where = "every market" if everywhere else (", ".join(markets) or "these markets")
     return trim([action(
         f"See which stored campaigns and judgments \u201c{what[:50]}\u201d now applies to",
         "replay_rules",
