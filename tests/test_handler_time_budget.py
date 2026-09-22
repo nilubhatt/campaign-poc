@@ -248,11 +248,18 @@ def test_the_response_says_how_many_images_were_embedded_of_how_many(conn, tmp_p
 
     deck = _deck_with_images(tmp_path, 4)
     calls = {"n": 0}
+    # A CLOCK THIS TEST OWNS, rather than a race with the machine it runs on. The budget
+    # starts when ingest starts and the image loop is the last thing it does, so extraction
+    # and reuse-checking can spend all of it before the first embed — and then "some but not
+    # all" is "none", which is a true statement about a loaded CI runner and nothing about
+    # this code. It failed that way once. The fake embed advances the clock instead of
+    # sleeping, so the boundary falls in exactly one place every time.
+    clock = {"t": 0.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
 
     def one_then_stop(path):
         calls["n"] += 1
-        if calls["n"] > 1:
-            time.sleep(0.3)
+        clock["t"] += 10.0          # the first embed spends the whole budget
         return [0.0] * config.CLIP_EMBED_DIM
 
     monkeypatch.setattr(config, "TOOL_TIME_BUDGET_SECONDS", 0.2)
@@ -262,7 +269,7 @@ def test_the_response_says_how_many_images_were_embedded_of_how_many(conn, tmp_p
                                   confirm=True)
 
     assert result["images_total"] == 4
-    assert 0 < result["images_embedded"] < 4
+    assert result["images_embedded"] == 1, "one fits the budget and the rest do not"
     assert result["images_checked"] is True, "all four were still reuse-checked"
 
 
