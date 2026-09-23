@@ -36,7 +36,12 @@ jobs:
           python -m pip install --upgrade pip
           # CPU wheels only: this job converts a checkpoint, it never runs the model on a GPU.
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install safetensors
+          # `numpy` is not optional, whatever the import list suggests: `safetensors.torch`
+          # converts every tensor through an ndarray on save, so without it `save_file` raises
+          # `ModuleNotFoundError` halfway through the conversion. It was an implicit
+          # dependency of an older safetensors and became an explicit one, which broke this
+          # job on a release tag with nothing in this repository having changed.
+          pip install safetensors numpy
 
       - name: Fetch the pinned upstream fp32 checkpoint
         run: |
