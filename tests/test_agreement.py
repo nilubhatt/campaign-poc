@@ -201,3 +201,112 @@ def test_the_command_line_says_what_to_do_about_an_empty_set():
                          capture_output=True, text=True, cwd=".").stdout
     assert "product owner" in out.lower()
     assert "golden_set.json" in out
+
+
+# ── where the agreement holds, not only how high it averages ────────────────
+#
+# D56 and D69 ask two questions a mean cannot answer, and the tracker said of both that "the
+# harness exists and runs; what is missing is the input". It ran, and returned a flat figure:
+# ready for the headline and for neither stratification. So the golden set arriving would not
+# have closed the rows that were waiting for it.
+
+
+def _stub_context(fired, evidence):
+    return lambda conn, brief: {"missing_input_fired": fired(brief),
+                                "evidence_count": evidence(brief)}
+
+
+def test_agreement_is_reported_where_the_library_is_thin_and_where_it_is_not(conn):
+    """D69, in its own words: "does verdict agreement drop where the library is thin?" A
+    product that is excellent on well-covered briefs and guesses on thin ones reports the same
+    headline as one that is mediocre everywhere — and only the first is worth shipping while
+    the library fills up."""
+    briefs = [{"id": "thick", "subject_title": "Lima", "proposal_text": "A push.",
+               "expected_verdict": "approve"},
+              {"id": "thin", "subject_title": "Tokyo", "proposal_text": "A push.",
+               "expected_verdict": "approve"}]
+
+    def judge(brief, run_number):
+        # Agrees where there is evidence; guesses where there is none.
+        if brief["id"] == "thick":
+            return {"verdict": "approve"}
+        return {"verdict": "approve" if run_number == 1 else "revise"}
+
+    report = agreement.run(conn, briefs, judge=judge, runs=3,
+                           context=_stub_context(lambda b: False,
+                                                 lambda b: 5 if b["id"] == "thick" else 0))
+
+    by_evidence = report["verdict_agreement_by"]["evidence"]
+    assert by_evidence["several"]["verdict_agreement"] == 1.0
+    assert by_evidence["none"]["verdict_agreement"] < 0.5, by_evidence
+    assert 0.5 < report["verdict_agreement"] < 1.0, (
+        "and the flat figure hides both, which is why the split exists")
+
+
+def test_agreement_is_reported_for_the_briefs_the_missing_input_line_fired_on(conn):
+    """D56. The line says a brief is missing something the library would need; the question is
+    whether the verdicts on those briefs agree less with the client's. Averaged together, the
+    answer is unavailable in either direction."""
+    briefs = [{"id": f"b{n}", "subject_title": f"Brief {n}", "proposal_text": "A push.",
+               "expected_verdict": "approve"} for n in range(2)]
+
+    def judge(brief, run_number):
+        return {"verdict": "approve" if brief["id"] == "b0" else "revise"}
+
+    report = agreement.run(conn, briefs, judge=judge, runs=2,
+                           context=_stub_context(lambda b: b["id"] == "b1", lambda b: 3))
+
+    by_line = report["verdict_agreement_by"]["missing_input_line"]
+    assert by_line["did_not_fire"]["verdict_agreement"] == 1.0
+    assert by_line["fired"]["verdict_agreement"] == 0.0
+    assert by_line["fired"]["briefs"] == 1
+
+
+def test_every_stratified_figure_says_how_many_briefs_it_rests_on(conn):
+    """"1.0 agreement" over one brief and over fourteen are different claims, and a stratified
+    report is exactly where one brief can look like a finding."""
+    briefs = [{"id": "only", "subject_title": "Lima", "proposal_text": "A push.",
+               "expected_verdict": "approve"}]
+    report = agreement.run(conn, briefs, judge=lambda b, n: {"verdict": "approve"}, runs=3,
+                           context=_stub_context(lambda b: True, lambda b: 1))
+
+    for split in report["verdict_agreement_by"].values():
+        assert all("briefs" in figure for figure in split.values()), split
+    assert report["verdict_agreement_by"]["evidence"]["thin"]["briefs"] == 1
+
+
+def test_what_the_server_refused_during_the_run_is_counted(conn):
+    """D9's second half: "count rule-2 rejections to detect systematic severity downgrading".
+    A guardrail breach filed as a note is refused by the validator, so it never reaches a
+    verdict and no agreement figure can see it — a model quietly downgrading severities looks
+    like a model that agrees. The counter is the only witness.
+
+    Counted across the run rather than read from the database, so the figure belongs to this
+    measurement and not to everything the library has ever refused."""
+    import core
+
+    try:                                   # refused, and BEFORE the run starts
+        core.save_evaluation(conn, subject_title="Earlier", campaign_id=None,
+                             verdict="revise", summary="x", approve_if="y",
+                             findings=[{"severity": "note", "kind": "guardrail_breach",
+                                        "finding": "before the run", "fix": "z"}])
+    except ValueError:
+        pass
+    briefs = [{"id": "b0", "subject_title": "Lima", "proposal_text": "A push.",
+               "expected_verdict": "revise"}]
+
+    def judge(brief, run_number):
+        try:
+            core.save_evaluation(conn, subject_title=brief["subject_title"], campaign_id=None,
+                                 verdict="revise", summary="Seeds four.", approve_if="Seed one.",
+                                 findings=[{"severity": "note", "kind": "guardrail_breach",
+                                            "finding": "Seeds four colourways", "fix": "Seed one"}])
+        except ValueError:
+            pass                      # the refusal is the thing being counted
+        return {"verdict": "revise"}
+
+    report = agreement.run(conn, briefs, judge=judge, runs=2,
+                           context=_stub_context(lambda b: False, lambda b: 2))
+
+    assert report["refusals_during_the_run"].get("breach_as_note") == 2, (
+        report["refusals_during_the_run"])

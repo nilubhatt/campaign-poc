@@ -76,12 +76,64 @@ def _recall(expected: list, raised: list) -> Optional[float]:
     return hit / len(expected)
 
 
-def run(conn, briefs: list, *, judge: Callable, runs: int = 3) -> dict:
-    """Measure the three figures over a golden set.
+# How much the library held for a brief, in the three bands a reader can act on. D69 asks
+# whether agreement DROPS where the library is thin, and an average over everything cannot
+# answer it — a product that is excellent on well-covered briefs and guesses on thin ones
+# reports the same headline figure as one that is mediocre everywhere.
+_EVIDENCE_BANDS = (("none", 0, 0), ("thin", 1, 2), ("several", 3, None))
+
+
+def _band(count: int) -> str:
+    for name, low, high in _EVIDENCE_BANDS:
+        if count >= low and (high is None or count <= high):
+            return name
+    return "several"
+
+
+def _context(conn, brief: dict) -> dict:
+    """What the judging client SAW for this brief, for the strata D56 and D69 ask for.
+
+    Read from `prepare_evaluation` rather than recomputed, because the question is about the
+    evidence package the judgment was actually made on. Read-only: this writes nothing.
+    """
+    import core
+
+    prepared = core.prepare_evaluation(
+        conn, subject_title=brief["subject_title"], proposal_text=brief["proposal_text"],
+        market=brief.get("market"), campaign_id=brief.get("campaign_id"))
+    return {"missing_input_fired": bool(prepared.get("most_valuable_missing_input")),
+            "evidence_count": prepared.get("evidence_count") or 0}
+
+
+def _stratify(measured: list, key: Callable) -> dict:
+    """Agreement within each group, and how many briefs the figure rests on.
+
+    The count travels with every figure: "1.0 agreement" over one brief and over fourteen are
+    different claims, and a stratified report is exactly where a single brief can look like a
+    finding.
+    """
+    groups: dict = {}
+    for brief in measured:
+        if brief["verdict_agreement"] is None:
+            continue
+        groups.setdefault(key(brief), []).append(brief["verdict_agreement"])
+    return {name: {"verdict_agreement": sum(v) / len(v), "briefs": len(v)}
+            for name, v in sorted(groups.items())}
+
+
+def run(conn, briefs: list, *, judge: Callable, runs: int = 3,
+        context: Optional[Callable] = None) -> dict:
+    """Measure the three figures over a golden set, and the strata the tracker owes.
 
     `judge(brief, run_number)` returns a saved-evaluation-shaped dict: at minimum a `verdict`
     and a `findings` list. It is supplied by the caller because the model is on the other side
     of the protocol; in tests it is a stub, and on a release it is a real client.
+
+    `context(conn, brief)` is what the client saw, and defaults to asking
+    `prepare_evaluation`. D56 and D69 are both questions about WHERE agreement holds rather
+    than how high it is on average, and neither can be answered from a flat mean — which is
+    all this returned while three tracker rows said the harness was ready and only the input
+    was missing. It was ready for the headline and for none of the three stratifications.
     """
     for brief in briefs:
         missing = [f for f in REQUIRED_FIELDS if not brief.get(f)]
@@ -91,8 +143,18 @@ def run(conn, briefs: list, *, judge: Callable, runs: int = 3) -> dict:
                 f"A brief with no client-agreed verdict cannot measure agreement with one — "
                 f"that is a fault in the set, not a judgment the product failed.")
 
+    # WHAT THE SERVER REFUSED during this run, counted before and after so the figures belong
+    # to this measurement rather than to the database's whole history. D9's second half:
+    # `breach_as_note` is the model filing a guardrail breach below `should_fix`, and a rise
+    # in it is systematic severity downgrading — which a verdict-agreement figure cannot see,
+    # because the refused finding never reaches a verdict.
+    import store
+
+    refusals_before = store.refusal_counts(conn)
+
     measured = []
     for brief in briefs:
+        seen = (context or _context)(conn, brief)
         verdicts, recalls, errors = [], [], 0
         for n in range(1, runs + 1):
             try:
@@ -112,6 +174,7 @@ def run(conn, briefs: list, *, judge: Callable, runs: int = 3) -> dict:
         measured.append({
             "id": brief["id"],
             "expected_verdict": brief["expected_verdict"],
+            **seen,
             "verdicts": verdicts,
             "verdict_agreement": (len(agreed) / len(verdicts)) if verdicts else None,
             "finding_recall": (sum(recalls) / len(recalls)) if recalls else None,
@@ -132,6 +195,16 @@ def run(conn, briefs: list, *, judge: Callable, runs: int = 3) -> dict:
         "finding_recall": (sum(b["finding_recall"] for b in with_recall) / len(with_recall)
                            if with_recall else None),
         "self_consistency": _self_consistency(measured),
+        # WHERE the agreement holds, not only how high it averages.
+        "verdict_agreement_by": {
+            "missing_input_line": _stratify(
+                measured, lambda b: "fired" if b["missing_input_fired"] else "did_not_fire"),
+            "evidence": _stratify(measured, lambda b: _band(b["evidence_count"])),
+        },
+        "refusals_during_the_run": {
+            reason: count - refusals_before.get(reason, 0)
+            for reason, count in store.refusal_counts(conn).items()
+            if count - refusals_before.get(reason, 0) > 0},
         # §7.6's stamp, on the measurement itself. A figure with no record of the conditions
         # it was measured under cannot be compared with last release's, and a change in it
         # cannot be attributed to anything.
