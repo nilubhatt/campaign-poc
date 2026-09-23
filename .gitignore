@@ -7,3 +7,8 @@ campaign-poc-data/
 build/
 dist/
 *.spec.bak
+.weights-cache/
+/models/
+
+# Written by build.sh/build.ps1/CI; never committed (§3.2).
+build_info.txt

@@ -87,7 +87,7 @@ def test_delete_campaign_purges_image_asset_vectors_and_files(conn, tmp_path):
 def test_delete_campaign_cascades_metrics_and_detaches_evaluations(conn):
     cid = store.insert_campaign(conn, title="X")
     store.add_metrics(conn, cid, detail="did well")
-    eid = store.insert_evaluation(conn, subject_title="X", analysis="looks good", campaign_id=cid)
+    eid = store.insert_evaluation(conn, subject_title="X", verdict="approve", summary="looks good", findings=[], campaign_id=cid)
 
     store.delete_campaign(conn, cid)
 

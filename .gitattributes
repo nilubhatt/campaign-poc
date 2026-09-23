@@ -1,0 +1,21 @@
+# Shipped scripts, pinned (§3.3, defect 11).
+#
+# The encoding half of defect 11 is asserted by tests/test_shipped_script_encoding.py, which
+# checks the bytes in the working tree. This file covers the way those bytes can change
+# without anybody editing the file: a checkout on a machine with core.autocrlf=true rewrites
+# every LF to CRLF, which turns a shell script's shebang into `/usr/bin/env bash\r` and makes
+# the kernel report "bad interpreter" about a file that plainly exists.
+#
+# eol=lf on the Unix scripts, eol=crlf on the Windows ones — each gets what its interpreter
+# expects, on every machine, regardless of local git config.
+*.sh    text eol=lf
+*.ps1   text eol=crlf
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+*.iss   text eol=crlf
+
+# Test fixtures are compared byte for byte; never let git touch them.
+*.pptx  binary
+*.pdf   binary
+*.png   binary
+*.safetensors binary

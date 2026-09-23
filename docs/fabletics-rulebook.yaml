@@ -1,0 +1,459 @@
+# Fabletics — the customer rulebook (§12.3).
+#
+# WHAT THIS IS
+#
+# Every rule, tag, criterion, checklist item and standing correction from the September 2026
+# product review, transcribed section by section — including the presenter notes it carries as
+# PDF annotations, which say how the rules are meant to be applied.
+#
+# WHAT `why` SAYS, AND WHY IT IS WORDED THE WAY IT IS
+#
+# An earlier version of this file claimed "nothing here is invented" and then carried thirteen
+# `why` fields that were nobody's but mine — "a copyright strike takes the asset down
+# mid-flight", "the audience reacts to it". Review checked every one against the source and
+# found all thirteen absent from it. They read as the CLIENT'S stated reasoning and they reach
+# every evaluation, which makes them the confident unfounded claim this product exists to
+# refuse, inside the file that is supposed to carry the client's own rules.
+#
+# So every `why` now says where the rule came from and, where the review gives a reason, gives
+# the review's own words in quotation marks. Several rules simply have no stated rationale in
+# the source — they are listed as non-negotiables and nothing more — and that is what theirs
+# say. A rule with no reason is weaker than one with a reason, and pretending otherwise is
+# worse than either.
+#
+# HOW IT GETS PUT IN FORCE
+#
+# Automatically, on a fresh install. `campaign-intelligence init` — which all three installers
+# run, before the gate — copies this file into the data directory when there is no rulebook
+# there yet, and says so. `health-check` then reports the rulebook as
+# `core-1.0+fabletics-2026.09`, naming both the product's and yours.
+#
+# An existing rulebook is NEVER overwritten: yours is yours, and an upgrade that replaced the
+# rules somebody wrote would lose them silently. To take a later version of this file, copy it
+# yourself:
+#
+#     cp fabletics-rulebook.yaml "<data directory>/rulebook.yaml"    # then restart
+#
+# WHY INSTALLED RATHER THAN BAKED INTO THE PRODUCT DEFAULT
+#
+# The product ships generic: the `rulebook.yaml` in the install directory is empty and says at
+# length why. These are ONE customer's rules, and putting them in the product default would
+# make every install of this product Fabletics' — which §12.3 rules out in as many words
+# ("shipped as an example/customer file, not the product default"), and which 126 tests
+# encode, because an empty default is what makes the first-run and empty-library behaviour
+# what it is.
+#
+# The source document asks for "the defaults below already populated, so the product has
+# opinions on day one", and for a Fabletics deployment that is right — so `init` installs it,
+# which is the same outcome without one customer's rules becoming every install's. Presence of
+# this file beside the binary is the switch: a build made without it stays generic.
+#
+# The data directory is also the one the product promises to keep. A rulebook written into the
+# install directory is a rulebook the next upgrade replaces wholesale, silently, having told
+# you it was in force.
+#
+# Your file LAYERS over the product's: your rules are added to its, and a rule of yours with
+# the same `id` replaces its. The rules are read once per process, so a judgment cannot depend
+# on when in a session it was made — restart after editing.
+
+version: "fabletics-2026.09"
+
+describes: >-
+  Fabletics — the brand guardrails, tag taxonomy, influencer criteria, recurring partner
+  feedback, 360° launch checklist and scorecard from the September 2026 product review, plus
+  the ten standing corrections extracted from real client feedback across six briefs.
+
+support: "Your Fabletics brand lead — replace this with a name, a channel or an email"
+
+# ─── the rules ───────────────────────────────────────────────────────────────────────────
+#
+# `severity: blocking` is the customer's own phrase "non-negotiables — hard guardrails, not
+# preferences". A blocking rule broken by a brief is a `guardrail_breach`, which is a
+# different class of finding from a departure from precedent, and the product keeps them
+# apart on purpose: one is "this breaks your own rule", the other is "this differs from what
+# you did in Peru".
+#
+# `watch_for` is the words that would show the rule is in play. They make the check cheap and
+# they are a HINT, never the judgment — a brief that says none of them can still breach.
+
+rules:
+
+  # ─ 1 · Non-negotiables — hard guardrails, not preferences ─────────────────────────────
+  - id: no-licensed-music
+    rule: >-
+      No licensed music. No trending or copyrighted tracks unless properly licensed. Use
+      approved royalty-free libraries only.
+    severity: blocking
+    why: >-
+      Listed as a non-negotiable in the September 2026 product review — "hard guardrails,
+      not preferences". The review gives no rationale beyond that, and none is invented
+      here.
+    watch_for: ['trending audio', 'trending sound', 'licensed track', 'popular song',
+                'chart music', 'viral sound']
+
+  - id: no-ai-imagery
+    rule: >-
+      No AI-generated imagery. Do not recommend AI-made campaign images for social. Use
+      approved assets, photography, UGC, or local shoots.
+    severity: blocking
+    why: >-
+      Listed as a non-negotiable in the September 2026 product review — "hard guardrails,
+      not preferences". The review gives no rationale beyond that, and none is invented
+      here.
+    watch_for: ['ai-generated', 'ai imagery', 'midjourney', 'generative imagery',
+                'ai-made', 'generated image']
+
+  - id: no-competitor-conflict
+    rule: >-
+      No competitor brand conflicts. Influencers used for Fabletics should not publish
+      Fabletics content while wearing, tagging, or actively promoting competitor brands.
+    severity: blocking
+    why: >-
+      A non-negotiable in the September 2026 product review, which states the scope itself:
+      "Note the precise scope — this is about the creator's own feed, not only about the
+      Fabletics asset."
+    watch_for: ['exclusivity waived', 'no exclusivity', 'competitor', 'adidas', 'nike',
+                'lululemon', 'gymshark', 'alo yoga']
+
+  - id: approval-before-publishing
+    rule: >-
+      Approval before publishing. Content must follow Global review, launch timing, tagging,
+      disclosure and embargo requirements.
+    severity: blocking
+    why: >-
+      Listed as a non-negotiable in the September 2026 product review: "Content must follow
+      Global review, launch timing, tagging, disclosure and embargo requirements."
+    watch_for: ['publish immediately', 'no approval needed', 'go live', 'embargo',
+                'pre-approval', 'global review']
+
+  # ─ 3 · Influencer selection criteria ──────────────────────────────────────────────────
+  #
+  # The guiding principle in the source: "engagement quality and brand alignment matter more
+  # than follower count". These are `should_fix` rather than blocking because they are tests
+  # a roster should pass, not lines it must never cross — except the competitor conflict
+  # above, which is blocking on its own.
+  - id: creator-engagement-quality
+    rule: >-
+      Judge creators on engagement rate and meaningful interactions, never on follower count
+      alone. Every profile on a roster carries its engagement rate.
+    severity: should_fix
+    why: >-
+      The September 2026 product review's guiding principle for selection: "engagement quality
+      and brand alignment
+      matter more than follower count." Its red-flag list gives the case — "Peru's
+      ambassador was approved at 2.2M followers and 0.26% ER while smaller profiles were
+      rejected for low interaction — this exact flag, missed."
+    watch_for: ['followers', 'follower count', 'reach', 'engagement rate', 'ER']
+
+  - id: creator-audience-relevance
+    rule: >-
+      Creator audiences are relevant to the local market the campaign runs in.
+    severity: should_fix
+    why: >-
+      Selection criterion in the September 2026 product review: "Audience relevance to the
+      local market."
+    watch_for: ['audience', 'local market', 'geo', 'demographic']
+
+  - id: creator-brand-fit
+    rule: >-
+      Creators fit the Fabletics lifestyle and activewear positioning, and the brief says why
+      each one is on the list rather than only that they are.
+    severity: should_fix
+    why: >-
+      Selection criterion in the September 2026 product review: "Brand fit with Fabletics
+      lifestyle and activewear positioning."
+
+  - id: creator-content-quality
+    rule: >-
+      Creators show strong content quality, lighting and storytelling, and a clean recent
+      feed.
+    severity: should_fix
+    why: >-
+      Selection criteria in the September 2026 product review: "Strong content quality,
+      lighting and storytelling" and "Clean recent feed with no direct competitor
+      conflicts."
+    watch_for: ['content quality', 'lighting', 'storytelling', 'recent feed']
+
+  # ─ 4 · Influencer red flags — the agent must raise these ──────────────────────────────
+  - id: flag-large-following-low-engagement
+    rule: >-
+      Raise any creator with a large following and low engagement.
+    severity: should_fix
+    why: >-
+      Red flag in the September 2026 product review: "Large following with low engagement.
+      Peru's ambassador was approved at 2.2M followers and 0.26% ER while smaller profiles
+      were rejected for low interaction — this exact flag, missed."
+    watch_for: ['2.2m', 'followers', 'engagement rate', '0.2', '0.3']
+
+  - id: flag-promotional-or-unclear-disclosure
+    rule: >-
+      Raise an overly promotional creator style, and any unclear disclosure or tagging
+      behaviour.
+    severity: should_fix
+    why: >-
+      Red flags in the September 2026 product review: "Overly promotional creator style" and
+      "Unclear disclosure or tagging behaviour."
+    watch_for: ['#ad', 'sponsored', 'paid partnership', 'disclosure', 'tagging']
+
+  # ─ 5 · Recurring partner feedback — shipped as evaluation logic ───────────────────────
+  #
+  # Source guidance (presenter note): "Recurring partner feedback is one of the strongest ways
+  # to teach the agent your standards. This turns repeated coaching into reusable evaluation
+  # logic."
+  - id: content-execution-standards
+    rule: >-
+      Increase collab posts; use vertical-first Reels and Stories; improve event recap
+      storytelling; localise content to the market.
+    severity: should_fix
+    why: >-
+      Recurring partner feedback in the September 2026 product review. Source guidance,
+      carried as a presenter note: "Recurring partner feedback is one of the strongest ways
+      to teach the agent your standards. This turns repeated coaching into reusable
+      evaluation logic."
+    watch_for: ['collab', 'reels', 'stories', 'vertical', 'recap', 'localise', 'localize']
+
+  - id: community-management-standards
+    rule: >-
+      Monitor negative comments; keep Story Highlights updated; tag Fabletics and partners
+      correctly; respond with a brand-safe tone.
+    severity: should_fix
+    why: >-
+      Recurring partner feedback in the September 2026 product review, under community
+      management.
+    watch_for: ['comments', 'highlights', 'tagging', 'community', 'moderation']
+
+  - id: event-standards
+    rule: >-
+      Events plan a branded presence, capture photo and video content, and submit a recap
+      deck with KPIs.
+    severity: should_fix
+    why: >-
+      Recurring partner feedback in the September 2026 product review, under event
+      standards.
+    watch_for: ['event', 'recap deck', 'kpi', 'branded presence', 'signage']
+
+# ─── what a brief must carry (the 360° launch checklist) ─────────────────────────────────
+#
+# 6 · "Check every channel before Approve." The source names six things to ALWAYS flag when
+# absent, which is precisely what `expects` is for: a missing input reported with the words
+# that would show it had arrived.
+#
+# `looks_like` is REQUIRED — without it a gap can be reported forever and never closed, which
+# is a gap everybody learns to ignore.
+
+expects:
+  - id: call-to-action
+    input: A call to action, stated in the words the audience will see
+    why: >-
+      Listed under "Always flag" in the September 2026 product review's 360° launch
+      checklist: "missing CTA". The review gives examples of what it means — "Visit the
+      Fabletics store", "RSVP", "Shop the launch in-store" — and no rationale beyond that.
+    looks_like: ['cta', 'call to action', 'visit the fabletics store', 'rsvp',
+                 'shop the launch', 'shop in-store']
+
+  - id: store-traffic-plan
+    input: A store traffic plan — how this drives somebody into a store
+    why: >-
+      Listed under "Always flag" in the September 2026 product review's 360° launch
+      checklist: "store traffic plan". The checklist's Events / Retail row names the same
+      thing: "store traffic CTA (visit, RSVP, shop in-store)".
+    looks_like: ['store traffic', 'footfall', 'visit the store', 'store locator',
+                 'in-store', 'drive traffic']
+
+  - id: paid-or-organic-boost
+    input: Whether the activity is paid, organic, or boosted — and with what budget
+    why: >-
+      Listed under "Always flag" in the September 2026 product review's 360° launch
+      checklist: "paid or organic boost".
+    looks_like: ['paid', 'organic', 'boost', 'media spend', 'amplification', 'budget']
+
+  - id: partner-collab
+    input: The partner or collaborator plan, with handles
+    why: >-
+      Listed under "Always flag" in the September 2026 product review's 360° launch
+      checklist: "partner collab". Its Social row names "influencer and collab posts".
+    looks_like: ['collab', 'partner', 'co-branded', 'handles', '@']
+
+  - id: ecom-link-path
+    input: The e-commerce path — landing page or PDP, availability, and the UTM links
+    why: >-
+      Listed under "Always flag" in the September 2026 product review's 360° launch
+      checklist: "e-com link path". Its E-com / Wholesale row names "landing page and PDP
+      ready", "product availability" and "store locator, UTM links and traffic path".
+    looks_like: ['landing page', 'pdp', 'utm', 'link path', 'availability', 'store locator']
+
+  - id: kpi-plan
+    input: The KPI plan — what success is, in numbers, before the campaign runs
+    why: >-
+      Listed under "Always flag" in the September 2026 product review's 360° launch
+      checklist: "KPI plan".
+    looks_like: ['kpi', 'target', 'goal', 'success metric', 'reach', 'engagement',
+                 'sell-through', 'attendance']
+
+# ─── your words ──────────────────────────────────────────────────────────────────────────
+#
+# Each entry is a name this product knows, then the other spellings used for it. Resolved when
+# two values are compared, never written into your records: your words stay in the row.
+
+vocabulary:
+
+  # 2 · Tag taxonomy — tags, not buckets.
+  #
+  # Source guidance (presenter note): "The category labels should be used as tags, not rigid
+  # buckets. This will help the model separate taste, brand fit, and performance."
+  #
+  # OVERLAP IS EXPECTED, and the product is built for it: one campaign can be both LIKED and
+  # UNDERPERFORMED — strong creative with weak performance — and collapsing those into one
+  # verdict is the thing this taxonomy exists to prevent.
+  tags:
+    liked: ['like', 'on brand', 'on-brand', 'strong creative', 'good storytelling',
+            'strong market fit']
+    performed_well: ['performed', 'strong performance', 'kpi win', 'over-delivered',
+                     'beat target', 'high reach']
+    not_liked: ['dislike', 'off brand', 'off-brand', 'low quality', 'weak fit',
+                'poor localisation', 'poor localization']
+    underperformed: ['under-performed', 'missed target', 'below goal', 'weak performance',
+                     'did not meet goals']
+
+  # 6 · The four channels the 360° checklist walks, so a missing one is a named gap rather
+  # than a silence.
+  channels:
+    social: ['organic social', 'instagram', 'ig', 'tiktok', 'reels', 'stories']
+    email_crm: ['email', 'crm', 'edm', 'newsletter', 'lifecycle']
+    events_retail: ['events', 'retail', 'store', 'in-store', 'activation', 'launch event']
+    ecom_wholesale: ['ecom', 'e-com', 'e-commerce', 'wholesale', 'pdp', 'site']
+
+  # The markets named in the source document, with the region each belongs to. A region is a
+  # GROUPING of markets, not a market — so a campaign in Peru whose region is LATAM counts as
+  # ONE market rather than two, which matters because "seen in at least two markets" is what
+  # stops one partner's house style becoming everybody's standing requirement.
+  markets:
+    Peru:
+      also: ['perú']
+      region: LATAM
+    Mexico:
+      also: ['mx', 'méxico']
+      region: LATAM
+    Colombia:
+      also: ['co']
+      region: LATAM
+    Australia:
+      also: ['au', 'aus']
+      region: APAC
+    UAE:
+      also: ['united arab emirates', 'dubai']
+      region: MEA
+
+# ─── the scorecard ───────────────────────────────────────────────────────────────────────
+#
+# 7 · "The same six criteria, every time." Required output: Approve / Revise / Reject, with a
+# short explanation and brand-safe improvement notes.
+#
+# Source guidance (presenter note): "The scorecard makes the model explain its reasoning in a
+# structured way. It also gives leadership confidence that the output is not arbitrary."
+
+scorecard:
+  - name: Brand alignment
+    asks: >-
+      Does it look and feel like Fabletics?
+
+  - name: Creative quality
+    asks: >-
+      How is this planned and executed differently from what came before?
+
+  - name: Audience relevance
+    asks: >-
+      Does it fit the local market and consumer?
+
+  - name: Influencer fit
+    asks: >-
+      Does the creator have the engagement, and no competitor conflict?
+
+  - name: Compliance
+    asks: >-
+      No licensed music, no AI imagery, correct tags and approvals?
+
+  - name: Business objective
+    asks: >-
+      Does it support awareness, engagement, traffic or retail goals?
+
+# ─── standing corrections ────────────────────────────────────────────────────────────────
+#
+# A different thing from a rule above, and the product keeps them apart on purpose:
+#
+#   a RULE        is something you wrote down. It applies to every brief, everywhere, and a
+#                 finding cites it by `id`.
+#   a CORRECTION  is something the library watched RECUR — the same note coming back on deck
+#                 after deck — until somebody confirmed it was a rule rather than a one-off.
+#                 It applies in the markets it was seen in, and it carries the provenance of
+#                 where it came from.
+#
+# These ten were not in the guardrails document. They were extracted from real client feedback
+# across six briefs, and the source calls them "the most valuable content the library holds,
+# because they are the things this client repeats". A correction normally has to earn its place
+# — seen in three campaigns across two markets — because the library is GUESSING that a
+# recurring note is a rule. Declared here they are not a guess, so they skip that test; each
+# still needs a person's name against putting it in force.
+#
+# `provenance` is required. Without it a judgment citing the correction can say only "the
+# library says so", which is the unfounded confident claim this product is built against.
+#
+# NONE of these carries a `markets` list, and an earlier version of this file carried three.
+# The source's table has a column headed "Where it came from", and three of its cells name a
+# market — "Peru (30 influencers, praised); instructed independently in Australia", "Colombia
+# slide 6", "Mexico slides 9 and 10". Those are PROVENANCE. Nothing in the review says the
+# single-colourway rule applies only in Peru and Australia, or that stating the duration of an
+# OOH placement is a Mexican concern; read as scope they would SUPPRESS a generally worded
+# client standard everywhere else, which is a worse failure than applying it too widely and
+# one nobody would see. Where it came from is in `provenance`, where the source put it.
+#
+# `markets` remains available and is carried correctly when present — if the client says a
+# rule is market-specific, that is their call to make and the loader will honour it. It is not
+# a call to be made by reading a provenance column.
+
+corrections:
+  - text: >-
+      Every deliverable needs a date. Content angle, posting date and requirements per asset,
+      plus hashtags and collab handles.
+    provenance: "JD SEA slide 23 — named by the client as the standard every brief should follow; seen in 6 briefs"
+
+  - text: >-
+      Photo time goes before the workout, not after, so talent appear fresh in imagery selling
+      the garments.
+    provenance: "JD SEA slide 33 agenda — endorsed with this one correction; repeated"
+
+  - text: >-
+      Seed a single colourway. Identical monochromatic outfits across all recipients, for
+      cohesive social storytelling.
+    provenance: "Peru (30 influencers, praised); instructed independently in Australia — 2 markets"
+
+  - text: >-
+      Show built execution, not mockups. Photographs of what exists read as commitment;
+      renders of unshipped assets read as possibility.
+    provenance: "Mexico slide 28 praised vs slide 13 criticised — both minimal-text visuals"
+
+  - text: >-
+      Brand arrival before celebrity collection. A store opening needs solid weeks of general
+      awareness first, and each collection needs its own moment.
+    provenance: "Colombia slide 6 — still only partly adopted in Colombia v2"
+
+  - text: >-
+      A grand opening needs real activity. A photobooth or claw machine, named explicitly.
+    provenance: "Colombia slide 25 — adopted in Colombia v2 and, independently, in UAE"
+
+  - text: >-
+      Influencers are judged on engagement and conflict, never on follower count alone.
+    provenance: "Rubric criterion 4; Peru's open breach — two adidas-affiliated profiles left on the roster"
+
+  - text: >-
+      Shared slides carry both brands' copy where two brands appear together.
+    provenance: "Keke Palmer PPM slide 16"
+
+  - text: >-
+      State duration and placement for any OOH or billboard element.
+    provenance: "Mexico slides 9 and 10"
+
+  - text: >-
+      Premise disagreements are not fix lists. When a deck argues for the thing the client
+      objects to, settle the argument or the same structure returns rearranged.
+    provenance: "Colombia v1 evaluation — and Colombia v2 confirmed it"

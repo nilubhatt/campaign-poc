@@ -1,0 +1,138 @@
+#!/bin/bash
+# Postinstall for the Campaign Intelligence .pkg (§4.4).
+#
+# Thin ON PURPOSE. Everything this product means by "installed" — verify the shipped CLIP
+# weights, create the data directory, run `health-check` as a gate that BLOCKS success, and
+# only then wire Claude Desktop — lives in installer/macos/install.sh and is tested there.
+# A postinstall that repeated any of it would be the second implementation of one rule this
+# codebase keeps being bitten by, and the one that drifts is always the copy nobody runs by
+# hand. So this locates the user, runs that script as them, and passes its exit status on.
+#
+# Why a .pkg at all: the tarball needs Terminal to extract, `install.sh` is itself quarantined
+# when Finder expands it, and Finder opens a `.sh` in a text editor. A marketer double-clicks
+# a .pkg and Installer.app runs it.
+set -euo pipefail
+
+# `installer` hands a postinstall four positional parameters: the package path, the
+# INSTALLATION DESTINATION, the destination volume, and the root of the System folder. $2 is
+# what makes one script serve both domains — "/" for a system install and the user's home for
+# a home-directory install, which is the same expression either way.
+destination="${2:-/}"
+STAGING="${CAMPAIGN_POC_PKG_STAGING:-${destination%/}/usr/local/share/campaign-intelligence-staging}"
+
+# `rm -rf "$STAGING"` below, and `install.sh` is run out of it, so bound what it can be: this
+# script runs as root under `installer`, and an inherited environment must not be able to aim
+# either of those anywhere it likes. The temp prefixes are there because the tests point it at
+# one; nothing else is accepted.
+case "$STAGING" in
+    */usr/local/share/campaign-intelligence-staging) ;;
+    /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*) ;;
+    *) echo "refusing to stage through $STAGING" >&2; exit 1;;
+esac
+
+if [ ! -x "$STAGING/install.sh" ]; then
+    echo "The package payload is incomplete: no install.sh at $STAGING." >&2
+    exit 1
+fi
+
+# WHO to install for, and it depends on the domain the user chose.
+#
+# Installing into the home directory runs this script AS THE USER, with no password — which is
+# right for a product whose own installer says "per-user, no root needed", and is the path a
+# marketer on an IT-managed Mac can actually take. Nothing has to be guessed there.
+#
+# A system install runs as root, and then the console user is the only thing that says who
+# this is for. Getting that wrong is not cosmetic: it is §4.1's own defect — "the model was
+# pulled into the admin's Ollama, the admin's Claude Desktop was wired".
+if [ "$(id -u)" -ne 0 ]; then
+    target_user="$(id -un)"
+    target_home="$HOME"
+    as_the_user=(env)
+else
+    # `/dev/console` first, then who invoked `sudo`. On a machine with no GUI session — an
+    # SSH install, a CI runner, an MDM push — the console is owned by root, and the admin who
+    # typed `sudo installer` is the better answer than refusing. `SUDO_USER` is set by sudo
+    # itself and is empty when there was no sudo, so it cannot invent a user that is not there.
+    target_user="${CAMPAIGN_POC_PKG_USER:-$(stat -f "%Su" /dev/console 2>/dev/null)}"
+    if [ -z "$target_user" ] || [ "$target_user" = "root" ]; then
+        target_user="${SUDO_USER:-}"
+    fi
+    if [ -z "$target_user" ] || [ "$target_user" = "root" ]; then
+        echo "This package was installed for the whole system with nobody logged in and no" >&2
+        echo "sudo user to fall back to, so there is no home directory to install into and" >&2
+        echo "no Claude Desktop to wire." >&2
+        echo "Log in as the person who will use it and install again, choosing “Install" >&2
+        echo "for me only”." >&2
+        exit 1
+    fi
+    # `dscl` prints a value containing a SPACE on the next line, indented — so a home on a
+    # volume called "Staff Homes" came back from `awk '{print $2}'` as a fragment with a
+    # newline in it, which is non-empty, so the fallback below did not fire and `install.sh`
+    # ran with a relative HOME. Both shapes, folded onto one line and trimmed.
+    target_home="$(dscl . -read "/Users/$target_user" NFSHomeDirectory 2>/dev/null \
+                   | tr '\n' ' ' | sed 's/^NFSHomeDirectory: *//; s/^ *//; s/ *$//')"
+    [ -d "$target_home" ] || target_home="/Users/$target_user"
+    # `sudo -u` alone keeps root's environment, which is how a per-user installer ends up
+    # writing to /var/root while reporting success.
+    as_the_user=(sudo -u "$target_user" HOME="$target_home")
+fi
+
+# Somewhere the gate's words survive. Installer.app does not show a postinstall's output: the
+# component name `health-check` names, and "fully quit and reopen Claude Desktop", go to a log
+# behind ⌘L that nobody opens. On the tarball path the marketer read them in their terminal.
+log_dir="$target_home/Library/Logs"
+log="$log_dir/CampaignIntelligence-install.log"
+"${as_the_user[@]}" /bin/mkdir -p "$log_dir" 2>/dev/null || log=/dev/null
+
+# NO ARGUMENTS to install.sh. The four parameters above describe the PACKAGE and say nothing
+# about how to install; forwarded, they reached its option parser, which rejects anything it
+# does not recognise:
+#
+#     unknown arg: /Volumes/.../CampaignIntelligence.pkg
+#
+# so every .pkg install failed, always, before the gate had run.
+status=0
+"${as_the_user[@]}" /bin/bash "$STAGING/install.sh" 2>&1 \
+    | "${as_the_user[@]}" /usr/bin/tee -a "$log" || status=${PIPESTATUS[0]}
+
+# The payload is a delivery mechanism, not an installed artefact: the real install lives in the
+# user's Application Support directory, and the staging copy would otherwise sit there forever
+# — a second copy of the binary and its weights that no uninstaller knows about, kept as a
+# souvenir of a product that may not even work. Removed either way, and the receipt with it,
+# since a receipt for files that have been deleted makes `pkgutil --files` describe a machine
+# that does not exist.
+rm -rf "$STAGING"
+pkgutil --forget com.campaignintelligence.app >/dev/null 2>&1 || true
+
+if [ "$status" -ne 0 ]; then
+    # What actually failed, not what usually fails. This said "the self-test above names the
+    # component that is not working" whatever went wrong — and the first thing that went wrong
+    # was argument parsing, before the self-test had run at all, so the message named a cause
+    # that had not happened and pointed at output that did not exist.
+    echo >&2
+    echo "INSTALL FAILED (status $status). See $log." >&2
+    echo "Claude Desktop has NOT been connected." >&2
+    # And say it where somebody will see it. Installer.app's own failure sheet says only
+    # "contact the software manufacturer", which is advice a marketer cannot act on about a
+    # gate that knows exactly which component is down.
+    # BACKGROUNDED, and it dismisses itself. A dialog waits for a button, so run in the
+    # foreground it hangs the installer forever — which is what it did: the first version of
+    # this blocked every failing install, and the tests that exercise the failure path timed
+    # out rather than failing. An installer that hangs is worse than one that says nothing,
+    # because nobody can tell it from a slow one.
+    # ONLY inside a real Installer session. `installer` and Installer.app set these; nothing
+    # else does. Without the check the dialog fired from the test suite — a modal on the
+    # machine of whoever ran pytest, once per failure-path test, saying a product they never
+    # installed could not be installed. A test run must not put anything on somebody's screen.
+    if [ "$log" != "/dev/null" ] && [ -n "${target_user:-}" ] \
+       && { [ -n "${INSTALL_PKG_SESSION_ID:-}" ] || [ -n "${PACKAGE_PATH:-}" ]; }; then
+        why="$(tail -n 6 "$log" 2>/dev/null | tr '\n' ' ' | tr -d '"\\' | cut -c1-300)"
+        nohup "${as_the_user[@]}" /usr/bin/osascript \
+            -e "display dialog \"Campaign Intelligence could not finish installing.
+$why
+
+The full log is at $log\" with title \"Campaign Intelligence\" buttons {\"OK\"} \
+default button 1 with icon caution giving up after 120" >/dev/null 2>&1 &
+    fi
+    exit "$status"
+fi

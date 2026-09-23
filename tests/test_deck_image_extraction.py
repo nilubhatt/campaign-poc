@@ -182,7 +182,7 @@ def test_upload_campaign_image_extraction_failure_does_not_block_the_campaign(co
     assert result["campaign_id"]
     assert result["image_assets"] == []
     assert result["images_checked"] is False
-    assert any("image" in w.lower() for w in result["warnings"])
+    assert any("image" in w["detail"].lower() for w in result["warnings"])
 
 
 def test_upload_campaign_legacy_ppt_reports_images_not_checked(conn, tmp_path):
@@ -214,7 +214,7 @@ def test_upload_campaign_fingerprint_persists_even_if_reuse_check_fails(conn, tm
     entry = result["image_assets"][0]
     assert entry["fingerprinted"] is True
     assert entry["reuse_flags"] == []
-    assert any("reuse check failed" in w for w in result["warnings"])
+    assert any(w["code"] == "reuse_check_failed" for w in result["warnings"])
 
     asset_id = entry["asset_id"]
     fp = store.get_all_fingerprints(conn)

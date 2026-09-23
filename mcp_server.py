@@ -9,14 +9,75 @@ Claude Web / cowork custom connector points at.
 from __future__ import annotations
 
 import functools
-from typing import Literal, NotRequired, Optional, TypedDict, Union
+from typing import Annotated, Literal, NotRequired, Optional, TypedDict, Union
+
+from pydantic import Field
 
 from mcp.server.mcpserver import MCPServer
 
+import actions
+import config
+import people
+import commitments
+import context
+import corrections
 import core
+import drift
+import enums
+import feedback
+import metrics
+import replay
 import store
 
-mcp = MCPServer("campaign-intelligence")
+# The version goes in the server's own description because that is where a host shows it,
+# next to the connector — "visible at a glance", rather than behind a call somebody has to
+# know to make (§3.2, defect 10). The restart sentence is here for the same reason: the
+# reviewer lost time to a rebuilt server whose old schema the client was still holding, and
+# closing the window does not stop the server.
+# §7.4/§7.5: the evaluation procedure lives in `core` so the note that ships WITH the
+# evidence can carry the same object. One procedure, three places that reference it.
+EVALUATION_PROCEDURE = core.EVALUATION_PROCEDURE
+
+
+INSTRUCTIONS = f"""Campaign Intelligence {config.VERSION_FULL} — a marketing team's own
+campaign library: past campaigns, what they achieved, and judgments about new proposals
+weighed against that record.
+
+WHAT THE USER TYPED. Enum values are forgiving: "live" becomes `in_flight`, "client stated"
+becomes `stated`. When the server normalises something it echoes the change under
+`normalised` — SAY IT. "I've filed that as in_flight" takes one clause and stops the user
+learning a vocabulary they never chose, and a silent rewrite is how somebody discovers months
+later that their word meant something else here.
+
+NEXT ACTIONS. Many results carry `next_actions`: a short list of `{{label, tool,
+prefilled_args}}`. These are OFFERS, not instructions — say the label in your own words, and
+call the tool only if the user accepts. The arguments are already filled in from what this
+library holds, so accepting is one step, not a form. An empty list means there is no obvious
+next step, which is a real answer; do not invent one.
+
+WARNINGS. Several tools return `warnings`, and each entry has one field per reader:
+  `affects`   what the user loses. Say this.
+  `remedy`    what a PERSON does about it. Say this verbatim when it is not "nothing".
+  `next_step` what YOU do about it. Act on it; never read it out.
+  `scope`     who has to act: `machine` (an administrator, once, for everyone), `record`
+              (the person who sent this), `call` (nobody — you finish it). On `machine`, the
+              remedy is addressed to whoever installed this and may name a setting or a
+              file — pass it on as something for them to hand to that person, rather than
+              as an instruction to the marketer in front of you.
+  `severity`  `blocked`, `degraded`, `note`. The list is ordered worst first, so lead with
+              the first entry.
+  `detail`    engineering text. Only for when they ask why, or need to send it to support.
+  `count`     how many items it happened to, when more than one.
+Never paraphrase `detail` at a user. It is the field defect 09 was about.
+
+If a parameter documented in a tool's description is missing from the schema you hold, the
+host has cached an older one: call health_check, compare its `tools` list against your
+schema, and tell the user to fully QUIT and reopen the app — closing the window leaves this
+server running, so the schema will not refresh.
+
+{EVALUATION_PROCEDURE}"""
+
+mcp = MCPServer("campaign-intelligence", version=config.VERSION, instructions=INSTRUCTIONS)
 
 
 def _catch_value_errors(fn):
@@ -33,17 +94,95 @@ def _catch_value_errors(fn):
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
+        except enums.BadValue as exc:
+            # §5.2: a rejected value carries its retry as data, not only inside the
+            # sentence. `valid` is the set to choose from and `suggestion`, when present, is
+            # the one to retry with — so the caller acts on a field instead of parsing
+            # "Did you mean...?" out of prose.
+            rejected = {"error": str(exc), "field": exc.field, "valid": exc.valid}
+            if exc.suggestion:
+                rejected["suggestion"] = exc.suggestion
+            return rejected
         except ValueError as exc:
             return {"error": str(exc)}
     return wrapper
 
-# Constrains the JSON schema the LLM sees for these params, instead of relying on prose in
-# a docstring alone — a typo ("inflight") is now a schema-validation error, not a silent
-# value that never matches any filter (review flagged this as the cheapest correctness win
-# available; store.py enforces the same values server-side regardless).
-RecordType = Literal["campaign", "reference", "stub"]
-Status = Literal["proposed", "in_flight", "concluded"]
-MetricType = Literal["actual", "predicted"]
+# The JSON schema still advertises the valid values — that is what stops a well-behaved
+# caller guessing in the first place — but the PYTHON type is a plain string, so a value that
+# gets guessed anyway reaches this project's code instead of dying at pydantic's boundary
+# (§5.1, idea A).
+#
+# That boundary was the problem. Three enum values were rejected before the reviewer found
+# the right one, and pydantic's message names the valid set but never the closest match, and
+# cannot normalise "client stated" into `stated` because it never sees the value. store.py
+# now does both: it accepts what a marketer would actually type, and when it genuinely
+# cannot tell, the error carries the valid set and the nearest match.
+def _enum(*values: str):
+    """A string in the schema's eyes, an enum in the reader's."""
+    return Annotated[str, Field(json_schema_extra={"enum": list(values)})]
+
+
+# D32: glossed, so the model maps MEANING before the server maps shape. §5.1 made the server
+# forgiving about what a marketer types; the gloss is the other half — a model that knows
+# "live" and "running" mean `in_flight` sends the right value in the first place, and the
+# forgiving layer becomes the safety net it was meant to be rather than the primary path.
+#
+# D37: the gloss lists words this PRODUCT knows, so it lost "in market" with `enums` did. One
+# customer's phrasing in the product's own model-facing text is the same decision implemented
+# twice, disagreeing — and the gloss is the copy a model reads first. It belongs in the
+# customer's rulebook, where `docs/example-rulebook.yaml` shows it being declared.
+RecordType = _enum("campaign", "reference", "stub")
+"""campaign — a real past or proposed campaign.
+reference — background material: brand guidelines, a rubric, a competitor deck.
+stub — a placeholder with results but no brief, e.g. a row imported from a KPI workbook."""
+
+# §12.4/D38: all five, and the wire list has to be the same five `store.VALID_STATUSES` holds.
+# It listed three while the core accepted five, so the schema a model reads first said
+# `cancelled` and `paused` were invalid words — the "core accepts, wire does not" shape §11.5
+# hit with a stripped `said_by`, running the other way round. A model that believes the schema
+# files a cancelled campaign as `concluded`, and "concluded" is what every outcome gap, every
+# reconciliation and every calibration figure is counted from.
+Status = _enum(*store.VALID_STATUSES)
+"""proposed — not yet run: a pitch, a draft, a brief awaiting sign-off.
+in_flight — live, running, in flight, activated.
+concluded — finished, wrapped, completed, ended, done, post-campaign.
+cancelled — called off before or during. It did NOT run, so it is not a missing outcome.
+paused — stopped for now and expected to resume; on hold. Not concluded and not cancelled."""
+
+# §9.1: what an image IS. The default is `proposed` because every asset already in a library
+# came out of a deck, and reading briefed creative as evidence of what ran is the confusion the
+# whole of Phase 9 exists to make visible.
+# §9.4. The review's three, plus the one its own sentence requires: "usually needs the outcome
+# to settle it", so before there is an outcome the true answer is that it is too early.
+DriftClassification = _enum("improvement", "neutral", "degradation", "too_early",
+                            "not_drift")
+"""improvement — moved away from the brief and moved somewhere better.
+neutral — moved away from the brief and it made no difference.
+degradation — moved away from the brief and that cost something.
+too_early — nothing measured yet, so whether it mattered cannot be said."""
+
+# §12.4/D15: the verdict on a returned deck. The NOTES are the tracked comments §2.5 reads;
+# this is whether it came back signed off, which they do not say.
+Approval = _enum("approved", "approved_with_changes", "rejected", "withdrawn")
+"""approved — signed off as it stands.
+approved_with_changes — signed off conditionally; `approval_note` is what it was conditional on.
+rejected — not signed off. The deck does not proceed in this form.
+withdrawn — taken back by whoever sent it, before a verdict. Nobody said no; it stopped.
+
+All four are somebody's ACT, so all four require `said_by` (§11.2). There is no value here
+meaning "nobody has decided yet" — that is the field being unset, which is what it already is."""
+
+AssetPhase = _enum("proposed", "delivered")
+"""proposed — creative lifted from a brief; what somebody intends to run.
+delivered — a photograph that came back after the event; evidence of what ran."""
+
+MetricType = _enum("actual", "predicted", "target")
+"""actual — measured, real, post-campaign, what happened.
+predicted — forecast, projected, estimated, what this library expected to happen.
+target — the number somebody was aiming at. NOT a prediction: reconciliation scores the
+library against what it predicted, and scoring it against somebody's ambition instead would
+make every calibration figure meaningless. `against_target` compares a target to the actual,
+which is the "did we hit our number" question a marketer most wants answered."""
 
 # Suggested tag vocabulary (not enforced — tags stay freeform, this is guidance for the
 # conversational intake). Two independent axes that commonly co-occur on the same campaign
@@ -51,6 +190,32 @@ MetricType = Literal["actual", "predicted"]
 # "missing quadrant" — liked but underperformed, or disliked but performed well — is where
 # the real lessons are; querying it needs tags=["liked","underperformed"],
 # match_all_tags=True (see find_similar_campaigns).
+# D85: what a reconciliation was checked against. §6.3 made the version-based one the common
+# case, so the distinction has to exist before anything computes calibration over the table.
+# §8.2's three answers.
+MeasureDecision = _enum("same_thing", "different_measure", "ignore")
+
+# §8.6's three, which are §8.2's in this item's vocabulary. Separate names rather than reusing
+# MeasureDecision: "the same thing" reads naturally of two metric keys and oddly of two
+# sentences, and one enum serving both would make a wrong value in either look valid.
+CorrectionDecision = _enum("same_rule", "different_rule", "set_aside")
+"""same_rule — one rule stated two ways; everywhere it was said moves onto the named one.
+different_rule — it stands on its own, and stops asking.
+set_aside — never apply it and stop asking. What was said is kept."""
+
+# No `retired`: a correction is never demoted automatically (silence usually means the rule is
+# being followed), so the only way off the checklist is somebody setting it aside.
+_CORRECTION_STATUSES = ("provisional", "expected", "ignored", "merged")
+CorrectionStatus = _enum(*_CORRECTION_STATUSES)
+
+ReconciliationBasis = _enum("results", "superseding_version")
+"""results — measured outcomes; the campaign ran and the numbers are in.
+superseding_version — a later version of the brief showed whether the judgment held."""
+
+TagSource = _enum("verified", "stated")
+"""verified — backed by a metric_type='actual' row on that campaign.
+stated — somebody's impression, claim, recollection, or a number nobody checked."""
+
 SUGGESTED_TAGS = {
     "creative reaction": ["liked", "not_liked", "mixed_reaction"],
     "performance": ["performed_well", "underperformed", "performed_as_expected", "no_data_yet"],
@@ -65,28 +230,147 @@ SUGGESTED_TAGS = {
 # agent will weight it as if it were measured.
 class TagObject(TypedDict):
     value: str
-    source: NotRequired[Literal["verified", "stated"]]  # omitted -> defaults to 'stated'
+    # A plain string, not a Literal, so store.normalize_tags can normalise
+    # "client stated" rather than the value dying at pydantic's boundary. The original
+    # justification for this was WRONG and is corrected here: I claimed the union reported
+    # only its first branch and never named `source`. It names both — my probe printed
+    # "2 validation errors" and I truncated the output to 300 characters before reading the
+    # second. What the change actually buys is a 66-character message naming one field,
+    # instead of a two-branch dump whose first line tells a marketer their object should be
+    # a string.
+    source: NotRequired[TagSource]  # omitted -> defaults to 'stated'
+    # §11.5: WHOSE view this is. `store.normalize_tags` has carried these since §10.3 and the
+    # schema did not, so pydantic stripped them at the tool boundary — the field the whole
+    # append-only mechanism depends on never arrived over the protocol, and every reaction
+    # recorded this way was anonymous. Found by the stdio probe, green in every unit test,
+    # because the tests call `core.update_campaign` directly and the loss happens one layer
+    # above it.
+    # A person's name, if given at all: `store.normalize_tags` refuses the whole write for
+    # "the team", "someone else" or an initial, because a tag is a surface people READ and an
+    # opinion held by nobody nameable is the state the append-only record exists to prevent.
+    # Omitting it is the honest alternative and is always accepted.
+    said_by: NotRequired[str]
+    said_at: NotRequired[str]
+    # What is LEFT of an attribution this library should never have accepted — a v0.2.0
+    # `said_by` naming "the client" or "the team", which `feedback.record` wrote server-side
+    # past a weaker list. The opinion is kept and is no longer recorded as held by anybody.
+    # In the schema because tags REPLACE: a model that reads a campaign and re-sends its tags
+    # would otherwise have this stripped at the boundary and lose it — which is exactly how
+    # `said_by` itself went missing for a release. Never send it on a new tag; give `said_by`
+    # a person's name instead.
+    said_by_unresolved: NotRequired[str]
 
 TagInput = Union[str, TagObject]
+
+# The evaluation vocabulary, in the schema rather than only in prose — a typo becomes a
+# validation error the model can retry, instead of a value that quietly means nothing.
+Verdict = Literal["approve", "revise", "reject"]
+Severity = Literal["blocking", "should_fix", "note"]
+# Severity says how much a finding matters; KIND says whether it is arguable at all. A
+# guardrail breach cites the rulebook and is not open to debate; a departure from precedent
+# cites a campaign and invites a rationale — one real departure turned out better than the
+# precedent it departed from.
+# §6.2: which way a departure departs. A departure is a judgment about whether a difference
+# matters, and that judgment is what a partner is entitled to argue with — unlike a breach,
+# which is a fact about a rule.
+Departure = Literal["regression", "unexplained", "possible_improvement"]
+FindingKind = Literal["guardrail_breach", "precedent_departure", "missing_information",
+                      "internal_contradiction"]
+# Whether the server worked this out or the model judged it (§7.8). Only "judged" is
+# writable here: the premise that a computed finding is identical for every user, so a
+# difference is a bug, holds only if the SERVER computed it. §7.1 stamps the other one.
+Basis = Literal["judged"]
+# §10.2/D84+D59: what a PERSON can say about a stored finding. Note what is not here:
+# `explained`. That is what a departure READS as once it has been answered, not something
+# anybody writes — the only route to it is `answer_finding` with `deliberate`, so its presence
+# on a stored finding is proof somebody actually answered rather than a value a model chose.
+# `fixed` and `deliberate` are deliberately separate: "we changed it" and "we kept it, and
+# here is why" are the distinction the whole correction loop reasons from, and one word for
+# both would leave the library unable to tell a brief that was corrected from one defended.
+FindingAnswer = Literal["fixed", "deliberate", "does_not_apply", "misread", "open"]
+# §10.2/D53. `known_not_yet` stays ranked because it is still the thing to fix;
+# `not_applicable` leaves the ranking because a gap that will never close is a complaint.
+GapAnswer = Literal["known_not_yet", "not_applicable", "open"]
+
+
+class Precedent(TypedDict):
+    """What a finding is anchored to: a campaign that did it differently, or a rule it
+    breached. `quote` is text from the record, not written fresh — a finding that cannot
+    quote its source is a judgment call, not a citation.
+
+    **The quote is checked against the record you name, and the write is refused if it is
+    not there.** Case, line wrapping, curly quotes and the artefacts of PDF extraction do not
+    matter; words do. Leave a short gap out with … and both halves are still checked, in
+    order. Paraphrase is not quotation.
+
+    `checked` comes BACK on a stored precedent — it is the server's record of what it
+    established about your citation, never something you send."""
+    # Required in every sense that matters, and deliberately NOT `quote: str`. Typed as
+    # required, pydantic refuses the call at its own boundary and the caller gets "Field
+    # required" instead of the sentence this project wrote — the exact failure the comment
+    # on `_enum` above describes. The requirement is enforced in core, where the message can
+    # name the record and say what to do.
+    quote: NotRequired[str]           # REQUIRED, <= 300 chars, checked against the record
+    campaign_id: NotRequired[str]     # for a departure from precedent
+    rule_id: NotRequired[str]         # for a guardrail breach — a rule, not a campaign
+    # §8.6: the library's other kind of rule — a standing correction it learned from repeated
+    # client feedback and had confirmed. Also a guardrail breach; also not a campaign.
+    correction_id: NotRequired[str]   # for a guardrail breach against a standing correction
+    # Which layer the quote came from. Default "body" = the deck itself. Set "commentary"
+    # whenever the excerpt you are quoting arrived with matched_kind "commentary", and name
+    # who said it — otherwise the finding records somebody's objection as a claim the deck
+    # made.
+    layer: NotRequired[Literal["body", "commentary"]]
+    author: NotRequired[str]          # commentary only: who said it
+    anchor: NotRequired[str]          # commentary only: "slide 4", "page 2", "deck"
+    date: NotRequired[str]            # commentary only: when they said it
+
+
+class Finding(TypedDict):
+    """One problem. The short fields are capped server-side so they cannot grow back into
+    the paragraph this shape exists to replace."""
+    severity: Severity
+    finding: str                      # <= 120 chars, names the problem
+    # REQUIRED, and deliberately not typed as such — see the note on `Precedent.quote`.
+    # Typed required, pydantic refuses the call at its own boundary and the caller gets
+    # "Field required" instead of the sentence naming the four kinds and what each means.
+    kind: NotRequired[FindingKind]    # REQUIRED: is it a rule broken, a precedent departed
+                                      # from, or a gap in the brief?
+    departure: NotRequired[Departure]  # precedent_departure only, and REQUIRED there:
+                                      # which way it departs
+    repeats: NotRequired[str]         # the earlier finding's id, when this is the same
+                                      # problem raised again (see diff_campaigns)
+    basis: NotRequired[Basis]         # computed by the server, or judged (default: judged)
+    category: NotRequired[str]        # timeline | influencer | compliance | budget | ...
+    detail: NotRequired[str]          # the paragraph, read on demand
+    precedent: NotRequired[Precedent]
+    fix: NotRequired[str]             # <= 120 chars, what to change
 
 
 @mcp.tool()
 @_catch_value_errors
 def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optional[str] = None,
                     record_type: RecordType = "campaign", status: Optional[Status] = None,
-                    tags: Optional[list[TagInput]] = None, region: Optional[str] = None,
+                    tags: Optional[Union[TagInput, list[TagInput]]] = None, region: Optional[str] = None,
                     market: Optional[str] = None, markets: Optional[list[str]] = None,
                     collection: Optional[str] = None,
                     supersedes: Optional[str] = None, asset_ref: Optional[dict] = None,
-                    confirm: bool = False) -> dict:
+                    confirm: bool = False,
+                    starts_on: Optional[str] = None, ends_on: Optional[str] = None,
+                    asset_link: Optional[str] = None,
+                    campaign_type: Optional[str] = None,
+                    partner: Optional[str] = None) -> dict:
     """Store a past or proposed campaign in the memory.
 
     The user is a non-technical marketer, not someone filling out a form — have a
     conversation, don't demand structured fields. Ask things like: is this a *finished
     campaign or a future/proposed one* (record_type/status)? What do you *like* about it,
     what don't you like, what are you trying to *achieve* (fold into detail)? Where does it
-    run (region/market)? Is it a market/version variant of something already in the memory
-    (collection)? Any tags that fit — two independent axes that commonly BOTH apply to the
+    run (region/market)? **When did it run** (starts_on/ends_on, ISO dates) — worth asking for
+    any finished campaign, because without a window nothing can be checked against what else
+    was happening, and "this launch overlapped Ramadan" or "the port was shut for half of it"
+    become findings the library cannot produce about it. Is it a market/version variant of
+    something already in the memory (collection)? Any tags that fit — two independent axes that commonly BOTH apply to the
     same campaign: creative reaction (liked / not_liked / mixed_reaction) and performance
     (performed_well / underperformed / performed_as_expected / no_data_yet). If they answer
     in one free-text paragraph instead of field-by-field, parse it into these fields
@@ -110,6 +394,15 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
     From Claude Web, pass deck_text (the text you read from the attached PDF/PPTX) plus any
     freeform detail you have (brief, audience, budget, channel, timeline). The server chunks
     and embeds it per slide/section for search.
+
+    Pass asset_ref (the file itself) whenever you have it, even alongside deck_text: comments,
+    annotations and speaker notes can only be read from the file, and a partner deck returned
+    with tracked client comments is the feedback this library most wants to remember.
+    `commentary_found` says how many were FOUND (searchable once chunks_embedded reaches
+    chunks_total), and `commentary_checked` says whether anything was read at all. When it is
+    false — a deck_text-only upload, an unsupported file, or a comments part that would not
+    parse — do NOT tell the user the deck has no comments; nobody opened a file. Say that
+    comments need the file itself and offer to re-upload with it.
 
     Passing deck_text alone does NOT check images — you also need asset_ref (a reference to
     the actual file: POST /upload first to get one, or a local path in stdio mode). Prefer
@@ -156,18 +449,33 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
 
     Pass supersedes=<campaign_id> if this record replaces an existing one (e.g. a corrected
     deck) — the old record is then excluded from future search evidence, so it stops
-    confusing retrieval, without being deleted.
+    confusing retrieval, without being deleted. **Ask before setting it**: it is a claim
+    about what the marketer intended, not something to infer from two records looking alike,
+    and hiding the older record is the part they do not see. `update_campaign(supersedes="")`
+    takes it back. If the replaced record carries a judgment nobody has checked, the response
+    comes back with `earlier_judgment` — surface it and ask which of its predictions held.
 
     Add results later with add_metrics. On confirm=True, returns the campaign_id plus
-    chunks_total/chunks_embedded (partial embedding failures are reported per-chunk in
-    warnings, not silently), and images_checked/image_assets (see above)."""
+    chunks_total/chunks_embedded (partial embedding failures are reported in warnings, not
+    silently), and images_checked/image_assets (see above).
+
+    `warnings` follows the shape set out in this server's instructions: say `affects` and
+    `remedy`, act on `next_step`, never read `detail` aloud."""
     conn = store.connect()
     try:
         return core.ingest_campaign(conn, title=title, detail=detail, deck_text=deck_text,
                                     record_type=record_type, status=status, tags=tags,
                                     region=region, market=market, markets=markets,
                                     collection=collection, supersedes=supersedes,
-                                    asset_ref=asset_ref, confirm=confirm)
+                                    asset_ref=asset_ref, confirm=confirm,
+                                    starts_on=starts_on, ends_on=ends_on,
+                                    # §12.4. A field the core accepts and the WIRE does not is
+                                    # the shape §11.5's `said_by` had for a release: pydantic
+                                    # strips what the schema does not declare, so the value
+                                    # never arrives and every test that calls core directly
+                                    # passes.
+                                    asset_link=asset_link, campaign_type=campaign_type,
+                                    partner=partner)
     finally:
         conn.close()
 
@@ -176,11 +484,19 @@ def upload_campaign(title: str, detail: Optional[str] = None, deck_text: Optiona
 @_catch_value_errors
 def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optional[str] = None,
                     record_type: Optional[RecordType] = None, status: Optional[Status] = None,
-                    tags: Optional[list[TagInput]] = None, region: Optional[str] = None,
+                    tags: Optional[Union[TagInput, list[TagInput]]] = None, region: Optional[str] = None,
                     market: Optional[str] = None, markets: Optional[list[str]] = None,
-                    collection: Optional[str] = None) -> dict:
+                    collection: Optional[str] = None,
+                    supersedes: Optional[str] = None,
+                    starts_on: Optional[str] = None, ends_on: Optional[str] = None,
+                    asset_link: Optional[str] = None,
+                    campaign_type: Optional[str] = None,
+                    partner: Optional[str] = None,
+                    approval: Optional[Approval] = None,
+                    approval_note: Optional[str] = None,
+                    said_by: Optional[str] = None) -> dict:
     """Edit a campaign's metadata (title, detail, record_type, status, tags, region, market,
-    markets, collection). Only the fields you pass change. tags/markets, if given, fully
+    markets, collection, supersedes). Only the fields you pass change. tags/markets, if given, fully
     REPLACE the existing list (not a merge) — pass the complete new list, including any
     you're keeping. This is also how you upgrade a tag's provenance once real data comes in
     — e.g. re-save tags with {"value": "performed_well", "source": "verified"} instead of
@@ -192,16 +508,56 @@ def update_campaign(campaign_id: str, title: Optional[str] = None, detail: Optio
     marketer, not you — see upload_campaign's docstring on asking rather than guessing when
     it's unclear whether this record IS a collection launch versus merely related to one.
     Does NOT change deck_text/chunks/embeddings; for content changes, upload a new record
-    and pass supersedes=campaign_id instead."""
+    and pass supersedes=campaign_id instead.
+
+    `supersedes` records that THIS record replaces an older one. **Ask before setting it.**
+    It is a claim about what the marketer intended, not something to infer from two records
+    looking alike, and accepting it removes the older record from every future search — the
+    user hears "link these versions" and agrees, unseen, to hide one of them. Pass `""` to
+    take it back if it was set by mistake. Setting it returns `earlier_judgment` when the
+    replaced record carries a judgment nobody has checked yet — that is the moment to ask
+    which of its predictions held.
+
+    `approval` is the VERDICT on a returned deck (§12.4/D15). The deck's tracked comments ARE
+    the approval notes and are already stored as commentary; what nothing recorded was
+    whether the client actually said yes. `approval_note` is the one line it was conditional
+    on, and `said_by` becomes `approval_by` — a sign-off with nobody's name against it is a
+    claim this product will not make on somebody's behalf, so passing `approval` without
+    `said_by` is refused.
+
+    `asset_link` is where the work actually LIVES — a Figma board, a Drive folder, the link
+    somebody opens six months later. Not `asset_path`, which is this product's own copy of a
+    file. It must be a link somebody can open: "ask Dana" in a field called `asset_link` is
+    a field that looks like a link and is not one.
+
+    `campaign_type` is what KIND of campaign this is — a store launch, an always-on
+    programme, a seasonal drop (§12.4/D102). Market was standing in for it, so a measure
+    learned from store launches was expected of every campaign in that market and of no
+    store launch anywhere else. `partner` is who ran it, and §8.3's gate is named for it:
+    "across at least two PARTNERS or markets" could only count markets until this existed.
+
+    `starts_on`/`ends_on` are WHEN IT RAN, as ISO dates (§9.6). Worth asking for on any
+    concluded campaign: without a window nothing can be checked against the calendar, so
+    "this launch overlapped Ramadan" and "the port was shut for the first half of it" are
+    findings the library cannot produce. Absent one, a window is read out of the brief's own
+    dates and clearly labelled as a reading of prose — entering them settles it.
+
+    **Editing `title` or `detail` rebuilds the search index, and that can fall behind.**
+    `reindexed` says how much was rebuilt, and when `embedded` is short of `chunks` the
+    record will still come back in searches for its OLD wording and not its new — a state
+    search itself cannot report, because it does not say what it failed to consider. A
+    `chunk_not_embedded` warning is returned and stays against the record until it is fixed;
+    read it, say so, and offer `finish_indexing`. Nothing needs re-uploading."""
     conn = store.connect()
     try:
-        ok = store.update_campaign(conn, campaign_id, title=title, detail=detail,
-                                   record_type=record_type, status=status, tags=tags,
-                                   region=region, market=market, markets=markets,
-                                   collection=collection)
-        if not ok:
-            return {"error": f"campaign {campaign_id} not found"}
-        return store.get_campaign(conn, campaign_id)
+        return core.update_campaign(conn, campaign_id, title=title, detail=detail,
+                                    record_type=record_type, status=status, tags=tags,
+                                    region=region, market=market, markets=markets,
+                                    collection=collection, supersedes=supersedes,
+                                    starts_on=starts_on, ends_on=ends_on,
+                                    asset_link=asset_link, campaign_type=campaign_type,
+                                    partner=partner, approval=approval,
+                                    approval_note=approval_note, said_by=said_by)
     finally:
         conn.close()
 
@@ -224,33 +580,401 @@ def delete_campaign(campaign_id: str) -> dict:
 
 @mcp.tool()
 @_catch_value_errors
-def upload_image_asset(campaign_id: str, asset_ref: dict) -> dict:
-    """Attach an image (hero shot, creative asset) to a campaign. Processed two ways: a
-    perceptual hash (exact/near-duplicate reuse — check_image_provenance) and a CLIP visual
-    embedding (aesthetic/regional similarity — find_similar_images). asset_ref is {asset_id}
-    from POST /upload, {path} local, or {filename, base64} inline. Consider calling
-    check_image_provenance and/or find_similar_images first if you want to flag reuse or
-    similarity before attaching it."""
+def upload_image_assets(campaign_id: str, asset_refs: list, phase: AssetPhase = "proposed",
+                        captured_on: Optional[str] = None) -> dict:
+    """Attach SEVERAL images to a campaign in one call — the usual shape for photographs that
+    come back from an event.
+
+    Same arguments as `upload_image_asset`, with a list. One image that cannot be read is
+    reported in `failed` and does not stop the others.
+
+    Use this rather than putting event photographs into a deck and uploading that: images
+    pulled out of a deck are filed as `proposed` creative, which would add the photographs to
+    the brief they are supposed to be compared against."""
     conn = store.connect()
     try:
-        return core.ingest_image_asset(conn, campaign_id=campaign_id, asset_ref=asset_ref)
+        return core.ingest_image_assets(conn, campaign_id=campaign_id, asset_refs=asset_refs,
+                                        phase=phase, captured_on=captured_on)
     finally:
         conn.close()
 
 
 @mcp.tool()
 @_catch_value_errors
-def check_image_provenance(asset_ref: dict, campaign_id: Optional[str] = None) -> dict:
+def upload_image_asset(campaign_id: str, asset_ref: dict, phase: AssetPhase = "proposed",
+                       captured_on: Optional[str] = None) -> dict:
+    """Attach an image (hero shot, creative asset) to a campaign. Processed two ways: a
+    perceptual hash (exact/near-duplicate reuse — check_image_provenance) and a CLIP visual
+    embedding (aesthetic/regional similarity — find_similar_images). asset_ref is {asset_id}
+    from POST /upload, {path} local, or {filename, base64} inline. Consider calling
+    check_image_provenance and/or find_similar_images first if you want to flag reuse or
+    similarity before attaching it.
+
+    `phase` says what the image IS, and it matters more than it looks:
+
+      • `proposed` (the default) — creative lifted from a brief. What somebody INTENDS to run.
+      • `delivered` — a photograph that came back after the event. Evidence of what RAN.
+
+    Pass `delivered` for anything shot on site or after the campaign, with `captured_on` as
+    YYYY-MM-DD. Reading briefed creative as evidence of what ran is the confusion this field
+    exists to prevent: a library that learns from briefs while measuring executions is
+    learning from the wrong document. When you do not know which it is, say so and ask —
+    do not guess `delivered`, because that is the reading that asserts something."""
+    conn = store.connect()
+    try:
+        return core.ingest_image_asset(conn, campaign_id=campaign_id, asset_ref=asset_ref,
+                                       phase=phase, captured_on=captured_on)
+    finally:
+        conn.close()
+
+
+ContextKind = _enum("conflict", "natural_disaster", "regulatory_change", "supply_chain",
+                    "platform_outage", "competitor_launch", "macro_shock", "fixed_calendar")
+ContextScope = _enum("market", "region", "global")
+
+
+@mcp.tool()
+@_catch_value_errors
+def record_context_event(starts_on: str, scope: ContextScope, kind: ContextKind,
+                         description: str, recorded_by: str, role: Optional[str] = None,
+                         ends_on: Optional[str] = None, scope_value: Optional[str] = None,
+                         source: Optional[str] = None, delay_days: Optional[int] = None,
+                         budget_change_pct: Optional[float] = None,
+                         channels_disrupted: Optional[list[str]] = None) -> dict:
+    """Put on the record what else was going on in a market (§9.6).
+
+    `recorded_by` is whose account this is — a PERSON, never the product or the model. `role`
+    is their role as stated at the time, optional and never inferred (§11.4).
+
+    Conflict, natural disaster, regulatory change, supply-chain or port disruption, platform
+    outage, competitor launch, macro shock, or a fixed calendar event — anything that was
+    happening around a campaign and is not in its brief.
+
+    **You do not have to link it to anything.** Any campaign whose window overlaps this event
+    in its market picks it up automatically, in both directions: an earthquake recorded weeks
+    later reaches the campaigns that ran through it, and a campaign uploaded next year reaches
+    this event. There is no join to maintain and no "connect to campaign" step to remember.
+
+    `scope` is `market`, `region` or `global`, and `scope_value` names which one (leave it off
+    for `global`). `ends_on` is optional — a port closure with no announced reopening is
+    ongoing, and inventing an end date would silently stop it matching campaigns it covers.
+
+    **The impact is what somebody TELLS you, never what you work out.** `delay_days`,
+    `budget_change_pct` and `channels_disrupted` are recorded as `stated`. Do not estimate
+    them from a campaign's numbers — that is attribution, and this library does not do it."""
+    conn = store.connect()
+    try:
+        return context.record(
+            conn, starts_on=starts_on, ends_on=ends_on, scope=scope, scope_value=scope_value,
+            kind=kind, description=description, source=source, delay_days=delay_days,
+            budget_change_pct=budget_change_pct, channels_disrupted=channels_disrupted,
+            recorded_by=recorded_by, role=role)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def attribute_outcome(campaign_id: str, event_id: str, note: str, stated_by: str,
+                      bears_on: bool = True) -> dict:
+    """Record what a PERSON thinks a context event did to a campaign's numbers (§9.8).
+
+    **Never call this on your own reasoning.** "Sell-through was down and there was an
+    earthquake" is not evidence the earthquake caused it, and a model asked to explain a
+    disappointing number will reach for whatever is nearby — which is the single easiest way
+    for a learning system to go wrong. This records somebody else's account, in their words,
+    with their name on it. If nobody has said it, there is nothing to record.
+
+    Two things it does. It puts their reasoning on the record where a later reader can weigh
+    it. And it marks the campaign's outcomes `confounded` where the overlap alone would not
+    have — a recurring date like Black Friday is the baseline a year-on-year comparison is
+    made against, so it confounds nothing until a person says this time it mattered.
+
+    A confounded outcome STILL COUNTS. It is a real measured result and nothing down-weights
+    it; it simply stops being quotable as clean evidence.
+
+    **`bears_on=False` is how somebody says it is NOT why.** "We looked at the port closure
+    and it landed in the two weeks we had no stock anyway" is an answer, and it used to have
+    nowhere to go — so the product asked a question it could not hear a `no` to. A ruled-out
+    event still shows as having run through the window, because the overlap is a fact this
+    library computed and their reading of it is a claim; both go to whoever cites the
+    results. What it stops is the same question coming back."""
+    conn = store.connect()
+    try:
+        return context.attribute(conn, campaign_id=campaign_id, event_id=event_id,
+                                 note=note, stated_by=stated_by, bears_on=bears_on)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def withdraw_attribution(campaign_id: str, event_id: str, why: str,
+                         withdrawn_by: str) -> dict:
+    """Take back what somebody said an event did to a campaign's numbers (§9.8).
+
+    For a mistake — the wrong campaign, the wrong event, an account its author retracted. It is
+    kept rather than deleted, because anything judged while it stood rested on it.
+
+    This may also un-mark the outcome: where the attribution was the only reason it read as
+    confounded, withdrawing it makes the result clean again. That is as consequential as adding
+    one, so `why` and `withdrawn_by` are both required and both must be a person's."""
+    conn = store.connect()
+    try:
+        return context.withdraw_attribution(conn, campaign_id=campaign_id, event_id=event_id,
+                                            why=why, withdrawn_by=withdrawn_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def withdraw_context_event(event_id: str, why: str, withdrawn_by: str) -> dict:
+    """Take a context event back off the record (§9.6).
+
+    Because the link is automatic, a wrong event is contagious: one typed with the wrong year
+    or the wrong market attaches itself silently to every overlapping campaign, and stays
+    there. This is how it is taken back.
+
+    It is KEPT, not deleted — "we used to think this" is an answer, and anything judged while
+    the event was on file rested on it. The response says how many campaigns stop carrying it,
+    because removing a caveat matters as much as adding one.
+
+    **Withdraw for a mistake, not for an inconvenience.** An event somebody would rather not
+    have on a campaign's record is exactly the event that record needs."""
+    conn = store.connect()
+    try:
+        return context.withdraw(conn, event_id=event_id, why=why, withdrawn_by=withdrawn_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def campaign_context(campaign_id: str) -> dict:
+    """What else was going on while this campaign ran (§9.6).
+
+    Every recorded event whose date range overlaps this campaign's window in its market,
+    computed fresh each time rather than read from a stored link.
+
+    **Read `status` before you read `events`.** `nothing_to_check` means this campaign has no
+    window, so nothing COULD be matched — it does not mean nothing was going on, and reporting
+    an empty list as "nothing overlapped" is the confident unfounded claim this field exists to
+    stop. `checked` with no events is the real answer, and it is only as complete as the
+    calendar behind it.
+
+    **This is an overlap in time and nothing more.** "Sell-through was down and there was an
+    earthquake" is not evidence the earthquake caused it. Say what ran during what; do not say
+    what caused what, and do not let a disappointing number go looking for the nearest event to
+    explain it. Read `window.basis` too: `heuristic` means the dates were read out of the
+    brief's prose rather than entered, so the match inherits that reading."""
+    conn = store.connect()
+    try:
+        return context.for_campaign(conn, campaign_id)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def classify_drift(campaign_id: str, subject: str, classification: DriftClassification,
+                   why: str, classified_by: str, about: Optional[str] = None) -> dict:
+    """Say whether a difference between the brief and what ran was a loss (§9.4).
+
+    The library can see that the execution differed — which briefed images came back, which
+    promises were visible. What it will not say is whether any of that mattered, because a
+    claw machine replaced by something better and a claw machine that never turned up produce
+    identical numbers.
+
+      • `improvement` — it moved away from the brief and moved somewhere better.
+      • `neutral`     — it moved away from the brief and it made no difference.
+      • `degradation` — it moved away from the brief and that cost something.
+      • `too_early`   — nothing has been measured yet, so whether it mattered cannot be said.
+                        This is the honest answer before results, not a way of declining.
+      • `not_drift`   — it did NOT differ; the comparison could not see that it matched. A
+                        photograph of a claw machine that was built rarely fingerprints like
+                        the render of it, so this is a correction to the instrument and the
+                        only way a person can undo a downgrade the server computed. Use it
+                        when the photographs show the briefed thing.
+
+    **Do not classify on the user's behalf.** Show them what differed and ask. Treating every
+    difference as a defect teaches this library to punish anything that went better than
+    planned — the UAE claw machine was unbriefed and drew the queue the photo booth was meant
+    to.
+
+    `subject` is the `asset_id` or `commitment_id` the difference is ABOUT — compare_execution
+    and check_commitments both name them, and its offers carry it prefilled. It is not a phrase:
+    a classification typed against "the claw machine" is filed against nothing, cannot be read
+    back, and leaves the original difference still unjudged and still being asked about.
+
+    `why` and `classified_by` are both required: this is read months later by somebody deciding
+    whether to repeat the change. Classifying again does not overwrite — a reading that changed
+    when the numbers arrived is kept alongside the first, with what was known at each time."""
+    conn = store.connect()
+    try:
+        return drift.classify(conn, campaign_id=campaign_id, subject=subject,
+                              classification=classification, why=why,
+                              classified_by=classified_by, about=about)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def drift_readings(campaign_id: str, subject: Optional[str] = None) -> dict:
+    """What has been made of this campaign's drift (§9.4).
+
+    With `subject` — the `asset_id` or `commitment_id` — every reading of that one piece in
+    order, including one that changed when the results came in, which is the most useful thing
+    this record holds. Without it, the latest reading of each, with what each one is about."""
+    conn = store.connect()
+    try:
+        return ({"campaign_id": campaign_id, "subject": subject,
+                 "history": drift.history(conn, campaign_id=campaign_id, subject=subject)}
+                if subject else drift.for_campaign(conn, campaign_id))
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def check_commitments(campaign_id: str) -> dict:
+    """Each promise the brief named, against the photographs that came back (§9.3).
+
+    A brief makes specific, checkable promises — a claw machine, a photo booth, a matcha cart.
+    They are taken from the deck's own experience or floorplan list at upload, each with the
+    line it came from, and this looks for each one in the delivered images.
+
+    **Read the verdicts exactly as they are worded.**
+
+      • `present`     — something resembling the phrase is visible in a named photograph.
+      • `not_visible` — it was NOT VISIBLE in the delivered images. That is not "absent" and
+                        not "not delivered". Fourteen photographs of a launch do not show
+                        everything at a launch, and saying otherwise accuses a supplier who may
+                        well have delivered exactly what was promised. Say "not visible in the
+                        photographs" when you report it, and say how many there were.
+      • `unchecked`   — nothing came back, or the images are not indexed. Not a finding.
+
+    It is a RESEMBLANCE, marked `heuristic` throughout — a threshold somebody chose, not a
+    fact. Use it to ask, and to tell the user what to go and look at.
+
+    Use `list_commitments` to see what the brief was read as promising, `add_commitment` for a
+    promise written in a sentence rather than a bullet, and `drop_commitment` for a line that
+    is not a promise at all."""
+    conn = store.connect()
+    try:
+        return commitments.check(conn, campaign_id=campaign_id)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def list_commitments(campaign_id: str) -> dict:
+    """What this brief was read as promising, with the line each came from (§9.3).
+
+    Extracted mechanically from the deck's list items, so it will pick up lines that are not
+    promises — show them to the user and drop the ones that are not."""
+    conn = store.connect()
+    try:
+        return {"campaign_id": campaign_id,
+                "commitments": commitments.for_campaign(conn, campaign_id)}
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def add_commitment(campaign_id: str, text: str, source_line: str) -> dict:
+    """Record a promise the extractor did not find (§9.3).
+
+    `source_line` is where in the brief it comes from, and is required — a commitment that
+    cannot show where it came from is one nobody can check. Use the brief's own words for
+    `text`; generalising "thirty influencers in identical outfits" into "consistent styling"
+    invents a promise nobody made."""
+    conn = store.connect()
+    try:
+        return commitments.add(conn, campaign_id=campaign_id, text=text,
+                               source_line=source_line)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def drop_commitment(commitment_id: str, why: Optional[str] = None) -> dict:
+    """This line is not a promise (§9.3). Kept on file rather than deleted, so a post-mortem
+    written earlier stays explicable."""
+    conn = store.connect()
+    try:
+        return commitments.drop(conn, commitment_id, why=why)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def compare_execution(campaign_id: str) -> dict:
+    """What actually ran, against what was briefed (§9.2).
+
+    Uses the images already attached to the campaign — `proposed` ones are the brief,
+    `delivered` ones are photographs that came back — so upload the returned photos with
+    `phase="delivered"` first.
+
+    Returns four lists and a score:
+
+      • `as_briefed`     — a delivered photo whose fingerprint matches a briefed image.
+      • `never_appeared` — briefed, and nothing that came back matches it.
+      • `new`            — came back, and matches nothing that was briefed.
+      • `another_view`   — a further photograph of something already counted.
+
+    A match is by FINGERPRINT, which answers "is this the same image file". A photograph of a
+    thing that was physically built will not fingerprint-match the render of it, so an item in
+    `never_appeared` or `new` may carry `looks_like` — a visual resemblance, marked
+    `heuristic`. That is a question for somebody who can recognise the thing, never an answer:
+    say what resembles what and ask.
+      • `drift.score`    — the mean distance between every briefed image and every delivered
+                           one. It is NOT a percentage: real photographs sit close together in
+                           visual space, so a raw figure near zero does not mean "no drift".
+                           Read `relative_to_brief_spread` instead — the drift in units of how
+                           far the brief's own images sit from each other, where around 1 means
+                           the delivered creative is within the brief's own range of looks.
+
+    Every item carries the evidence behind it: which image it matched and at what distance.
+
+    **The score says how far, never whether that was good.** A briefed element that did not
+    appear may have been dropped, or replaced by something better — the photographs cannot say
+    which and neither can this. If the user wants that read, say what the lists show and ask.
+
+    `status: nothing_to_check` means one half is missing — nothing has come back yet, or
+    nothing was briefed. That is not zero drift; it is no measurement."""
+    conn = store.connect()
+    try:
+        return core.compare_execution(conn, campaign_id=campaign_id)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def check_image_provenance(asset_ref: dict, campaign_id: Optional[str] = None,
+                           phase: Optional[AssetPhase] = None) -> dict:
     """Check whether an image matches one already in the memory — same/near-same photo,
     even after resize/recompress/light crop (perceptual hashing; catches exact reuse, NOT
     aesthetic similarity — use find_similar_images for that). Works before the image is
     stored. Pass campaign_id (the campaign this image is headed for) to exclude that
     campaign's own assets and get a flag when a match comes from a *different* region — the
     real question is usually not "does this image exist" but "does this image belong to a
-    different region than where it's being used.\""""
+    different region than where it's being used.\"
+
+    **Read `what_it_is` on every match before reporting it.** The library holds briefed
+    creative AND photographs of what actually ran (§9.1), and "this hero image was used in
+    Peru" and "this matches a photograph of the Bogotá activation" are different findings.
+    `phase` narrows the search to one side when you only want one."""
     conn = store.connect()
     try:
-        return core.check_image_provenance(conn, asset_ref=asset_ref, campaign_id=campaign_id)
+        return core.check_image_provenance(conn, asset_ref=asset_ref, campaign_id=campaign_id,
+                                           phase=phase)
     finally:
         conn.close()
 
@@ -258,17 +982,23 @@ def check_image_provenance(asset_ref: dict, campaign_id: Optional[str] = None) -
 @mcp.tool()
 @_catch_value_errors
 def find_similar_images(asset_ref: dict, campaign_id: Optional[str] = None, top_k: int = 5,
-                        region: Optional[str] = None) -> dict:
+                        region: Optional[str] = None,
+                        phase: Optional[AssetPhase] = None) -> dict:
     """Aesthetic/regional visual similarity via CLIP — catches "same product, different
     photo," "looks like the APAC shoot" — NOT exact reuse (use check_image_provenance for
     that). Works before the image is stored. Pass region to weigh only that region's assets
     first (mirrors find_similar_campaigns' filter-before-rank pattern); pass campaign_id (the
     campaign this image is headed for) to exclude its own assets and flag matches from a
-    different region."""
+    different region.
+
+    **Read `what_it_is` on every match.** This corpus was built when every asset was creative;
+    §9.1 put photographs of executions in the same table, so "looks like the APAC shoot" and
+    "looks like a photograph of the Bogotá activation" now both come back here. `phase`
+    narrows it: `proposed` for creative only, `delivered` for what actually ran."""
     conn = store.connect()
     try:
         return core.find_similar_images(conn, asset_ref=asset_ref, campaign_id=campaign_id,
-                                        top_k=top_k, region=region)
+                                        top_k=top_k, region=region, phase=phase)
     finally:
         conn.close()
 
@@ -291,9 +1021,16 @@ def add_metrics(campaign_id: str, detail: Optional[str] = None,
 
     detail is freeform (CTR, ROI, conversions, qualitative learnings, or just what the user
     said); structured is an optional machine-readable object for numbers you extracted.
-    metric_type is 'actual' (post-conclusion results, the default) or 'predicted' (a
-    forecast/target set before launch) — reconcile_evaluation only pulls 'actual' metrics
-    automatically."""
+    metric_type is 'actual' (post-conclusion results, the default), 'predicted' (this
+    library's own forecast, which reconciliation later scores against the actuals), or
+    'target' (the number somebody was AIMING at) — reconcile_evaluation only pulls 'actual'
+    metrics automatically.
+
+    A target is not a prediction and must never be recorded as one: reconciliation scores this
+    library against what it PREDICTED, and scoring it against somebody's ambition instead
+    would make every calibration figure meaningless. It is its own value for exactly that
+    reason. `against_target` then answers "did we hit our number", which is the comparison a
+    marketer most wants."""
     conn = store.connect()
     try:
         return core.add_metrics(conn, campaign_id, detail=detail, structured=structured,
@@ -304,16 +1041,100 @@ def add_metrics(campaign_id: str, detail: Optional[str] = None,
 
 @mcp.tool()
 @_catch_value_errors
-def bulk_import_metrics(rows: list) -> dict:
+def bulk_import_metrics(rows: Optional[list] = None, confirm: bool = False,
+                        preview_id: Optional[str] = None) -> dict:
     """Load a KPI workbook in one call instead of one add_metrics per row. Each row is an
     object identifying its campaign by campaign_id (preferred) or title (exact,
     case-insensitive — ambiguous or unmatched titles are reported as errors, never guessed),
     plus detail/structured/metric_type like add_metrics. Read the workbook yourself (CSV,
-    pasted table, whatever you have) and pass the rows here. Returns {imported, errors} —
-    valid rows import even if others fail."""
+    pasted table, whatever you have) and pass the rows here.
+
+    **It previews by default and writes nothing.** A workbook carries a column VOCABULARY, and
+    this is the one moment to look at it as a vocabulary rather than forty times, one key at a
+    time, after the writes. `columns` classifies every column four ways:
+
+      • `known`        — already a measure on file; it says which.
+      • `looks_like`   — resembles one. A SUGGESTION, never applied: two names folded together
+                         wrongly make one measure out of two different things, and a workbook
+                         is the worst place for that because it arrives forty columns at once.
+      • `new`          — unfamiliar. Recorded provisionally and asked about, one at a time.
+      • `cannot_type`  — the values are not numbers, so the column is not imported. The other
+                         figures in those rows are.
+
+    Show the user what the columns mean before importing — especially the aliases, which are
+    theirs to accept or refuse. Then confirm with the `preview_id` the preview handed back:
+    **do not resend the rows.** The workbook is held server-side, so confirming quotes a key
+    rather than crossing the wire a second time, and the rows imported are by construction the
+    ones that were previewed.
+
+    The same key is the RESUME key. A workbook larger than the time budget stops partway and
+    returns `not_processed` with the key; call again with the same `preview_id` and it
+    continues from where it stopped. Resending the workbook instead imports the first rows a
+    second time — nothing deduplicates them — so keep calling with the key until
+    `not_processed` is 0, and report once at the end rather than after each pass.
+
+    Returns {imported, errors, columns}. Valid rows import even if others fail, and a rejected
+    metric_type carries `field`, `valid` and `suggestion` so the retry is data rather than
+    prose to parse."""
     conn = store.connect()
     try:
-        return store.bulk_import_metrics(conn, rows)
+        return store.bulk_import_metrics(conn, rows, confirm=confirm,
+                                         preview_id=preview_id)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def health_check() -> dict:
+    """Check whether this server's parts are actually working, and whether the library is
+    fully searchable. Answers in about a second.
+
+    Call it when something seems wrong — a search returning less than expected, an upload
+    warning, an image tool failing — and before any demo or important session, rather than
+    inferring health from a tool call that times out.
+
+    Each component reports separately because they fail independently: visual search being
+    unavailable does not stop text search, uploads or evaluations, and saying "the server is
+    down" when only half is would be wrong. Translate for the user — "visual similarity is
+    unavailable because the image model is missing; everything else works" beats relaying
+    component names — and pass on the `remedy` verbatim enough that an admin can act on it.
+
+    this result's `coverage` FIELD (not the `coverage` tool, which is about the library's shape) answers the different question of whether what they uploaded is usable: a
+    non-zero `sections_unindexed`/`images_unindexed` means searches will be incomplete until
+    finish_indexing is run."""
+    conn = store.connect()
+    try:
+        return core.health_check(conn)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def finish_indexing(campaign_id: Optional[str] = None) -> dict:
+    """Finish records that are stored but not yet searchable, without re-uploading anything.
+
+    Use this when an upload reported it ran out of time, when list_campaigns shows
+    chunks_embedded below chunks_total (or assets_embedded below assets_total), or after the
+    embedder was down while uploads went in. Pass a campaign_id for one record, or nothing
+    to work through everything outstanding.
+
+    Bounded by the same time budget as any other call, so a large backlog takes several
+    passes. **If `complete` is false and `indexed` was above zero, just call it again
+    straight away** — do not stop to ask each time; the user wants the job done, not a
+    progress meeting. Report once at the end. Only stop and ask if there is a lot left
+    (`remaining` in the hundreds) or the user is waiting on something else.
+
+    **If `indexed` is zero, do NOT call it again** — nothing was achieved and nothing will
+    be until the cause in `errors` is fixed. Tell the user what is broken instead.
+    `failed` counts items that can never be indexed (their file is gone); those are skipped
+    rather than retried forever, which is why `complete` can be true with failures present.
+    `outstanding` names the records still waiting, so you can say "your Mexico deck is done,
+    two older records still have 40 sections to go" rather than reciting numbers."""
+    conn = store.connect()
+    try:
+        return core.finish_indexing(conn, campaign_id=campaign_id)
     finally:
         conn.close()
 
@@ -322,19 +1143,63 @@ def bulk_import_metrics(rows: list) -> dict:
 @_catch_value_errors
 def list_campaigns(record_type: Optional[RecordType] = None, status: Optional[Status] = None) -> dict:
     """List records in the memory. Optionally filter by record_type ('campaign', 'reference',
-    'stub') and/or status ('proposed', 'in_flight', 'concluded'). is_superseded/supersedes
+    'stub') and/or status ('proposed', 'in_flight', 'concluded', 'cancelled', 'paused' —
+    the last two did not run, so they are never missing results). is_superseded/supersedes
     show whether a record has been replaced by a corrected/later one (and by what) — check
-    these before treating two similarly-titled records as both live."""
+    these before treating two similarly-titled records as both live.
+
+    `has_metrics` and `has_actual_metrics` are DIFFERENT claims (§13.1). The first counts any
+    measurement row, a target or a forecast included; the second means somebody recorded what
+    actually happened. A campaign carrying nothing but what its brief HOPED for has the first
+    and not the second, and only the second is evidence of how anything went — so never
+    report "this campaign has results" from `has_metrics`.
+
+    `embedded` means FULLY searchable. When it is false, chunks_embedded/chunks_total (and
+    assets_embedded/assets_total) say how much of the record search can actually find —
+    "stored" and "searchable" are different states, and an upload that ran out of time sits
+    between them. Anything short of complete can be finished with finish_indexing, without
+    the user re-uploading anything; say so rather than leaving them to wonder why a deck they
+    uploaded isn't coming back in results."""
     conn = store.connect()
     try:
         rows = store.list_campaigns(conn, record_type=record_type, status=status)
-        return {"count": len(rows), "campaigns": [
+        listed = {"count": len(rows), "campaigns": [
             {"campaign_id": r["id"], "title": r["title"], "record_type": r["record_type"],
              "status": r["status"], "tags": r["tags"], "region": r["region"],
              "market": r["market"], "collection": r["collection"], "embedded": r["embedded"],
-             "has_metrics": r["has_metrics"], "has_evaluations": r["has_evaluations"],
+             "chunks_total": r["chunks_total"], "chunks_embedded": r["chunks_embedded"],
+             "assets_total": r["assets_total"], "assets_embedded": r["assets_embedded"],
+             # BOTH, because they are different claims and only the looser one was published
+             # (§13.1). `has_metrics` counts any row — a target or a forecast included — so a
+             # campaign carrying nothing but what somebody HOPED for reported `has_metrics:
+             # true` to the client, and §5.3 spent an item establishing that a forecast is the
+             # opposite of a measured outcome. `has_actual_metrics` is the one that means it
+             # was measured. The DOCSTRING says so too: a field whose meaning lives only in a
+             # Python comment is a field the model reading this tool never learns.
+             "has_metrics": r["has_metrics"],
+             "has_actual_metrics": r["has_actual_metrics"],
+             "has_evaluations": r["has_evaluations"],
              "supersedes": r["supersedes"], "is_superseded": r["is_superseded"]}
             for r in rows]}
+        # §5.6: eight rows with nothing to say whether eight is enough was the review's own
+        # complaint about this tool. Attached only while the library is not yet working.
+        guidance = core.readiness_for_listing(conn)
+        # §10.6/D67: "`list_campaigns` answers 'what have I got' one record at a time. This
+        # answers the question a marketer actually has" — which is `coverage`'s own docstring
+        # admitting the listing is the moment for it, in a sentence the listing never carried.
+        #
+        # ONE list. Nested readiness carries its own `next_actions`, so the coverage offer
+        # arrived twice in one response at two nesting levels — and `actions.trim` cannot
+        # deduplicate across sibling keys, so `actions.identity`, the whole point of which is
+        # that it is now one shared function, was never given the chance. Six offers reached
+        # the model and two of them were the same call.
+        offered = core.coverage_offer(conn)
+        if guidance:
+            offered = actions.trim(list(guidance.pop("next_actions", []) or []) + offered)
+            listed["readiness"] = guidance
+        if offered:
+            listed["next_actions"] = offered
+        return listed
     finally:
         conn.close()
 
@@ -342,7 +1207,12 @@ def list_campaigns(record_type: Optional[RecordType] = None, status: Optional[St
 @mcp.tool()
 @_catch_value_errors
 def get_campaign(campaign_id: str) -> dict:
-    """Full detail + all metrics for one campaign by id."""
+    """Full detail + all metrics for one campaign by id, plus its `commentary`: the speaker
+    notes, annotations and tracked reviewer comments its deck carried, with the author, date
+    and position wherever the file recorded them — a speaker note carries no author at all,
+    and an annotation often has none, so a missing author means the file did not say, not
+    that nobody said it. That layer is what people said ABOUT the work and is kept separate
+    from the deck body deliberately — do not read it back as the brief's own content."""
     conn = store.connect()
     try:
         c = store.get_campaign(conn, campaign_id)
@@ -360,7 +1230,8 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
                            match_all_tags: bool = False, region: Optional[str] = None,
                            market: Optional[str] = None, markets: Optional[Union[str, list[str]]] = None,
                            collection: Optional[str] = None,
-                           full_detail: bool = False) -> dict:
+                           full_detail: bool = False,
+                           include_commentary: Union[bool, list[str]] = True) -> dict:
     """Semantic search: find prior campaigns most similar to a description (text) or to an
     existing campaign (campaign_id). Matches at the slide/section level and rolls up to the
     best-matching campaign, so long decks match on the relevant part.
@@ -384,34 +1255,45 @@ def find_similar_campaigns(text: Optional[str] = None, campaign_id: Optional[str
     you require verification on just the performance tag while leaving the reaction tag
     open to any source.
 
+    Decks are indexed in two layers. The BODY is what the deck says; COMMENTARY is what
+    people said about it — speaker notes, PDF annotations and tracked reviewer comments,
+    carrying author, date and position wherever the file recorded them (speaker notes carry
+    no author; a null one means the file did not say, not that nobody said it). Both are
+    searched by default, and `matched_kind` on every hit says which one matched: a
+    `commentary` hit is somebody's opinion of the work, not a claim the brief made, and
+    citing it as the latter attributes a reviewer's objection to the deck.
+    include_commentary=False answers "what does the brief say"; a list of kinds narrows to
+    who was speaking — ["comment"] is what reviewers left on the deck, as opposed to
+    ["speaker_note"], which the deck's own author wrote to themselves. Note that a PDF
+    export turns speaker notes into annotations, so the kind records the format the words
+    arrived in, not how much authority they carry.
+
     Returns ranked evidence — title, status/tags/region/market/collection, similarity,
-    detail, the matched excerpt, and metrics (each tag shows its value AND source) — for you
-    to reason over. detail and metrics are trimmed by default (detail_truncated/
+    detail, the matched excerpt with its matched_kind (and matched_author/matched_anchor/
+    matched_date when commentary matched), and metrics (each tag shows its value AND source)
+    — for you to reason over. detail and metrics are trimmed by default (detail_truncated/
     metrics_truncated flag it) — pass full_detail=True, or call get_campaign, for the
     untrimmed record."""
     conn = store.connect()
     try:
-        return {"matches": core.find_similar(conn, text=text, campaign_id=campaign_id,
+        return core.find_similar_with_context(conn, text=text, campaign_id=campaign_id,
                                              top_k=top_k, record_type=record_type,
                                              status=status, tags=tags,
                                              match_all_tags=match_all_tags, region=region,
                                              market=market, markets=markets,
                                              collection=collection,
-                                             full_detail=full_detail)}
+                                             full_detail=full_detail,
+                                             include_commentary=include_commentary)
     finally:
         conn.close()
 
 
-@mcp.tool()
-@_catch_value_errors
-def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
-                       record_type: Optional[RecordType] = None, status: Optional[Status] = None,
-                       tags: Optional[Union[TagInput, list[TagInput]]] = None,
-                       match_all_tags: bool = False,
-                       region: Optional[str] = None, market: Optional[str] = None,
-                       markets: Optional[Union[str, list[str]]] = None, collection: Optional[str] = None,
-                       full_detail: bool = True) -> dict:
-    """Evaluate a NEW campaign proposal against the memory. Returns the most similar prior
+# The description is built rather than taken from the docstring, so the shared procedure is
+# the same OBJECT here as in the server instructions rather than a second copy of the words.
+# The description the CLIENT sees, built rather than taken from the docstring so that
+# `EVALUATION_PROCEDURE` is the same object here as in the server instructions — one
+# procedure referenced twice, not two copies that agree today.
+_PREPARE_EVALUATION_DESCRIPTION = """Evaluate a NEW campaign proposal against the memory. Returns the most similar prior
     campaigns WITH their outcomes as an evidence package (full detail by default — this is
     for judging, not browsing). Optionally narrow to structured criteria first (e.g.
     region='APAC') so only relevant precedent is weighed. region/market are single-value
@@ -424,34 +1306,849 @@ def prepare_evaluation(subject_title: str, proposal_text: str, top_k: int = 5,
     weight in your judgment than one with real numbers. Read the evidence's tags for each
     match's source either way before treating a performance tag as fact.
 
-    Read it, then produce your judgment (predicted CTR/ROI ranges, risks,
-    proceed/revise/reject) CITING specific campaign_ids, and call save_evaluation. This tool
-    gathers evidence; the judgment is yours."""
+    Evidence rows come from two layers and say which in `matched_kind`: `body` is what a
+    deck says, `commentary` is what somebody said about it (speaker notes, annotations,
+    tracked client comments, with `matched_author` and `matched_anchor`). Weigh both — a
+    client's recorded objection is often the most useful precedent in the library — but
+    never blur them: quoting a commentary row as though the deck itself claimed it is a
+    false statement about that campaign.
+
+    `rulebook` says which rules were applied to THIS call: the version, how many rules, and
+    `basis: computed` — meaning the server put them in front of you itself rather than you
+    reporting that you considered them. Every rule is in the note in full, whatever this brief
+    is about; none of them was retrieved by similarity and none could be ranked out. A finding
+    that a rule was breached cites its `rule_id` and quotes it as written, and the server
+    refuses the finding if the rulebook has no such rule or the words are not the rule's own.
+    `rules_applied: 0` means nobody has written any rules down — then no rule was checked, and
+    saying one was is the false claim this field exists to make impossible.
+
+    `expected_measures` is what briefs in this record's market usually report, built from what
+    the library has actually seen and confirmed rather than from a rule anybody wrote. Its
+    `missing` list is a gap in the brief, not a verdict on it — a measure can be meaningless
+    for a given kind of campaign, and only you can tell. Raise one as `missing_information`
+    where it matters and say nothing where it does not; it never moves the verdict on its own.
+    Read `status` first: `nothing_to_check` means no checklist applied (the record has no
+    market, or is not a campaign), which is not the same as a brief that carries everything.
+
+    `starts_on`/`ends_on` say WHEN this proposal would run (ISO dates). Pass them whenever the
+    pitch names a flight: `computed.calendar_clash` then says what the window runs into —
+    Ramadan, Golden Week, Black Friday, a World Cup, a monsoon. It is a fact about TIMING and
+    not a criticism: launching into Black Friday is the point of some campaigns and the ruin of
+    others, and this library cannot tell which. What is worth raising is the SILENCE — a plan
+    that overlaps something it never mentions. Ask whether that is deliberate; do not make it a
+    blocking finding on its own. A clash marked `seeded` came from the calendar shipped with
+    this product rather than from this customer, and a shipped date can be wrong for their
+    market — say so if you rest on one. With a `campaign_id`, the record's own window and
+    markets are used and these are ignored.
+
+    `standing_corrections` are the rules this client has actually repeated — each one recurred
+    across markets and a person confirmed it — with the provenance it was learned from. They
+    are rules, not suggestions: a brief that breaks one is a `guardrail_breach` citing
+    `precedent: {correction_id, quote}`, quoting the rule's own words. Say nothing where a rule
+    plainly does not apply to this kind of brief.
+
+    `most_valuable_missing_input` names the single thing that would most change this
+    judgment, or is null when nothing would. Say it as part of the verdict rather than as an
+    aside — "this rests on three campaigns, none of which has measured results" is context
+    the user needs in order to know how much to trust what follows.
+
+    **Pass `campaign_id` when the subject is already a record, and the server derives
+    everything from it** — the query is the record's own text and the filters are its own
+    attributes, so the same subject retrieves the same evidence however you describe it. That
+    is the point: a 200-word summary and a 2,000-word one retrieve different evidence from the
+    same deck, and different evidence is a different verdict.
+
+    Filters split in two. `market`, `region`, `collection` and `markets` say WHICH BRIEF this
+    is, so with a `campaign_id` they come from the record and passing one is refused — it asks
+    for evidence about a different subject. `tags`, `status` and `record_type` narrow WITHIN
+    the subject and stay yours: "weigh only precedent whose performance is verified" is a
+    deliberate narrowing, not a scope chosen quietly. Everything used is recorded on the
+    receipt and in `retrieval.filters_from`.
+
+    `top_k` is the server's. A judgment resting on three precedents and one resting on twenty
+    are different judgments, and neither number is a fact about the brief.
+
+    `retrieval.receipt` comes back with the package. Pass it to `save_evaluation` as
+    `retrieval` and the server records which of your citations were in the evidence it gave
+    you — a record you cite that was never retrieved is not shared evidence, and the next
+    person judging this brief will not see it.
+
+    Read it, then call save_evaluation with a verdict (approve / revise / reject), a
+    one-line summary and one short finding per problem, CITING specific campaign_ids. When a
+    finding quotes a `commentary` row, set that precedent's `layer: "commentary"` and carry
+    its author and anchor across. Predicted CTR/ROI ranges go in `predictions`. This tool
+    gathers evidence; the judgment is yours.
+
+""" + EVALUATION_PROCEDURE
+
+
+@mcp.tool(description=_PREPARE_EVALUATION_DESCRIPTION)
+@_catch_value_errors
+def prepare_evaluation(subject_title: str, proposal_text: str,
+                       campaign_id: Optional[str] = None, top_k: Optional[int] = None,
+                       record_type: Optional[RecordType] = None, status: Optional[Status] = None,
+                       tags: Optional[Union[TagInput, list[TagInput]]] = None,
+                       match_all_tags: bool = False,
+                       region: Optional[str] = None, market: Optional[str] = None,
+                       markets: Optional[Union[str, list[str]]] = None, collection: Optional[str] = None,
+                       full_detail: bool = True,
+                       starts_on: Optional[str] = None, ends_on: Optional[str] = None) -> dict:
+    """Package the evidence Claude needs to judge a new proposal.
+
+    The description a client actually receives is `_PREPARE_EVALUATION_DESCRIPTION`
+    above, which is this text plus the shared `EVALUATION_PROCEDURE` (§7.4).
+    """
+
     conn = store.connect()
     try:
         return core.prepare_evaluation(conn, subject_title=subject_title,
                                        proposal_text=proposal_text, top_k=top_k,
+                                       campaign_id=campaign_id,
                                        record_type=record_type, status=status, tags=tags,
                                        match_all_tags=match_all_tags, region=region,
                                        market=market, markets=markets, collection=collection,
-                                       full_detail=full_detail)
+                                       full_detail=full_detail,
+                                       starts_on=starts_on, ends_on=ends_on)
     finally:
         conn.close()
 
 
 @mcp.tool()
 @_catch_value_errors
-def save_evaluation(subject_title: str, analysis: str, cited_ids: Optional[list] = None,
-                    predictions: Optional[dict] = None, campaign_id: Optional[str] = None) -> dict:
-    """Persist your judgment of a campaign so it becomes memory. Include the specific
-    campaign_ids you cited and, if given, structured predictions — so a later
-    reconcile_evaluation can score prediction vs. actual. Returns the evaluation_id."""
+def save_evaluation(subject_title: str, verdict: Verdict, summary: str,
+                    findings: Optional[list[Finding]] = None,
+                    resolved: Optional[list[dict]] = None,
+                    closest_precedent: Optional[dict] = None,
+                    approve_if: Optional[str] = None,
+                    cited_ids: Optional[list] = None,
+                    predictions: Optional[dict] = None,
+                    campaign_id: Optional[str] = None,
+                    retrieval: Optional[str] = None,
+                    model_id: Optional[str] = None,
+                    subject_text: Optional[str] = None,
+                    markets: Optional[list[str]] = None) -> dict:
+    """Persist your judgment as structured findings, not prose.
+
+    Pass `subject_text` and `markets` for a proposal that is not stored — they are what the
+    server re-runs its own checks against, including §9.7's calendar clash, which it appends
+    to your findings whether or not you mention it. With a `campaign_id` the record answers
+    both and neither is needed.
+
+    Write ONE finding per problem. Each is a short line naming the problem (<=120 chars),
+    with the explanation in `detail` where a reader can open it if they want it — not a
+    paragraph in `finding`. `summary` is <=240 chars: the one line a marketer acts on.
+
+    `severity` says what the finding does to the verdict, so counts mean the same thing in
+    every evaluation:
+      • `blocking`   — this alone means the brief cannot proceed as written.
+      • `should_fix` — proceeding is defensible, but it will cost something.
+      • `note`       — worth saying once; nobody has to act.
+    A `revise` or `reject` needs at least one finding above a note, and you cannot `approve`
+    while recording a blocking one. Both are rejected rather than saved — and the honest fix
+    for the second is the verdict, never a quieter severity.
+
+    `kind` is REQUIRED, and it says whether the finding is arguable at all — which severity
+    cannot express. Severity is how much it matters; kind is whether there is anything to
+    discuss. The first two are different classes of statement and must not be written in the
+    same register:
+
+      • `guardrail_breach` — a rule the customer set was broken. Cite the rule: either
+        `precedent: {rule_id, quote}`, where `rule_id` is the id of a rule in the RULEBOOK
+        (they are listed in full at the top of `prepare_evaluation`'s note), or
+        `precedent: {correction_id, quote}` for one of the
+        `standing_corrections` — a rule the library learned from repeated client feedback and
+        a person confirmed. Quote the rule's own words. **Not debatable**, so never a `note`. State it: "this breaks your own rule
+        on AI imagery". There is no rationale that makes it not a breach; there is only a
+        decision to accept it, and that is the customer's to make, not yours to pre-empt.
+
+      • `precedent_departure` — done differently from a campaign on file. Cite the campaign:
+        `precedent: {campaign_id, quote}`. **Debatable by design**, and you must say which
+        way it departs with `departure`:
+          – `regression`          the difference is worse, and you can say why.
+          – `unexplained`         it may well be deliberate; the brief does not say.
+          – `possible_improvement` it may be better than the precedent. This must be a
+            `note` — asking for it to be changed back contradicts your own reading.
+        Ask, do not instruct: "Peru seeded one colourway per creator and this seeds four —
+        is that deliberate?" A departure that turns out BETTER than the precedent is the
+        most valuable thing this library can notice, and the product's own worked example is
+        a brief whose claw machine was a departure that beat what it departed from. Filing
+        that as a defect is the failure this field exists to prevent.
+
+      • `missing_information`   — the brief does not say. A gap to fill, not an argument.
+      • `internal_contradiction`— the brief contradicts itself. Same.
+
+    Anchor findings to evidence, and the server checks it: a `precedent` must carry a
+    `quote`, and that quote must actually be in the record it names, at the layer it claims.
+    The record's brief, its deck text and what it recorded as results are all quotable; its
+    title is not, because a title is not evidence. A quote is at least 12 characters, and may
+    leave out at most two short passages with … — more than that is an assembly rather than a
+    quotation, and it belongs in two findings.
+    A quote that is not there is refused rather than saved — copy the words from the evidence
+    you were given, use … for anything you leave out, and never paraphrase into quotation
+    marks. If you cannot quote it, drop the citation and say it as an observation; an
+    invented quote reads as evidence, which is worse than none.
+
+    `guardrail_breach` and `precedent_departure` MUST cite a precedent: they are claims about
+    another record. `missing_information` and `internal_contradiction` are claims about the
+    brief in front of you, which is not in the library, so they need no citation — do not go
+    looking for a campaign to quote at in order to satisfy the shape.
+
+    `rule_id` means a rule in the rulebook, by its id — the versioned file whose rules are put
+    in front of you in full on every judgment (§12.1). It is NOT a record in the library: a
+    guidelines document uploaded as reference material is retrieved by similarity like
+    anything else, and a rule that arrives only when it happens to rank is not a rule. If the
+    rulebook has no rule for what you want to say, say it as a `precedent_departure` or a
+    `missing_information` finding — do not anchor it to a record. `correction_id`
+    means a standing correction, which is a rule too: it recurred across markets and somebody
+    confirmed it. Neither is interchangeable with `campaign_id`: doing it differently from a
+    past campaign is a `precedent_departure`, however strongly you feel about it. A correction
+    still `provisional` is not yet a rule and is refused here — raise that as a
+    `precedent_departure` against the campaign it came from.
+
+    Check which LAYER your quote came from. Evidence rows carry `matched_kind`: `body` is
+    what the deck says, `commentary` is what somebody said ABOUT it — a speaker note, a PDF
+    annotation, or a tracked comment a client left on a returned deck. Quoting commentary is
+    legitimate and often the best evidence there is, but you must mark it: set
+    `precedent.layer: "commentary"` with the `author` and `anchor` from that row. Left
+    unmarked it is stored as something the campaign's own deck claimed, which is a different
+    and false statement.
+
+    Two worked findings. Note that the first carries NO precedent — it is a claim about the
+    brief in front of you, and attaching a citation to it would mean going and finding a
+    campaign to quote at:
+      {"severity": "blocking", "kind": "missing_information", "category": "timeline",
+       "finding": "No posting dates on any deliverable",
+       "detail": "All 14 assets in the flighting table are undated, so nothing can be
+                  sequenced or held to the embargo.",
+       "fix": "Add a posting date per asset to the flighting table"}
+      {"severity": "should_fix", "kind": "precedent_departure", "departure": "unexplained",
+       "category": "influencer",
+       "finding": "Seeds four colourways where the Jakarta launch seeded one",
+       "detail": "Jakarta seeded one per creator and concluded above benchmark. Four may be
+                  deliberate for a launch this size; the brief does not say.",
+       "precedent": {"campaign_id": "<a campaign_id from your evidence>",
+                     "quote": "<its own words, copied — not written from memory>"},
+       "fix": "Say whether four colourways is deliberate for a launch this size"}
+    Look at the second `fix`. Every finding above a note needs one, and for an `unexplained`
+    departure the action is an ANSWER, not a change — "seed one colourway" would be telling
+    them to undo something you have just said may be deliberate. A `regression` is where a
+    fix that changes something belongs.
+
+    The response tells you how to voice what you wrote: `by_class` counts the three classes
+    and `note` says the register for each. `improvements` carries the possible improvements
+    separately, because the rule that makes them notes also keeps them out of `findings`.
+
+    **The server measures what your judgment rests on.** `evidence` comes back with the
+    count of campaigns you cited, how many concluded, how many carry measured performance
+    rather than a stated impression, the top similarity, and whether ONE of them is carrying
+    the weight. Give that before the verdict when it is thin — after the verdict a caveat
+    reads as hedging. You cannot write this field: a measure of your own evidence, reported
+    by you, is not a measure. Cite honestly in `cited_ids` and the count follows.
+
+    **The server checks your verdict against the other side.** After you save, it searches
+    for precedent that CONTRADICTS the verdict — campaigns resembling this one that worked
+    anyway when you said revise, or that failed when you said approve. What it counts is a
+    measured VERDICT: somebody recorded whether the campaign worked and stood behind it, which
+    is a stricter thing than having numbers on file (§13.1). A library full of measured
+    campaigns that nobody has judged has nothing here to argue with, and `disconfirming.why_not`
+    says which of those two is missing. It comes back as `disconfirming`, with the measured
+    line behind each. Read it before you speak: if it found something the judgment did not cite,
+    say so before you give the verdict. And read the `code` rather than the absence of rows —
+    "could not be checked" and "nothing came back" are opposite conclusions. You cannot write
+    this field; a check you report on yourself is not a check.
+
+    **Pass `subject_text`** — the brief itself, if it is not a stored record. The server
+    raises the mechanical findings from it (no dates, no engagement rates, a date that
+    contradicts the calendar) and marks them `basis: computed`: identical for every user, so a
+    difference in one is a bug rather than a disagreement. They never change your verdict.
+
+    **Pass `model_id`** — which model you are. The server stamps every verdict with what
+    produced it (server version, rulebook version, embedding model, retrieved ids and scores)
+    so that a disagreement between two judgments can be read off the difference. This is the
+    one field it cannot observe, and it is recorded as unknown rather than guessed.
+
+    `approve_if` is what would flip a `revise` to `approve`, stated so someone could check
+    it: "dates on every deliverable and the two conflicted profiles removed". It doubles as
+    the note the partner receives.
+
+    **REQUIRED on a revise. Forbidden on an approve and on a reject.** An approve has nothing
+    to exit, and a condition attached to one is a reservation the verdict does not admit to.
+    A reject that can name the changes that would make it approvable is a revise — that is
+    the difference between the two words. And the list of findings is not the same thing as
+    an exit condition: three findings may need two changes, and one may need three.
+
+    Every finding above a `note` needs a `fix`, one line saying what to change. The response
+    comes back with `exit_checklist` — those fixes, worst first, each pointing at the finding
+    it came from — so the partner has something to tick off rather than a sentence to
+    interpret. For an `unexplained` departure the fix is an ANSWER ("say whether four
+    colourways is deliberate"), never an instruction to undo what you just said may be
+    deliberate.
+
+    `resolved` is for a later version of a brief: `[{finding_id, was, now}]` records what an
+    earlier evaluation asked for and what changed — that is how the library learns whether
+    its own advice was taken. **Always include `finding_id`** when `prepare_evaluation` gave
+    you an `earlier_version` block: it is what lets diff_campaigns state that a correction
+    was adopted instead of guessing from how alike two sentences read. An id that matches no
+    stored finding is rejected rather than silently ignored.
+
+    For the other direction, a problem that is still there: raise it as your own finding and
+    set `repeats` to the earlier finding's id.
+
+    At most 12 findings. The response gives back the verdict, the summary, the counts, and
+    the blocking and should_fix lines themselves — give the user those. The reasoning behind
+    any finding is in `get_evaluation`, which also filters by severity or kind."""
     conn = store.connect()
     try:
-        eid = store.insert_evaluation(conn, subject_title=subject_title, analysis=analysis,
-                                      campaign_id=campaign_id, cited_ids=cited_ids,
-                                      predictions=predictions)
-        return {"evaluation_id": eid, "status": "saved"}
+        return core.save_evaluation(
+            conn, subject_title=subject_title, verdict=verdict, summary=summary,
+            findings=findings, resolved=resolved, closest_precedent=closest_precedent,
+            approve_if=approve_if, campaign_id=campaign_id, cited_ids=cited_ids,
+            predictions=predictions, retrieval=retrieval, model_id=model_id,
+            subject_text=subject_text, markets=markets)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def diff_campaigns(earlier: str, later: str) -> dict:
+    """What changed between two versions of the same brief — which corrections were taken.
+
+    The question a marketer has when v2 arrives, and the one thing here that was previously
+    done by hand. Computed from the two versions' EVALUATION findings, not from their decks:
+
+      `adopted`           a finding the later judgment explicitly resolved by id, OR one a
+                          person recorded as `fixed`/`not_applicable` with answer_finding.
+                          Read `basis`: on the first it is `computed` (the server matched two
+                          ids); on the second it is `stated` and `settled.said_by` names
+                          whose word it is. Those are different claims and only one is a
+                          comparison of the versions. A `deliberate` answer is NOT adoption —
+                          nothing was adopted — and appears in `no_longer_raised` with the
+                          reason, rather than under a caveat saying nobody recorded anything.
+      `raised_again`      a finding the later judgment raised too.
+      `newly_introduced`  a problem only the later version has.
+      `no_longer_raised`  neither resolved nor repeated. Read the caveat, which differs by
+                          case: an approve with no findings, or a later review that covered
+                          the same category, both make "fixed but unrecorded" the likelier
+                          reading. Never report it as adopted.
+      `carried_stale`     a record either judgment cited that has since been replaced;
+                          `cited_by` says which.
+      `record_changes`    what the records themselves say differently — markets dropped,
+                          tags added or no longer verified, status or collection changed.
+
+    **Read `basis` and `match` before you characterise anything.** `basis: "computed"` with
+    `match: "id"` means a review said these are the same finding: you can state it as fact.
+    `basis: "judged"` with `match: "text"` means only that the two READ alike — character
+    similarity scores "adidas-affiliated" against "Nike-affiliated" at 0.89, and the same
+    problem reworded at 0.36. Say "these look like the same point, worth checking", never
+    "this correction was ignored". The word "ignored" is an accusation the marketer will
+    carry to their agency, and nothing here can support it on wording alone.
+
+    When `comparable` is false, a version has no structured judgment on file and
+    `why_not_comparable` says which side — do not fill the gap by reading the decks, because
+    that would be a judgment presented as arithmetic.
+
+    `order_basis` says how the earlier version was decided: `"supersession"` means the
+    library records it and `arguments_reordered` may be true; `"as_given"` means nothing does
+    and your order was assumed — say so, because if it is backwards every bucket is inverted.
+
+    This gets better as judgments accumulate. When `prepare_evaluation` returns an
+    `earlier_version` block, resolve each of its findings by `finding_id` or repeat it with
+    `repeats` — that is what turns a resemblance into a fact."""
+    conn = store.connect()
+    try:
+        return core.diff_campaigns(conn, earlier=earlier, later=later)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def feedback_queue(scope: Optional[str] = None, page: int = 1) -> dict:
+    """The numbered menu of what is waiting on a person (§10.1–10.4).
+
+    Feedback is the only input that makes this library worth anything and it is the hardest
+    thing to give: the user has to remember what is outstanding, name it, and compose prose.
+    This makes it a numbered choice.
+
+    **Read the rows out with their `why`.** "What does this want from me" is the question the
+    user actually has, and a list of titles does not answer it.
+
+    **Offer the numbers and nothing else.** The numbers are fixed: campaigns fill 1–9, 10 is
+    always "a concluded campaign" and 11 is always "show more", whether three are waiting or
+    nine. The gap when fewer than nine are open is deliberate — a moving target breaks the
+    habit the menu exists to create.
+
+    **Do not compose, reorder or renumber this list.** The server builds it so that two users
+    with the same library see the same menu; a list the model assembles is the exact variance
+    the consistency work removes.
+
+    Pass the returned `menu_token` back with the user's choice. It is how a number stays
+    attached to the row they were actually looking at."""
+    conn = store.connect()
+    try:
+        return feedback.queue(conn, scope=scope or "open", page=page)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def feedback_choose(menu_token: str, choice: int) -> dict:
+    """Take the number the user picked off the menu they were shown (§10.5, §10.3).
+
+    `menu_token` is the one that came back with those rows. If the library has changed since —
+    a version landed, somebody tagged something in another window — this returns the REFRESHED
+    menu rather than writing, because "3" would otherwise silently mean a different campaign.
+    Read the new menu out and ask again; nothing is lost.
+
+    What comes back is the next question, also as numbers, and only the ones this campaign
+    actually needs. Ask them in order. The free-text box at the end is where "slide 23 should
+    be the standard" gets captured — the most valuable sentence in the whole system — so
+    invite it, and accept a skip without pressing."""
+    conn = store.connect()
+    try:
+        return feedback.choose(conn, menu_token=menu_token, choice=choice)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def feedback_record(menu_token: str, choice: int, said_by: str, role: Optional[str] = None,
+                    reaction: Optional[int] = None, performance: Optional[int] = None,
+                    note: Optional[str] = None) -> dict:
+    """Write down what the user said (§10.3).
+
+    **`said_by` is WHOSE VIEW it is, not who is typing (§11.3).** The account at the keyboard
+    is recorded automatically and separately — that is a different fact and the server already
+    knows it. If the user is relaying a colleague's or a client's opinion, name that person;
+    do not put the operator's name on somebody else's view because they are the one talking
+    to you. Two years on, whether the person who held a view is the person who entered it is
+    the thing nobody can reconstruct, and it is the difference between evidence and hearsay.
+
+    `role` is that person's role AS THEY STATE IT NOW — "Regional planner, LATAM". Optional,
+    and never inferred: a role looked up later is the role they hold TODAY, so a planner who
+    becomes head of strategy would retroactively have made every past decision as head of
+    strategy, and the record would gain authority nobody granted it.
+
+    `choice` is the number the user pressed — the same one you passed to `feedback_choose` —
+    and the server resolves it against that menu. There is deliberately no `campaign_id`
+    here: a record named from anywhere but the menu the user was looking at is a write landing
+    somewhere they never chose.
+
+    `reaction` and `performance` are the numbers from `feedback_choose`, not words. `note` is
+    their own sentence and is optional — never withhold the write waiting for one.
+
+    `said_by` is who said it. A client is several people with different authority and
+    sometimes different opinions, and an opinion nobody's name is against cannot be weighed
+    against another later. If the user is relaying somebody else's view, that person is the
+    one to name.
+
+    A performance claim recorded here is `stated`, never `verified` — somebody saying it went
+    well is an impression until measurements back it, and this is the easiest place in the
+    product to type one."""
+    conn = store.connect()
+    try:
+        return feedback.record(conn, menu_token=menu_token, choice=choice,
+                               said_by=said_by, reaction=reaction, performance=performance,
+                               note=note, role=role)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def getting_started() -> dict:
+    """What this library can and cannot do yet, and the shortest way to more.
+
+    Call it on the first interaction of a session when list_campaigns is short or empty, and
+    whenever the user asks what the product can do, why an answer looked thin, or what to add
+    next.
+
+    **Say the limits before giving any judgment from a library this size.** A confident,
+    evidence-free verdict is exactly what a new user will believe, and `cannot` is what stops
+    that — each entry names the record that would lift it, so it is a next step rather than a
+    disclaimer.
+
+    `shortest_path` is ORDERED and is the review's own prescription: one brief you liked, one
+    you did not, your guidelines as reference material. The contrast is the point — two briefs
+    somebody liked teach the library nothing about the axis it is being asked to judge on.
+    Offer the first step; do not read the list out.
+
+    The third step is NOT "add the rulebook". §12.1 made the rulebook a file that ships with
+    the product and already applies; uploading a guidelines document makes it quotable when it
+    is retrieved, which is a weaker and different thing. `can`/`cannot` carries which of the
+    two the library has.
+
+    There is deliberately no "you need N records" number. Usefulness depends on what is in
+    the library, not how much: two contrasting briefs make the like/dislike comparison work
+    at two records, and a hundred concluded campaigns with nothing measured still cannot say
+    whether any of it worked."""
+    conn = store.connect()
+    try:
+        return core.readiness(conn)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def coverage() -> dict:
+    """Where the library is thick and where it is thin — by market, collection and stage.
+
+    `list_campaigns` answers "what have I got" one record at a time. This answers the
+    question a marketer actually has: which markets and collections are represented, which
+    have measured results, and which rest on a single example.
+
+    Each cell carries `campaigns`, `with_outcomes` and an `evidence` marker:
+      `no_outcomes`     campaigns are there and none was ever measured, so judgments about
+                        this cell compare a proposal to what was planned, not what happened.
+      `single_example`  one campaign is carrying every judgment about this cell. Worth saying
+                        out loud: the similarity score looks the same whether it came from
+                        one precedent or nine.
+      `measured`        two or more, with results.
+
+    Read `thin` rather than the matrix — it is the same cells, worst first. Cells OVERLAP: a
+    campaign that ran in three markets is in three of them, so the counts do not add up to
+    `campaigns_total`, and `cells_total` says how many exist if the list was truncated.
+
+    This is "what do I have". For "what should I fix first", with prefilled actions, call
+    gaps() — the two are computed from the same grouping and cannot disagree."""
+    conn = store.connect()
+    try:
+        return core.coverage(conn)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def gaps() -> dict:
+    """What this library is missing, ranked, with what would close each one.
+
+    Call it when the user asks how good their library is, what to add next, or why an answer
+    looked thin — and offer it unprompted after a judgment that had to say something was
+    missing. The library knows it holds one campaign with measured results, or that no LATAM
+    campaign has any; it has never said so unless asked.
+
+    `most_valuable` names the one to fix first. Each gap carries `what` (the fact),
+    `why_it_matters` (what it costs), `counts`, and `next_actions` that would close it. An
+    empty list means nothing is missing, which is a real and rare answer — do not embroider
+    it.
+
+    This is about the LIBRARY. The equivalent for a single judgment is
+    `most_valuable_missing_input` on prepare_evaluation, and the two routinely differ: a
+    library that is mostly measured can still produce a verdict resting entirely on the part
+    that is not."""
+    conn = store.connect()
+    try:
+        return core.gaps(conn)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def answer_finding(evaluation_id: str, finding_id: str, answer: FindingAnswer, note: str,
+                   said_by: str) -> dict:
+    """Record what a person says about one finding on a saved judgment (§10.2).
+
+    **Call this whenever the user answers a finding.** They routinely do, in passing — "that
+    was deliberate, the client moved the date", "we fixed that in v2", "that doesn't apply,
+    it's a reference deck" — and until now there was nowhere for it to go, so the same
+    question came back on the next brief and the stored finding kept saying nobody had
+    explained it.
+
+    `answer` is one of three, and the difference between the first two matters:
+      `fixed`            the problem was real and it was addressed.
+      `deliberate`       it was kept on purpose, and the note says why.
+      `does_not_apply`   the point is right in general and not applicable to this brief.
+      `misread`          the finding is WRONG about what the brief says. Use this one rather
+                         than softening it: a person telling this library its judgment was
+                         mistaken is the most valuable thing it gets told, and it is the only
+                         signal that the product itself needs fixing.
+      `open`             never mind — take an earlier answer back. The earlier one stays on
+                         file; it stops being the current one.
+
+    `note` is required — say why, in the user's own words. "Deliberate" with no reason is the
+    same non-answer as `unexplained`, except that it stops the question being asked.
+
+    `said_by` is required. This overrides a stored finding, and every stated claim in this
+    library carries who made it.
+
+    The answer travels: any later judgment that retrieves this record reads it, so a revision
+    of this brief is not asked the settled question again."""
+    conn = store.connect()
+    try:
+        return core.answer_finding(conn, evaluation_id=evaluation_id, finding_id=finding_id,
+                                   answer=answer, note=note, said_by=said_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def person_on_file(name: str) -> dict:
+    """Everything this library holds about one person (§11.7).
+
+    Call it when somebody asks what is stored about them, before erasing anybody, or when the
+    user asks what personal data this product keeps. Each mention says what it IS — a view
+    they recorded, a comment they left on a deck — because that is what somebody is deciding
+    whether to have erased.
+
+    A name is not an identifier: matching is case- and spacing-insensitive, and an empty
+    result means nothing is on file under THAT SPELLING. Say so plainly rather than reporting
+    it as "we hold nothing about you", which is a different and stronger claim.
+
+    Free-text notes and reasons are NOT searched. Those are somebody's own sentences and may
+    mention anyone; this covers every field the product puts a name in, which is what it can
+    promise to find and to erase."""
+    conn = store.connect()
+    try:
+        return people.on_file(conn, name)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def pseudonymise_person(name: str, why: str, said_by: str) -> dict:
+    """Replace one person's name everywhere with a stable token (§11.7).
+
+    Ask before calling this, always, and show `person_on_file` first — it rewrites records
+    that saved judgments rest on, and this product cannot turn it back.
+
+    **Say what it is, if somebody asks whether their name has been deleted.** The token is
+    derived from the name, so somebody holding this database AND a list of candidate names
+    could confirm a match. That makes it PSEUDONYMISATION, not anonymisation, and under GDPR
+    these records remain personal data. Do not tell a data subject their name is gone: tell
+    them it has been replaced by a token this product cannot reverse. For true erasure, delete
+    the campaigns their words are attached to.
+
+    It replaces rather than deletes because deleting would break the judgments. Every mention
+    becomes the same token, so a judgment that cited this person still reads as one person —
+    two findings about them are still about the same someone. A blank would make "two
+    reviewers objected" and "one reviewer objected twice" indistinguishable.
+
+    It refuses a name that is PART of a longer name on file, and says which: erasing "Vega"
+    would otherwise rewrite the deck author "Ana Vega" and file her under this person's token.
+
+    `why` and `said_by` are required and go on a permanent record — without the name, which
+    would defeat the exercise. A record silently rewritten is a record nobody can trust."""
+    conn = store.connect()
+    try:
+        return people.erase(conn, name, why=why, said_by=said_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def correct_person_name(name: str, to: str, why: str, said_by: str) -> dict:
+    """Fix a misspelled name, everywhere it appears (§11.7, GDPR Art. 16).
+
+    Offer this when the user notices a name was entered wrong. Without it the only remedy for
+    a typo was `pseudonymise_person`, which this product cannot undo — so somebody whose name
+    was mistyped had to choose between a wrong record and no record. (Not "irreversible": the
+    token is derived from the name, and that tool says so itself. What is true is that nothing
+    here can turn it back, which is what makes it the wrong remedy for a typo.)
+
+    It refuses to merge two people: if `to` is already somebody on file, folding them together
+    would turn a disagreement between two voices into a single view nobody holds. Correct it
+    to a spelling nobody else uses."""
+    conn = store.connect()
+    try:
+        return people.rename(conn, name, to=to, why=why, said_by=said_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def personal_data_position() -> dict:
+    """What this product holds about people, for how long, and what they can do (§11.7).
+
+    Answer the user from this rather than from memory when they ask about privacy, GDPR,
+    retention, or what is stored about whom. It names the fields HARVESTED from uploaded decks
+    — PDF annotation authors and PowerPoint comment authors — which is the part a customer
+    does not expect, because nobody typed those names into this product.
+
+    It deliberately does not claim a lawful basis: this runs on the customer's machine against
+    their own files, and which basis applies is theirs to decide with their own counsel. What
+    it guarantees is that the data is enumerable and erasable on request."""
+    return people.retention()
+
+
+@mcp.tool()
+@_catch_value_errors
+def backfill_author_unknown() -> dict:
+    """Mark records stored before this library read commentary, with today's date (§11.6).
+
+    Offer it when the user asks why a search hit cannot name an author, or when reviewing what
+    the library knows about who wrote what. Safe to run at any time and it runs once per
+    record: it never touches a name, and a record whose commentary WAS read is left alone.
+
+    What it records is a fact about THIS LIBRARY, not about the customer's files: "we did not
+    look." Without it, a record from before commentary extraction is indistinguishable from
+    one whose deck genuinely said nothing — and a judgment citing "a reviewer objected" cannot
+    tell a client's anonymous comment from the agency's own speaker note."""
+    conn = store.connect()
+    try:
+        return core.backfill_author_unknown(conn)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def attach_deck(campaign_id: str, asset_ref: dict) -> dict:
+    """Attach a deck to a campaign that is ALREADY on file (§12.4).
+
+    Offer this when a record's comments were never read — `gaps` says which — or when somebody
+    has the deck for a record that was created from a description. It reads the file, stores
+    it, indexes its text, and reads its tracked comments and speaker notes, ALL ON THE SAME
+    RECORD.
+
+    **Do not use `upload_campaign` for this.** That creates a second record for the same
+    campaign, which splits its evidence in two and makes both halves thinner — this tool
+    exists because that was previously the only way.
+
+    A record that already HAS a deck is refused. A new version of a brief is a new record that
+    supersedes the old one (`upload_campaign` with `supersedes=`), which keeps both: replacing
+    the text in place would throw away what every saved judgment was made against."""
+    conn = store.connect()
+    try:
+        return core.attach_deck(conn, campaign_id=campaign_id, asset_ref=asset_ref)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def update_asset(asset_id: str, phase: AssetPhase, why: str, said_by: str) -> dict:
+    """Correct what an image is evidence OF (§12.4).
+
+    `phase` says whether an image is BRIEFED creative or what actually ran, and everything
+    about how it is used follows from that: which corpus a reuse match is drawn from, whether
+    `compare_execution` treats it as the plan or the outcome. A set of event photographs filed
+    as `proposed` makes the execution comparison compare the results with themselves.
+
+    Offer it when somebody says a batch went in wrong. **Ask who is correcting it and why** —
+    this changes what past evidence meant, so both go on the record; do not fill them in."""
+    conn = store.connect()
+    try:
+        return core.update_asset(conn, asset_id=asset_id, phase=phase, why=why,
+                                 said_by=said_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def load_rulebook_corrections(confirmed_by: str) -> dict:
+    """Put the standing corrections declared in your rulebook in force (§12.3).
+
+    Offer it when `getting_started` says some are waiting, or when the user asks why a rule
+    they wrote is not being applied. **Ask who is confirming — do not fill it in.** Putting a
+    rule in front of every future brief is the one step in this loop that is deliberately a
+    person's, and a name nobody gave is a standing requirement nobody can question later.
+
+    These skip the three-campaign gate, and the reason is worth relaying if asked: that test
+    is for a rule this library INFERRED from what it watched recur, where breadth across
+    markets is what makes the guess safe. A rule the customer wrote in their own file is not a
+    guess. Each one keeps the provenance they gave it, with the rulebook named beside it, so a
+    judgment citing one can say where it came from.
+
+    Safe to run twice: corrections already on file are counted and left alone."""
+    conn = store.connect()
+    try:
+        return core.load_declared_corrections(conn, confirmed_by=confirmed_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def answers(said_by: Optional[str] = None) -> dict:
+    """Every answer a person has given this library, newest first.
+
+    Call it when the user asks what has been overridden, who decided something, why a finding
+    stopped being raised, or why a gap is no longer reported — and offer it when they are
+    reviewing the library rather than adding to it.
+
+    This is the record of where somebody argued with a judgment and won, which for this
+    product is the most valuable thing it holds. Each entry carries the answer, the reason in
+    their own words, who gave it, and what it was about.
+
+    Read three fields before summarising:
+      `stands`    whether this is the answer in force. Older statements about the same thing
+                  are KEPT — what somebody said before the numbers arrived and what they said
+                  after are two judgments, and the pair is worth more than either.
+      `silences`  whether this answer makes the product say LESS than it otherwise would.
+                  Those are the ones worth reading first.
+      `stale`     given long enough ago that nobody can say it still holds. Nothing re-asks
+                  automatically; a market written off last year may have been revived.
+
+    An empty log does NOT mean nothing was asked — a judgment raising an unexplained
+    departure asked a question, and so did every gap somebody could not close. It means no
+    answer is on file, so all of them are still open."""
+    conn = store.connect()
+    try:
+        return core.answers(conn, said_by=said_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def answer_gap(code: str, answer: GapAnswer, note: str, said_by: str) -> dict:
+    """Record what a person says about a gap they cannot close (§10.2).
+
+    Some gaps are true and permanent — a market whose campaigns were run by an agency that no
+    longer exists will never have its results — and reporting one every time is a complaint
+    rather than a next step. Offer this when the user says a gap is not going to close.
+
+      `known_not_yet`    known, not being done yet. It STAYS in the ranking, because it is
+                        still the thing to fix; the note travels with it so nobody has to
+                        work out whether anyone has looked.
+      `not_applicable`  this will never be true here. It leaves the ranking.
+      `open`            never mind — treat it as outstanding again.
+
+    Nothing is deleted. A gap somebody set aside still appears under `set_aside` on gaps(),
+    because it is still a fact about the library's evidence and judgments resting on that
+    evidence are still weaker for it. `code` must be a gap the library is actually reporting;
+    call gaps() to see them."""
+    conn = store.connect()
+    try:
+        return core.answer_gap(conn, code=code, answer=answer, note=note,
+                                    said_by=said_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def get_evaluation(evaluation_id: str, severity: Optional[Severity] = None,
+                   kind: Optional[FindingKind] = None,
+                   departure: Optional[Departure] = None) -> dict:
+    """Read a stored judgment back in full, with the reasoning `save_evaluation` left out.
+
+    This is where "show me the blocking items" is answered — including in a session that did
+    not produce the evaluation. Narrow with `severity` ("blocking"), `kind`
+    ("guardrail_breach") or `departure` ("possible_improvement") rather than fetching
+    everything and filtering in the reply.
+
+    `disconfirming`, `exit_checklist`, `by_class` and `how_to_say_it` come back with it, so a judgment read in a later session
+    is voiced the same way it was when it was written — a rule breach stated, a departure
+    asked about. `improvements` lists the departures somebody thought were better than the
+    precedent; those are notes by rule, so they are easy to miss in the findings list.
+
+    Find the id with list_evaluations if the user names the judgment rather than its id."""
+    conn = store.connect()
+    try:
+        return core.get_evaluation(conn, evaluation_id=evaluation_id, severity=severity,
+                                   kind=kind, departure=departure)
     finally:
         conn.close()
 
@@ -459,9 +2156,11 @@ def save_evaluation(subject_title: str, analysis: str, cited_ids: Optional[list]
 @mcp.tool()
 @_catch_value_errors
 def list_evaluations() -> dict:
-    """List past evaluations (id, campaign_id, subject_title, created_at) — use this to find
-    an evaluation_id when the user refers to a judgment by name rather than id (e.g.
-    "reconcile the APAC campaign evaluation") before calling reconcile_evaluation."""
+    """List past evaluations — id, campaign_id, subject_title, verdict, counts by severity,
+    created_at. The verdict and counts are there so "which of these still need work" can be
+    answered from the list itself. Use it to find an evaluation_id when the user refers to a
+    judgment by name rather than id (e.g. "reconcile the APAC campaign evaluation"), then
+    call get_evaluation for the findings or reconcile_evaluation to close the loop."""
     conn = store.connect()
     try:
         rows = store.list_evaluations(conn)
@@ -475,9 +2174,13 @@ def list_evaluations() -> dict:
 def reconcile_evaluation(evaluation_id: str, actual: Optional[str] = None) -> dict:
     """Start closing the loop on a past judgment. If actual metrics are already on file for
     this campaign (via add_metrics/bulk_import_metrics), they're pulled automatically —
-    otherwise pass actual= with the real post-campaign metrics yourself. Returns your
-    original analysis + predictions alongside the actuals. Compare them, then call
-    save_reconciliation with the lesson."""
+    otherwise pass actual= with the real post-campaign metrics yourself. Returns the
+    original verdict, summary and findings (or, for a judgment written before the structured
+    schema, `original_analysis` — the free text as it was written) alongside the actuals.
+    The server has already scored every prediction it could check — read `scored` and
+    `counts` rather than re-deriving them. What is left for you is everything marked
+    `yours_to_judge` or `not_comparable`, and the lesson: what it MEANT, which is the only
+    half that improves the next judgment. Then call save_reconciliation."""
     conn = store.connect()
     try:
         return core.reconcile_evaluation(conn, evaluation_id=evaluation_id, actual=actual)
@@ -487,13 +2190,372 @@ def reconcile_evaluation(evaluation_id: str, actual: Optional[str] = None) -> di
 
 @mcp.tool()
 @_catch_value_errors
-def save_reconciliation(evaluation_id: str, comparison: str, actual: Optional[str] = None) -> dict:
-    """Persist your prediction-vs-actual comparison and the lesson learned, so future
-    evaluations are better calibrated. Returns the reconciliation id."""
+def resolve_measure(measure: str, decision: MeasureDecision,
+                    same_as: Optional[str] = None) -> dict:
+    """Answer the one question the library asks about a new measure (§8.2).
+
+    When an unfamiliar metric key arrives, the server records the value, registers the measure
+    provisionally, and asks ONCE — never rejecting it (which would lose the number) and never
+    silently accepting it (which is how two campaigns produced 25 keys for what turned out to
+    be a much smaller set of measures).
+
+      • `same_thing` — it is the measure named in `same_as`. The values already recorded move
+        with it, so asking for every one of that measure returns them all.
+      • `different_measure` — it is its own thing. It stays on file and stops asking. Whether
+        briefs should be EXPECTED to carry it is a separate question, asked once it has been
+        seen across more than one market.
+      • `ignore` — stop asking. The values already recorded are KEPT: this is a decision about
+        the vocabulary, not about the data.
+
+    Offer the three; do not choose for the user. Which of two names is the real measure is a
+    judgment about their vocabulary, and getting it wrong silently merges two things that are
+    not the same."""
     conn = store.connect()
     try:
-        rid = store.insert_reconciliation(conn, evaluation_id=evaluation_id,
-                                          comparison=comparison, actual=actual)
-        return {"reconciliation_id": rid, "status": "saved"}
+        return metrics.resolve(conn, measure, decision=decision, same_as=same_as)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def graduate_measure(measure: str, confirmed_by: str) -> dict:
+    """Add a measure to the checklist briefs in its markets are expected to carry (§8.3).
+
+    A measure graduates once it has been seen in several campaigns, ACROSS AT LEAST TWO
+    MARKETS, and a person has confirmed it. All three are required, and the second is the one
+    that matters: count alone is not enough, because one partner's house metric becoming a
+    standing requirement for everyone is how a checklist grows demands nobody agreed to.
+
+    `confirmed_by` is who is confirming it — a name, a role, a team. This is the human step,
+    and it is deliberately not automatable: a promotion nobody's name is against is a standing
+    requirement nobody can question later. Ask before calling; do not confirm on the user's
+    behalf.
+
+    Call `measure_status` first to see whether a measure is eligible and what is still missing
+    if it is not. Once promoted, prepare_evaluation reports the expected set for that market
+    against every subsequent brief automatically."""
+    conn = store.connect()
+    try:
+        return metrics.graduate(conn, measure, confirmed_by=confirmed_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def replay_rules(market: Optional[str] = None) -> dict:
+    """What changed when the rules changed — as a REPORT, never a rewrite (§8.7).
+
+    Two answers:
+
+      • `backlog` — stored campaigns that do not carry something now expected of them. This is
+        the list to go and ask partners for: records with names on them, not a count.
+      • `judgments` — saved judgments that something now applies to and did not then. Each
+        row says WHICH of the reasons it was: a measure confirmed since, or one that was
+        retired when the brief was judged and has been put back; a rule that became standing
+        since, one that was standing and did not reach that brief's markets until its scope
+        changed, or one that was set aside at the time. Either way the judgment was never
+        checked against it. Plus any judgment resting on a correction that is no longer
+        standing.
+
+    **Nothing is rewritten and nothing is marked.** The report is derived every time it is
+    asked, so no stored judgment carries a verdict about itself.
+
+    It does NOT say a past verdict "would change" — the server cannot re-run a judgment, and
+    claiming to know the answer would be exactly the confident unfounded assertion this product
+    is built against. It says what a judgment was not checked against, which is a fact. If the
+    user wants to know whether a verdict changes, judge it again: each row offers that, and a
+    new judgment is written beside the old one rather than replacing it.
+
+    `backlog` is grouped by market and measure, because one conversation per partner per
+    measure is the unit of work — each group names a few campaigns and says how many more.
+    Pass `market` to scope the whole report to one.
+
+    Say the group and then its names. "Fourteen LATAM campaigns are missing footfall uplift"
+    is a statistic; naming three of them is a morning's work. Lead with any judgment whose
+    `consequence` is `stated_basis_withdrawn` — that is a verdict whose entire stated basis is
+    a rule somebody has since withdrawn."""
+    conn = store.connect()
+    try:
+        return replay.run(conn, market=market)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def note_correction(text: str, provenance: str, campaign_id: Optional[str] = None) -> dict:
+    """Record a piece of client feedback as a standing correction in the making (§8.6).
+
+    New client feedback is the same shape of event as a new metric, and travels the same path:
+    provisional on first mention, counted, and promoted to something every brief in its markets
+    is judged against only once it recurs across markets AND a person confirms it. "We want the
+    seeding box to carry one colourway" said once is one client's note; the same rule arriving
+    independently in a second market is a standard.
+
+    `provenance` is REQUIRED and is the point of the record: where the rule came from — the
+    deck and slide, or who asked for it ("JD SEA slide 23, named by the client as the standard
+    every brief should follow"). Without it a judgment resting on the rule can say only "the
+    library says so". Every mention keeps its own, because "praised in Peru; instructed
+    independently in Australia" is one rule with two origins and the second is what makes it
+    more than one client's house style.
+
+    Pass `campaign_id` when the feedback came from a specific brief — it is what lets the rule
+    be counted across campaigns and markets, which is the whole gate. Use the words the client
+    used; do not generalise them into a rule they did not state."""
+    conn = store.connect()
+    try:
+        return corrections.note(conn, text=text, campaign_id=campaign_id,
+                                provenance=provenance)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def list_corrections(status: Optional[CorrectionStatus] = None) -> dict:
+    """Every standing correction the library has learned, with provenance and status (§8.6).
+
+    `provisional` ones have been said but not confirmed and are applied to nothing;
+    `expected` ones are standing and shown with every judgment in their markets;
+    `ignored` ones somebody set aside — never deleted, because old judgments cited them and
+    those have to stay explicable, and `reopen_correction` brings one back;
+    `merged` ones turned out to be another rule stated differently, and their sightings moved
+    onto it."""
+    if status:
+        # `_enum` is advisory — a string to pydantic, an enum to the reader (D32) — so an
+        # unrecognised value reached the filter and returned an empty list with no error at
+        # all. §5.1's rule is that every refusal names the valid set and the closest match.
+        status = enums.normalise(status, field="status", valid=_CORRECTION_STATUSES)
+    conn = store.connect()
+    try:
+        rows = corrections.all_of_them(conn)
+        if status:
+            rows = [r for r in rows if r["status"] == status]
+        return {"corrections": [
+            {**r, "provenance": [s["provenance"]
+                                 for s in corrections.sightings(conn, r["id"])]}
+            for r in rows], "count": len(rows)}
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def resolve_correction(correction_id: str, decision: CorrectionDecision,
+                       same_as: Optional[str] = None) -> dict:
+    """Answer the one question the library asks about a new correction (§8.6).
+
+    Client feedback arrives worded differently every time. "Seed a single colourway", "seeding
+    boxes should carry one colourway" and "only one colourway per box" are one rule stated by
+    three markets — and left apart they are three rules, each seen once, none of which ever
+    recurs. That is the difference between a rule becoming standing and never doing so.
+
+      • `same_rule` — it is the rule named in `same_as`. Everywhere it was said moves with it,
+        so the fold counts every market that stated it.
+      • `different_rule` — it stands on its own. It stays on file and stops asking.
+      • `set_aside` — stop asking about it and never apply it. What was said is KEPT: this is
+        a decision about the rule, not about the record.
+
+    Offer the three; do not choose. Which of two wordings is the rule is a judgment about
+    their vocabulary, and getting it wrong merges two rules that are not the same."""
+    conn = store.connect()
+    try:
+        return corrections.resolve(conn, correction_id, decision=decision, same_as=same_as)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def set_aside_correction(correction_id: str, why: Optional[str] = None) -> dict:
+    """Stop applying a standing correction, without deleting it (§8.6).
+
+    The inverse of `graduate_correction`, and the reason it has to exist: a correction promoted
+    in error is a blocking finding on every brief in its markets, and there would otherwise be
+    no way back except waiting for it to fall out of use. What was said stays on file — this is
+    a decision about the rule, not about the record of the feedback."""
+    conn = store.connect()
+    try:
+        return corrections.set_aside(conn, correction_id, why=why)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def reopen_correction(correction_id: str) -> dict:
+    """Undo a set-aside: the rule goes back to provisional and can be asked about again (§8.6).
+
+    Setting aside is a decision, and decisions are sometimes wrong. It does NOT go straight
+    back to standing — whether briefs are judged against it runs the gate again, and a person
+    confirms it again, because that is what put it there the first time."""
+    conn = store.connect()
+    try:
+        return corrections.reopen(conn, correction_id)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def keep_correction(correction_id: str) -> dict:
+    """Confirm a standing correction is still current (§8.6).
+
+    The library asks once when a rule has not come up in a while. It never demotes a rule on
+    its own: for a measure, silence means nobody tracks it any more, but for a rule silence
+    usually means the agency has started following it — so demoting on silence would drop
+    exactly the rules that are working. Answering keeps it applied and stops the asking."""
+    conn = store.connect()
+    try:
+        return corrections.keep(conn, correction_id)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def correction_status(correction_id: str) -> dict:
+    """Where a standing correction stands against the same gate measures face (§8.6): how many
+    campaigns and markets have raised it, whether it is eligible, and what is missing if not.
+
+    Read-only."""
+    conn = store.connect()
+    try:
+        return corrections.graduation(conn, correction_id)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def graduate_correction(correction_id: str, confirmed_by: str) -> dict:
+    """Make a correction standing: every brief in its markets is judged against it (§8.6).
+
+    The same gate as a measure, and for the same reason — one client contact repeating
+    themselves on five decks in one market is one opinion stated five times, and promoting it
+    makes it everybody's rule. It needs to have recurred across at least two markets, and a
+    person has to confirm it.
+
+    `confirmed_by` is who is confirming — a name, a role, a team. Ask; do not confirm on the
+    user's behalf. Call `correction_status` first to see whether it is eligible."""
+    conn = store.connect()
+    try:
+        return corrections.graduate(conn, correction_id, confirmed_by=confirmed_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def measure_status(measure: str) -> dict:
+    """Where a measure stands against the graduation gate (§8.3): how many campaigns and how
+    many markets have carried it, whether it is eligible, and what is missing if it is not.
+
+    `history` is every occasion it was demoted or brought back (§12.4/D106), when there has
+    been one. `status` is where it stands now and cannot say how it got there — a measure
+    retired and revived twice is one nobody has settled, which is a different thing from one
+    that has simply always been expected.
+
+    Read-only. Use it to answer "should we be asking for this on every brief yet?" without
+    promoting anything."""
+    conn = store.connect()
+    try:
+        return metrics.graduation(conn, measure)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def link_evaluation(evaluation_id: str, campaign_id: str, linked_by: str) -> dict:
+    """Attach a judgment made about a pitch to the record it turned into (§9.9).
+
+    A judgment about something that was not in the library yet is attached to nothing, so
+    nothing can ever check it against results. This joins the two — normally straight after
+    `upload_campaign`, which offers it.
+
+    **Ask before calling it.** That two things share a title is not proof they are the same
+    campaign, and a judgment attached to the wrong record is a verdict about a brief nobody
+    wrote. `linked_by` is whose call it is.
+
+    It cannot be changed afterwards: re-pointing a judgment would change what it was a
+    judgment OF, and everything citing it with it."""
+    conn = store.connect()
+    try:
+        return core.link_evaluation(conn, evaluation_id=evaluation_id,
+                                    campaign_id=campaign_id, linked_by=linked_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def get_reconciliation(evaluation_id: str) -> dict:
+    """Read back what a judgment was checked against, as it stood at the time (§9.9).
+
+    The lesson somebody wrote, the server's tally beside it, and the four columns the lesson
+    actually rested on — what was predicted, what shipped, what it did, what else was going
+    on. Three of those are recomputed live everywhere else in the product, so this is the only
+    place that says what was true when the conclusion was drawn.
+
+    `changed_since` says whether the live answer has moved — a corrected figure, an event
+    recorded afterwards, a drift check that has since run. When it has, the lesson may be
+    worth revisiting, and `counts_now` is what the same check says today."""
+    conn = store.connect()
+    try:
+        return core.get_reconciliation(conn, evaluation_id=evaluation_id)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def calibration() -> dict:
+    """How often this library's own judgments turned out to be right (§9.9).
+
+    The only thing in the product that grades the product. Everything else is the system
+    talking about briefs; this is the system being held to account.
+
+    **Read the three counts separately.** `held` and `missed` are predictions the server could
+    check against a measured number — that half is arithmetic. `not_comparable` is the rest,
+    and it is a third answer, never a pass: a score that folded those in would be this product
+    awarding itself marks. `confounded` says how many of these outcomes ran through something
+    else that was going on; they still count, and a reader weighing the figure should know how
+    much of it is about the weather.
+
+    `nothing_to_check` means no judgment has ever been reconciled. That is the absence of a
+    score, not a score of zero — and `reconcile_evaluation` is what closes it."""
+    conn = store.connect()
+    try:
+        return core.calibration(conn)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+@_catch_value_errors
+def save_reconciliation(evaluation_id: str, comparison: str, actual: Optional[str] = None,
+                        basis: Optional[ReconciliationBasis] = None) -> dict:
+    """Persist your prediction-vs-actual comparison and the lesson learned, so future
+    evaluations are better calibrated. Returns the reconciliation id.
+
+    `basis` says what you checked the judgment AGAINST, and the two are not the same evidence:
+      • `results`              — measured outcomes. The campaign ran and the numbers are in.
+      • `superseding_version`  — a later version of the brief. §6.3's moment: the prediction
+                                 said the structure would come back, and v2 shows whether it
+                                 did. Real evidence about the judgment, and not an outcome.
+    Without it, "v2 shows the structure came back" sits in the same column as a CTR figure and
+    anything computing calibration later reads both as measured results.
+
+    The server's own tally — how many numeric predictions landed — is recomputed and stored
+    beside your lesson (§9.9). Do not restate it in `comparison`: that half is arithmetic and
+    already on the record. What belongs here is what it MEANT, which is the only half that
+    improves the next judgment."""
+    conn = store.connect()
+    try:
+        return core.save_reconciliation(conn, evaluation_id=evaluation_id,
+                                        comparison=comparison, actual=actual, basis=basis)
     finally:
         conn.close()

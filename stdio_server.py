@@ -21,12 +21,33 @@ Claude Desktop config (claude_desktop_config.json):
 from __future__ import annotations
 
 import clip_embed
+import embedding
+import sys
+
 import config
 import store
 from mcp_server import mcp
 
-if __name__ == "__main__":
+def main():
+    """The source-checkout entry point, as a function so the sequence can be tested.
+
+    It was a bare `if __name__ == "__main__":` block, which is why nothing noticed when
+    `main.py stdio` — the entry point the INSTALLERS wire in — was missing the warm-up this
+    file had. That was product-review defect 04, found by a reviewer hitting a 60-second
+    timeout rather than by anything in the suite, because neither sequence could be called.
+    """
+    import rulebook
+
     config.ensure_dirs()
     store.init_db()
     clip_embed.warm_up()  # load now, not on the first tool call (see http_app.main())
+    embedding.warm_up()
+    # §12.1: before serving, for the same reason as `main.py stdio` — discovered lazily, a
+    # broken rulebook surfaces as a tool error mid-judgment, and the first tool to crash is
+    # the one whose job is saying what the product cannot do.
+    print(f"Rulebook: {rulebook.version()}", file=sys.stderr)
     mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

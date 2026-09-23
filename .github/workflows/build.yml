@@ -31,6 +31,22 @@ jobs:
         with:
           python-version: '3.12'
 
+      # A tag is the only place the version is stated twice, and the two have already
+      # disagreed once (the Windows installer said 0.2.7 while version.py said 0.3.0). Fail
+      # the build rather than publish a release whose assets contradict its own tag.
+      - name: Tag must match version.py
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          declared=$(python -c 'import version; print(version.VERSION)')
+          tagged="${GITHUB_REF_NAME#v}"
+          if [ "$declared" != "$tagged" ]; then
+            echo "tag $GITHUB_REF_NAME does not match version.py ($declared)" >&2
+            echo "Bump VERSION in version.py, or retag." >&2
+            exit 1
+          fi
+          echo "version $declared matches tag $GITHUB_REF_NAME"
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -47,13 +63,62 @@ jobs:
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt pyinstaller typer
 
+      # The weights ship IN the payload: the product must work on a clean, air-gapped
+      # machine with nothing configured. Fetched BEFORE the build so an upstream outage
+      # fails in seconds rather than after a full PyInstaller run. Not cached: this
+      # workflow runs on tags, and cache entries are ref-scoped and evicted after 7 days
+      # idle, so a 303MB save/restore would almost always miss and cost more than the
+      # ~20s fetch it replaces.
+      # A release must ship a KNOWN artifact. Without this, deleting the mirror release
+      # would silently fall back to upstream and ship a different (fp32, 300MB larger)
+      # model with different vectors, and nothing would go red. Local dev keeps the
+      # fallback; a tag build does not.
+      - name: Fetch and verify CLIP weights
+        env:
+          CAMPAIGN_WEIGHTS_REQUIRE_MIRROR: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '0' }}
+        run: python scripts/fetch_weights.py .weights-cache
+
+      # Stamped before PyInstaller so the bundled copy carries it. Two builds of the same
+      # version from different commits are not the same thing to anybody debugging one
+      # (§3.2, defect 10) — and the reviewer's session was against a server that had been
+      # rebuilt mid-session with nothing to say so.
+      - name: Stamp the build
+        shell: bash
+        run: echo "${{ github.sha }} $(date -u +%Y-%m-%dT%H:%M:%SZ)" > build_info.txt
+
       - name: Build bundle
         run: pyinstaller --clean --noconfirm campaign-poc.spec
 
+      # Staged after PyInstaller, which wipes dist/ on every run.
+      - name: Stage weights into the bundle
+        shell: bash
+        run: |
+          mkdir -p dist/campaign-intelligence/models
+          cp .weights-cache/open_clip_model.safetensors* dist/campaign-intelligence/models/
+          python scripts/fetch_weights.py dist/campaign-intelligence/models
+          # Assert WHICH checkpoint got staged, not merely that one did.
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "scripts")
+          from pathlib import Path
+          import fetch_weights as fw
+          staged = Path("dist/campaign-intelligence/models") / fw.CHECKPOINT_NAME
+          actual = fw.sha256_of(staged)
+          known = {s.sha256: s.note for s in fw.SOURCES}
+          assert actual in known, f"staged an unrecognised checkpoint: {actual}"
+          print(f"staged checkpoint: {known[actual]} ({actual[:12]}...)")
+          PY
+
+      # Per-OS, which it was not: the macOS archive shipped the LINUX installer, so a Mac
+      # user got systemd units and ~/.local/share paths (item 4.1 — macOS had no installer
+      # of its own at all).
       - name: Package (Linux/macOS) — bundle + install scripts
         if: runner.os != 'Windows'
         run: |
-          cp installer/linux/install.sh installer/linux/uninstall.sh dist/campaign-intelligence/
+          platform=linux
+          [ "${{ runner.os }}" = "macOS" ] && platform=macos
+          cp "installer/$platform/install.sh" "installer/$platform/uninstall.sh" \
+             dist/campaign-intelligence/
           chmod +x dist/campaign-intelligence/install.sh dist/campaign-intelligence/uninstall.sh
           tar -C dist -czf "${{ matrix.asset }}" campaign-intelligence
 
@@ -62,13 +127,410 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path dist/campaign-intelligence/* -DestinationPath "${{ matrix.asset }}"
 
+      # Proves the SHIPPED archive works, not the source tree: unpack what customers get,
+      # run the frozen binary out of it, and require that it resolves its own bundled
+      # weights. This exercises app_dir() under PyInstaller and the archive's fidelity —
+      # a packaging mistake now fails the build instead of shipping a product whose vision
+      # half is dead on arrival, which is exactly how the original defect escaped.
+      - name: Verify the packaged product finds its weights (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p _verify && tar -xzf "${{ matrix.asset }}" -C _verify
+          _verify/campaign-intelligence/campaign-intelligence check-weights | tee out.txt
+          grep -q "source: bundled" out.txt
+
+      # Item 4.2: zero egress, tested rather than asserted. The customer's network blocks
+      # huggingface.co, which is how all three P0s surfaced at once — so the install-time
+      # gate must complete with no network at all, against the PACKAGED binary, since that
+      # is what a customer has.
+      #
+      # A socket guard injected through sitecustomize would NOT work here: PyInstaller
+      # controls sys.path in a frozen app, so PYTHONPATH is ignored and the guard would
+      # silently never load — a test that passes because it did nothing. These are real
+      # blocks instead.
+      - name: Verify the packaged product needs no network (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # `sudo unshare -n`, not `unshare -rn`: Ubuntu 24.04 restricts unprivileged user
+          # namespaces via AppArmor (kernel.apparmor_restrict_unprivileged_userns=1) and the
+          # runner images do not relax it, so the -r form fails with "write failed
+          # /proc/self/uid_map: Operation not permitted". Root needs no user namespace.
+          #
+          # And health-check, not check-weights: the weaker command only stats a path, which
+          # would pass without a network whether or not the product could actually work
+          # offline. This LOADS the vision model, which is where open_clip reaches for the
+          # Hub. Exit code is not the assertion - a runner has no Ollama, so text_search is
+          # legitimately down; visual_search is what this step is about.
+          sudo unshare -n _verify/campaign-intelligence/campaign-intelligence \
+            health-check --json | tee offline.json > /dev/null || true
+          python - <<'PY'
+          import json
+          report = json.load(open("offline.json"))
+          vision = report["components"]["visual_search"]
+          assert vision["ok"], f"the packaged product cannot load its vision model offline: {vision}"
+          print("visual_search ok with no network:", vision["detail"])
+          PY
+
+      - name: Verify the packaged product needs no network (macOS)
+        if: runner.os == 'macOS'
+        env:
+          # No user namespaces on macOS runners, so block at the layer the Hub client uses:
+          # every HTTP(S) request routed to a closed port on loopback. Deliberately WITHOUT
+          # HF_HUB_OFFLINE - setting it tells the client not to try, which would make the
+          # proxy block prove nothing at all.
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
+        run: |
+          _verify/campaign-intelligence/campaign-intelligence health-check --json \
+            > offline.json || true
+          python - <<'PY'
+          import json
+          report = json.load(open("offline.json"))
+          vision = report["components"]["visual_search"]
+          assert vision["ok"], f"the packaged product cannot load its vision model offline: {vision}"
+          print("visual_search ok with every request proxied to a closed port:", vision["detail"])
+          PY
+
+      - name: Verify the packaged product finds its weights (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Expand-Archive -Path "${{ matrix.asset }}" -DestinationPath _verify -Force
+          $out = & _verify\campaign-intelligence.exe check-weights
+          $out
+          if ($LASTEXITCODE -ne 0) { throw "packaged product cannot resolve its weights" }
+          if ($out -notcontains "source: bundled") { throw "packaged product did not use the bundled weights" }
+
+      # §4.4. The macOS release was a tarball: Terminal to extract, an install.sh that is
+      # itself quarantined when it arrives through a browser, and Finder opening a .sh in a
+      # text editor. The .pkg is the thing a marketer can double-click. Signed, notarized and
+      # stapled when the credentials exist as repository secrets, and an unsigned package that
+      # says so when they do not — Installer.app warns and lets the user proceed, which the
+      # tarball never allowed at all.
+      - name: Build macOS .pkg
+        if: runner.os == 'macOS'
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          MACOS_SIGN_IDENTITY_INSTALLER: ${{ secrets.MACOS_SIGN_IDENTITY_INSTALLER }}
+          AC_NOTARY_PROFILE: ${{ secrets.AC_NOTARY_PROFILE }}
+        run: |
+          v=$(python -c "import version; print(version.VERSION)")
+          installer/macos/pkg/build-pkg.sh dist/campaign-intelligence "$v" \
+              CampaignIntelligence.pkg
+
+      # D25's shape, one platform over: compiling a package proves the compiler ran. This
+      # INSTALLS it, on a clean runner, and then requires that the product the installer left
+      # behind answers its own self-test — the acceptance criterion §4.1 states and the one
+      # thing a build that only compiles cannot check.
+      # Ollama, the headless way, BEFORE the package runs. Measured on a runner: Ollama's own
+      # macOS installer downloads, unpacks to /Applications, then fails at `Unable to find
+      # application named 'Ollama'` — it wants a GUI session to launch the app, and a runner
+      # has none. `install.sh` handled that correctly (the guard reported it and the gate
+      # refused the install, naming text_search), which is the product working; what was wrong
+      # was this job expecting a green install on a machine where the dependency cannot be
+      # installed. Homebrew gives the CLI and server without the .app, so `command -v ollama`
+      # succeeds and the installer skips its own download — which is also the state of a
+      # machine that already has Ollama, the commonest real case.
+      - name: Provision Ollama (macOS runners have no GUI session)
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        run: |
+          brew install ollama
+          # `brew services`, not a backgrounded `ollama serve`. A process started with `&` in
+          # one step does not reliably survive into the next one, and the install two steps
+          # later found nothing listening: "FAIL text_search: ollama did not answer within 3s",
+          # after `health-check --wait 60` had retried for a minute. A launchd service outlives
+          # the step that started it.
+          brew services start ollama
+          # A plain wait loop: `A && break || sleep` reads as if-then-else and is not one.
+          for _ in $(seq 1 45); do
+            if curl -sf http://localhost:11434/api/tags >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          curl -sf http://localhost:11434/api/tags >/dev/null \
+            || { echo "ollama never came up, so the gate cannot pass" >&2; exit 1; }
+          ollama pull nomic-embed-text
+          ollama list
+
+      # A ceiling on every step that RUNS an installer. The first dispatch hung for 99
+      # minutes inside the silent Windows install — most likely the Ollama task, which
+      # downloads and installs a second installer and then pulls 274MB — and would have
+      # burned the job's six-hour limit. A hang that fails in 25 minutes is a result; a hang
+      # that looks like a slow build is not.
+      - name: Install the .pkg end to end and verify what it left behind
+        timeout-minutes: 25
+        if: runner.os == 'macOS'
+        run: |
+          # `installer` sends a postinstall's output to /var/log/install.log, not to stdout —
+          # so a failure here arrived as "an error occurred while running scripts" and nothing
+          # else. A red build that says nothing is the same defect this product was built
+          # against, in its own CI. Dump the log whichever way it goes.
+          curl -sf http://localhost:11434/api/tags >/dev/null \
+            || { echo "ollama is not answering BEFORE the install — the gate will refuse it "\
+                      "and that is the runner's fault, not the product's" >&2; exit 1; }
+          set +e
+          sudo installer -pkg CampaignIntelligence.pkg -target / -verbose
+          status=$?
+          set -e
+          echo "--- postinstall output (/var/log/install.log) ---"
+          sudo tail -n 120 /var/log/install.log || true
+          [ "$status" -eq 0 ] || { echo "installer exited $status" >&2; exit "$status"; }
+          dest="$HOME/Library/Application Support/CampaignIntelligence"
+          test -x "$dest/campaign-intelligence" \
+            || { echo "the package installed nothing runnable at $dest" >&2; exit 1; }
+          test ! -d /usr/local/share/campaign-intelligence-staging \
+            || { echo "the staged payload outlived the install" >&2; exit 1; }
+          # Quarantine never applies to a pkg payload, so this is about the product working,
+          # not about Gatekeeper: run the installed copy and require a green self-test.
+          "$dest/campaign-intelligence" health-check --json > installed.json
+          python - <<'PY'
+          import json
+          report = json.load(open("installed.json"))
+          bad = [name for name, c in report["components"].items() if not c.get("ok")]
+          assert not bad, f"the installed product fails its own self-test: {bad}"
+          print("installed and green:", sorted(report["components"]))
+          PY
+          # The positive control for the broken-bundle step below: a product the gate ACCEPTS
+          # is wired. Without it, "nothing was wired" would also pass on an installer that
+          # never wires anything.
+          cfg="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+          grep -q campaign "$cfg" \
+            || { echo "a product that passed the gate was not wired to Claude Desktop" >&2;
+                 exit 1; }
+          echo "and wired to Claude Desktop"
+
+      - name: A broken bundle must fail the .pkg install, not ship a dead product
+        timeout-minutes: 20
+        if: runner.os == 'macOS'
+        run: |
+          # The other half of D25: an installer that only ever meets a good bundle has never
+          # had its gate exercised. Corrupt the weights the way an interrupted download does
+          # and require the install to FAIL — a package that reports success here is the
+          # original defect, delivered by a nicer wrapper.
+          # The GOOD install ran in the step above and wired Claude Desktop. Without clearing
+          # that, "the gate wired nothing" finds the previous install's entry and fails an
+          # install that behaved perfectly — which is what happened. The Windows half already
+          # cleared it; this one did not, and the asymmetry was the bug.
+          cfg="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+          rm -f "$cfg"
+          rm -rf broken && cp -a dist/campaign-intelligence broken
+          printf 'truncated' > broken/models/open_clip_model.safetensors
+          cp installer/macos/install.sh installer/macos/uninstall.sh broken/
+          v=$(python -c "import version; print(version.VERSION)")
+          installer/macos/pkg/build-pkg.sh broken "$v" Broken.pkg
+          # Captured rather than redirected: under `sudo` the redirect is still the
+          # runner's, which shellcheck flags (SC2024) and which would silently lose the log
+          # the moment the path needed root.
+          set +e
+          log=$(sudo installer -pkg Broken.pkg -target / 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$log"
+          # The gate's own words live in the install log, not in `installer`'s output.
+          echo "--- postinstall output (/var/log/install.log) ---"
+          gate=$(sudo tail -n 120 /var/log/install.log 2>/dev/null || true)
+          printf '%s\n' "$gate"
+          log="$log $gate"
+          if [ "$status" -eq 0 ]; then
+            echo "the installer accepted a bundle with corrupt weights" >&2
+            exit 1
+          fi
+          # `install.sh`'s OWN sentence about the weights, not the postinstall's wrapper. The
+          # wrapper prints "INSTALL FAILED" whatever went wrong, so grepping for that matched
+          # a permission error, a missing directory, anything at all — an assertion that
+          # could not fail, guarding the one step whose whole job is to prove a refusal.
+          printf '%s' "$log" | grep -qi "weights are corrupt" \
+            || { echo "it failed for some other reason than the corrupt weights" >&2; exit 1; }
+          # And the gate's actual promise: nothing it rejected gets wired. Checked against a
+          # config this step removed first, so it is this install's behaviour being read and
+          # not the previous one's leftovers.
+          if [ -f "$cfg" ] && grep -q campaign "$cfg"; then
+            echo "a product the gate rejected was wired to Claude Desktop" >&2
+            exit 1
+          fi
+          echo "refused, said why, and wired nothing"
+
       - name: Build Windows installer (Inno Setup)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install innosetup --no-progress -y
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\windows\campaign-intelligence.iss
+          # From version.py, the single source. Hard-coding it here is how the installer
+          # came to claim 0.2.7 while the binary inside it said 0.3.0.
+          $v = python -c "import version; print(version.VERSION)"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" installer\windows\campaign-intelligence.iss
           Copy-Item installer\windows\Output\CampaignIntelligence-Setup.exe .
+
+      # Same reason as macOS, one platform over: the Inno `ollama` task downloads and runs
+      # OllamaSetup.exe, and the first dispatch hung for 99 minutes inside that step. With
+      # Ollama already on PATH the task's own `Get-Command ollama` succeeds and it skips
+      # straight to serve-and-pull.
+      - name: Provision Ollama (so the installer's own task skips its download)
+        if: runner.os == 'Windows'
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          choco install ollama --no-progress -y
+          $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
+                      [Environment]::GetEnvironmentVariable('Path','User')
+          Start-Process ollama -ArgumentList 'serve' -WindowStyle Hidden
+          for ($i = 0; $i -lt 30; $i++) {
+            try { Invoke-WebRequest http://localhost:11434/api/tags -UseBasicParsing | Out-Null; break }
+            catch { Start-Sleep 2 }
+          }
+          ollama pull nomic-embed-text
+          ollama list
+
+      # D25, owed since 4.1: "the `[Code]` path has still never been executed anywhere;
+      # compiling it is new but is not the same thing". Inno's `[Code]` section holds the gate
+      # — the self-test that must block the success page — and a build that only ran ISCC
+      # proved the Pascal compiled, not that the gate fires. /VERYSILENT is how it runs
+      # unattended; /SUPPRESSMSGBOXES so a modal cannot hang the runner forever.
+      - name: Install the Windows installer end to end and verify what it left behind
+        timeout-minutes: 25
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # PATH refreshed from the machine environment FIRST. `choco install ollama` updates
+          # the machine PATH, but this shell was started before that and a child process
+          # inherits the PARENT's environment — so the installer's own
+          # `Get-Command ollama` missed it, downloaded OllamaSetup.exe itself, and hung.
+          # Provisioning Ollama only helps if the process that launches the installer can see
+          # it.
+          $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
+                      [Environment]::GetEnvironmentVariable('Path','User')
+          if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
+            throw "ollama is not on PATH, so the installer will try to install it itself"
+          }
+          # /TASKS="desktop" — the ollama task is DESELECTED, because this job provisioned
+          # Ollama itself two steps ago. Measured: with the task on, the installer ran
+          # OllamaSetup.exe, which installed and launched the Ollama app and then never
+          # returned; the step timed out at 25 minutes having printed nothing, and cleanup
+          # killed two orphan ollama processes. Running a second installer inside a silent
+          # install is the hang, and the gate still gets a real text_search because Ollama is
+          # already there — which is also the commonest state of a customer's machine.
+          $p = Start-Process -FilePath .\CampaignIntelligence-Setup.exe `
+               -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',`
+                             '/TASKS=desktop','/LOG=install.log' -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            Get-Content install.log -Tail 60
+            throw "the installer failed on a good bundle (exit $($p.ExitCode))"
+          }
+          $dest = Join-Path $env:LOCALAPPDATA `
+                  'Programs\CampaignIntelligence\campaign-intelligence.exe'
+          if (-not (Test-Path $dest)) {
+            Get-Content install.log -Tail 60
+            throw "the installer reported success and left nothing runnable at $dest"
+          }
+          & $dest health-check --json > installed.json
+          $report = Get-Content installed.json | ConvertFrom-Json
+          $bad = $report.components.PSObject.Properties |
+                 Where-Object { -not $_.Value.ok } | ForEach-Object { $_.Name }
+          if ($bad) { throw "the installed product fails its own self-test: $($bad -join ', ')" }
+          Write-Host "installed and green: $($report.components.PSObject.Properties.Name -join ', ')"
+          # The positive control for the broken-bundle step below.
+          $cfg = Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
+          if (-not (Test-Path $cfg) -or ((Get-Content $cfg -Raw) -notmatch 'campaign')) {
+            throw "a product that passed the gate was not wired to Claude Desktop"
+          }
+          Write-Host "and wired to Claude Desktop"
+
+      - name: A broken bundle must fail the Windows install
+        timeout-minutes: 20
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # The half D25 names explicitly. An installer that has only ever met a good bundle
+          # has never had its gate exercised, and this gate is the one acceptance criterion
+          # §4.1 turns on. Corrupt the weights the way an interrupted download does, rebuild
+          # the installer around them, and require a refusal.
+          Remove-Item -Recurse -Force _broken -ErrorAction SilentlyContinue
+          Copy-Item -Recurse dist\campaign-intelligence _broken
+          Set-Content -Path _broken\models\open_clip_model.safetensors -Value 'truncated'
+          $v = python -c "import version; print(version.VERSION)"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" `
+            "/DSourceDir=$((Resolve-Path _broken).Path)" `
+            "/O$((Resolve-Path .).Path)" "/FBroken-Setup" `
+            installer\windows\campaign-intelligence.iss
+          # NOT the exit code. Inno's `[Code]` gate cannot change it and the .iss says so in
+          # as many words: an exception at ssPostInstall is caught and discarded by Inno
+          # itself, and raising at ssInstall rolls the files back, which contradicts the
+          # advice to fix the problem and re-run against the files just installed. So a
+          # refused install exits 0 BY DESIGN, and asserting non-zero here would have failed
+          # every release build while proving nothing.
+          #
+          # What the gate actually promises is in the .iss: "Never wire a product the
+          # self-test just rejected." That is observable, and it is the thing a marketer is
+          # protected by — their next Claude session does not point at a broken server.
+          $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
+                      [Environment]::GetEnvironmentVariable('Path','User')
+          $cfg = Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
+          Remove-Item $cfg -ErrorAction SilentlyContinue
+          Start-Process -FilePath .\Broken-Setup.exe `
+            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=desktop',`
+                          '/LOG=broken.log' -Wait -PassThru | Out-Null
+          if ((Test-Path $cfg) -and ((Get-Content $cfg -Raw) -match 'campaign')) {
+            Get-Content broken.log -Tail 60
+            throw "a product the gate rejected was wired to Claude Desktop"
+          }
+          $installed = Join-Path $env:LOCALAPPDATA `
+                       'Programs\CampaignIntelligence\campaign-intelligence.exe'
+          if (Test-Path $installed) {
+            # `health-check` EXITS 1 when a component is down, which is the whole point here —
+            # and pwsh hands the step its last exit code, so the step failed after printing
+            # its own success line. Cleared deliberately: a non-zero from this call is the
+            # expected result, not the step's verdict.
+            $ErrorActionPreference = 'Continue'
+            $PSNativeCommandUseErrorActionPreference = $false
+            & $installed health-check --json > broken.json
+            $global:LASTEXITCODE = 0
+            $r = Get-Content broken.json | ConvertFrom-Json
+            if ($r.components.visual_search.ok) {
+              throw "the corrupt weights were accepted as a working vision model"
+            }
+          }
+          Write-Host "refused: the self-test failed and nothing was wired"
+          exit 0
+
+      - name: Verify the packaged product needs no network (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
+        run: |
+          # Windows had no offline check at all, while being the platform the product review
+          # was written against - on a network that blocks huggingface.co.
+          #
+          # Exit code is NOT the assertion, and the Linux and macOS halves say so and clear it
+          # while this one did not. `health-check` exits non-zero when ANY component is down,
+          # and text_search is down here by construction: every request is proxied to a closed
+          # port. The claim being tested is narrower — the VISION model loads from the bundle
+          # with no network — so the report is read and the status discarded. Whenever this
+          # step actually ran it would have failed on a product behaving exactly as intended.
+          # pwsh 7.4 turns a native command's non-zero exit into a TERMINATING error when
+          # ErrorActionPreference is Stop, which is what GitHub sets — so the step died on the
+          # call itself, before the line below could clear anything.
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          # `_verify\campaign-intelligence.exe`, one level up from where this used to look.
+          # The Windows zip is built with `Compress-Archive -Path dist/campaign-intelligence/*`
+          # — the `/*` puts the CONTENTS in the archive, not a top-level folder — so expanding
+          # gives the exe directly. The weights step three above has always used that path;
+          # this one had an extra directory in it and could never have run. It went unnoticed
+          # because the job had never got this far: the install step before it hung.
+          & _verify\campaign-intelligence.exe health-check --json > offline.json
+          $global:LASTEXITCODE = 0
+          $report = Get-Content offline.json | ConvertFrom-Json
+          if (-not $report.components.visual_search.ok) {
+            throw "the packaged product cannot load its vision model offline: $($report.components.visual_search.detail)"
+          }
+          Write-Host "visual_search ok with every request proxied to a closed port"
+          exit 0
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -77,6 +539,7 @@ jobs:
           path: |
             ${{ matrix.asset }}
             CampaignIntelligence-Setup.exe
+            CampaignIntelligence.pkg
           if-no-files-found: warn
 
       - name: Attach to release
@@ -86,3 +549,4 @@ jobs:
           files: |
             ${{ matrix.asset }}
             CampaignIntelligence-Setup.exe
+            CampaignIntelligence.pkg

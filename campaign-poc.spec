@@ -1,3 +1,4 @@
+import os
 # PyInstaller spec — one-folder bundle for the campaign-intelligence lean product.
 # Build (on the TARGET OS): pyinstaller campaign-poc.spec
 # Produces dist/campaign-intelligence/  (a self-contained folder; zip/tar it to distribute).
@@ -7,7 +8,8 @@
 #     resolvable at runtime, or semantic search silently drops to the pure-Python fallback.
 #   * uvicorn / mcp / starlette / anyio pull in submodules PyInstaller's static analysis misses.
 #   * torch/open_clip (§6.6 CLIP layer) — a deliberate, confirmed size tradeoff (~150-250MB
-#     of deps + a ~350MB model download on first use, see docs/PRODUCTION-ROADMAP.md §6.6).
+#     of deps + a 303MB fp16 checkpoint shipped in the installer payload, see
+#     docs/PRODUCTION-ROADMAP.md §6.6 and docs/PRODUCT-REVIEW-PLAN.md item 1.2).
 #     NOT excluded: an earlier version of this spec excluded torch to keep the bundle small,
 #     predating CLIP being an actual dependency — that would have silently broken
 #     find_similar_images/upload_image_asset's CLIP path in every packaged build (review
@@ -36,6 +38,23 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 datas, binaries, hiddenimports = [], [], []
 
+# The build stamp, when CI wrote one. Optional on purpose: a local build has no stamp and
+# reports itself as a source checkout, which is the honest answer (§3.2).
+if os.path.exists("build_info.txt"):
+    datas += [("build_info.txt", ".")]
+
+# §12.1: the rulebook, beside the executable rather than inside _internal/. `config.app_dir()`
+# resolves to the install directory for exactly this reason — an administrator has to be able
+# to SEE this file, and §12.2's overlay goes next to it. A rulebook buried in the bundle is
+# one nobody can read, which is most of what the item was about.
+datas += [("rulebook.yaml", ".")]
+# §12.3: the worked example, beside it. "Shipped as an example/customer file" is the item's
+# own wording, and nothing shipped it — a customer who installed the built artefact had no
+# example at all, while the product's own comments told them to copy from one.
+datas += [("docs/example-rulebook.yaml", ".")]
+# §12.3: the customer rulebook, so putting it in force is a copy and not a download.
+datas += [("docs/fabletics-rulebook.yaml", ".")]
+
 # Bundle sqlite-vec fully (its compiled extension is a binary + package data).
 for pkg in ("sqlite_vec",):
     d, b, h = collect_all(pkg)
@@ -63,8 +82,17 @@ for pkg in ("uvicorn", "mcp", "starlette", "anyio", "fastapi", "pptx", "pypdf"):
     hiddenimports += collect_submodules(pkg)
 
 # Our own modules referenced only via dynamic import (main.py imports them lazily).
+# The modules core.py was split into (§ refactor): core imports them at module level, so
+# analysis finds them either way — listed because a frozen build that silently loses one of
+# these loses a third of the product's surface, and the cost of saying so is one line.
+hiddenimports += ["diffing", "creative", "missing", "store_campaigns"]
 hiddenimports += ["http_app", "mcp_server", "store", "core", "vectorstore",
-                  "embedding", "extract", "auth", "config", "clip_embed", "images"]
+                  "embedding", "extract", "auth", "config", "clip_embed", "images",
+                  # §12.1. `yaml` is imported inside `rulebook._read`, which PyInstaller's
+                  # static analysis reaches — but the product now REQUIRES it, and a startup
+                  # that fails on a missing parser is a failed install rather than a
+                  # degraded one, so it is named here as well.
+                  "rulebook", "yaml"]
 
 a = Analysis(
     ["main.py"],
