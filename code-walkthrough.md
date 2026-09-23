@@ -271,8 +271,11 @@ withdrawn. It does not say what would have been flagged and deliberately cannot:
 brief breaks a rule is a judgment, the server cannot re-run the model, and the offer to judge
 it again is the honest version of that question. `if_graduated()` answers "what would change if
 this rule became standing" — so graduating a rule is a decision somebody can see the
-consequences of first, and for a house rule the customer declared it counts every market
-rather than the one the rule happened to be overheard in.
+consequences of first. It describes the graduation it previews rather than one of its own:
+for a house rule the customer declared, every market rather than the one it happened to be
+overheard in; for a measure, §12.4's campaign-type key when the graduation would use it.
+Review found both halves inverted here before they were shared with the live path — the
+preview named the one record the confirmation would never check.
 
 The rules half asks the `correction_scope` history — *did this rule reach this brief's markets on
 the day it was judged* — rather than comparing `confirmed_at`. Those are two different facts:
@@ -287,7 +290,8 @@ Both halves — measures and rules — settle a tie the same way. Two timestamps
 tables have no order between them when they are equal, and Windows measures
 `time.time()` in whole milliseconds, so every row that can be compared against a
 judgment records which judgments already existed when it was written. `store.after_judgment`
-is the one place that question is answered.
+is the one place that question is answered, over `write_order` — an AUTOINCREMENT sequence,
+because `evaluations.id` is TEXT and that table's implicit rowid is reusable.
 
 The measures half asks `metrics.expected_for` what this brief is checked for — the same function
 the live judgment uses, so §12.4's type-keyed measures reach the report the way they reach a
@@ -418,7 +422,7 @@ rather than code.
 ## 7. Running the tests
 
 ```bash
-python -m pytest -q                              # everything (~4 min, 2,600+ tests)
+python -m pytest -q                              # everything (~4 min, 2,750+ tests)
 python -m pytest tests/test_gaps.py -q           # one file
 python -m pytest -q -p no:randomly               # fixed order when bisecting
 ```

@@ -545,7 +545,7 @@ All 65 of them. Claude picks the tool; you speak English.
 - `docs/DEFERRALS.md` — every deferred decision and why
 
 ```bash
-python -m pytest -q          # ~2,600 tests, about 4 minutes
+python -m pytest -q          # ~2,750 tests, about 4 minutes
 ```
 
 ## Roadmap

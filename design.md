@@ -159,6 +159,7 @@ erDiagram
     metrics ||--|| metric_registry : "graduated keys"
     corrections ||--o{ correction_sightings : "each time it was said"
     corrections ||--o{ correction_scope : "when it started applying where"
+    evaluations ||--|| write_order : "the order writes happened in"
 ```
 
 | Group | Tables | What it holds |
@@ -170,7 +171,7 @@ erDiagram
 | **Execution** | `commitments`, `execution_drift`, `drift_classifications` | what the brief promised vs what the photographs show |
 | **Context** | `context_events`, `context_attributions` | what else was going on when a campaign ran |
 | **People** | `authorship`, `erasures`, `reactions`, `feedback_notes` | who said what, and GDPR-shaped removal |
-| **Machinery** | `vector_provenance`, `campaign_notices`, `write_refusals` | which model made each vector, what the product refused and why |
+| **Machinery** | `vector_provenance`, `campaign_notices`, `write_refusals`, `write_order` | which model made each vector, what the product refused and why, and the one never-reused sequence that orders rows in different tables against each other |
 
 ### Vector spaces
 
