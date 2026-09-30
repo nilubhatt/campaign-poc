@@ -4,7 +4,7 @@
 > [`design.md`](design.md) first for *why* it is shaped this way; this document is *where
 > everything is*. [`README.md`](README.md) covers installing and running it.
 
-**37 modules of product code and 106 test files — more lines of test than of product.** The test-to-code ratio is not an accident: almost every rule described below is
+**38 modules of product code and 107 test files — more lines of test than of product.** The test-to-code ratio is not an accident: almost every rule described below is
 pinned by a test that was written to fail first.
 
 ---
@@ -22,6 +22,7 @@ flowchart TB
     subgraph api["Public API"]
         mcp["mcp_server.py<br/><i>65 tools</i>"]
         enums["enums.py<br/><i>forgiving input</i>"]
+        oas["openapi.py<br/><i>the same tools, for<br/>a caller without MCP</i>"]
     end
     subgraph orch["Orchestration"]
         core["core.py"]
@@ -77,6 +78,34 @@ the first image tool call — the transport timeout the product review opened wi
 Two transports, one tool surface. `http_app` takes MCPServer's own Streamable HTTP app and
 bolts on `POST /upload` (a side channel for files too big for a tool argument, returns an
 `asset_id`) and `GET /healthz` (liveness plus which backends are live).
+
+### `openapi.py` — the same tool surface, for a caller that cannot speak MCP
+
+Both transports above speak MCP: `stdio` for a desktop client, `/mcp` for a Claude Web
+connector. A firm that permits neither — no desktop client, no custom connectors, only its own
+agent stack making HTTPS calls — could not reach the product at all, however open its network
+was. The block is a policy about protocols, not about ports, so a third endpoint speaking the
+same protocol would answer nothing.
+
+So `http_app` also serves `GET /openapi.json`, `GET /llms.txt`, and `POST /api/<tool_name>`
+for each of the 65 tools.
+
+**Everything here is generated from the tool registry, and that is the whole design.** This
+module writes no paths and describes no tool: it reads what `mcp_server` already exposes and
+renders it — the tool's own JSON Schema as the request body, its docstring as the description,
+the server's own `INSTRUCTIONS` as the preamble. Hand-written REST paths beside the MCP tools
+would be two implementations of one surface, which is the shape every P1 of the §8.7 review
+had. `test_openapi_surface.py` asserts the two sets of names are equal, so a tool added
+tomorrow appears here with no second edit.
+
+Dispatch goes through `mcp.call_tool` — the same entry point the protocol uses — so a tool
+reached over plain HTTP runs the identical validation, the identical consent step (`confirm`
+still previews), and the identical refusals. A refusal becomes a **400** carrying its
+`{"error": ...}` message unchanged, because an HTTP caller reads the status before the body.
+
+It deliberately does not flatten the tools into REST resources: `POST /campaigns` reads better
+and needs a hand-written mapping from verbs to tools, which is the drift this module exists to
+avoid — and the caller is a model reading descriptions, not a developer memorising a scheme.
 
 ### `auth.py`
 

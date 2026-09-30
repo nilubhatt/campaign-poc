@@ -13,12 +13,13 @@ into auth.authenticate() without moving these call sites.
 """
 from __future__ import annotations
 
+import json
 import sys
 import uuid
 from pathlib import Path
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 import auth
@@ -32,6 +33,11 @@ import vectorstore
 from mcp_server import mcp
 
 app = mcp.streamable_http_app()   # Starlette app already serving /mcp
+# Read from `openapi`, never spelled twice: the prefix appears in the generated document and in
+# the route that serves it, and two copies of a URL are two things to keep in step.
+import openapi as _openapi
+
+openapi_prefix = _openapi.API_PREFIX
 
 
 async def _check_auth(request: Request) -> JSONResponse | None:
@@ -87,8 +93,81 @@ async def healthz(request: Request):
         conn.close()
 
 
+async def call_tool(request: Request):
+    """One POST per tool, for a caller that cannot speak MCP (openapi.py says why).
+
+    Dispatched through `mcp.call_tool`, which is the SAME entry point the protocol uses — so a
+    tool reached this way runs the identical validation, the identical consent step and the
+    identical refusals. A second dispatch path that reached into `core` directly would be two
+    implementations of one surface, and it would drift on the first tool that gains an
+    argument.
+    """
+    if (deny := await _check_auth(request)) is not None:
+        return deny
+    name = request.path_params["tool"]
+    known = {tool.name for tool in await mcp.list_tools()}
+    if name not in known:
+        # The list, because a 404 that does not say what IS available makes the caller guess.
+        return JSONResponse(
+            {"error": f"no tool named {name!r}. See /openapi.json for the {len(known)} this "
+                      f"server offers."}, status_code=404)
+    try:
+        arguments = await request.json() if await request.body() else {}
+    except ValueError as exc:
+        return JSONResponse({"error": f"the body must be a JSON object: {exc}"},
+                            status_code=400)
+    if not isinstance(arguments, dict):
+        return JSONResponse({"error": "the body must be a JSON object of the tool's arguments"},
+                            status_code=400)
+
+    result = await mcp.call_tool(name, arguments)
+    payload = json.loads(result.content[0].text) if result.content else {}
+    # A REFUSAL IS A 400. `{"error": ...}` is what every tool in this product returns when it
+    # says no — a validation message, an id that is not on file — and an HTTP caller reads that
+    # from the status code before it reads the body. The message is unchanged: it was written
+    # to be acted on.
+    #
+    # The KEY's presence, not the key being alone: a refusal carries company. The forgiving-
+    # enum refusal adds `field` and `valid` so the caller can be taught rather than guess, and
+    # an image search that cannot resolve its asset adds the warnings explaining why. Requiring
+    # `error` to be the only key reported all of those as 200 — the first version of this did,
+    # and a caller checking the status would have read a refusal as a result. Verified against
+    # every `{"error": ...}` return in the tree: they are all refusals.
+    refused = isinstance(payload, dict) and "error" in payload
+    return JSONResponse(payload, status_code=400 if refused else 200)
+
+
+async def openapi_json(request: Request):
+    """The generated description. No auth: a caller cannot authenticate against a surface it
+    has not been allowed to read, and this document contains no library data."""
+    import openapi
+
+    return JSONResponse(openapi.document(await mcp.list_tools(), _public_url(request)))
+
+
+async def llms_txt(request: Request):
+    """The same, as prose."""
+    import openapi
+
+    return PlainTextResponse(openapi.llms_txt(await mcp.list_tools(), _public_url(request)))
+
+
+def _public_url(request: Request) -> str:
+    """What the caller reached us on, honouring a reverse proxy's headers — a tunnel is the
+    ordinary deployment here, and a document that names `localhost` as the server is a
+    document nobody else can use."""
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    forwarded_host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+    if forwarded_host:
+        return f"{forwarded_proto or request.url.scheme}://{forwarded_host}"
+    return str(request.base_url).rstrip("/")
+
+
 app.router.routes.append(Route("/upload", upload, methods=["POST"]))
 app.router.routes.append(Route("/healthz", healthz, methods=["GET"]))
+app.router.routes.append(Route("/openapi.json", openapi_json, methods=["GET"]))
+app.router.routes.append(Route("/llms.txt", llms_txt, methods=["GET"]))
+app.router.routes.append(Route(f"{openapi_prefix}/{{tool}}", call_tool, methods=["POST"]))
 
 
 def main():

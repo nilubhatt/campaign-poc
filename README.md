@@ -415,6 +415,23 @@ cloudflared tunnel --url http://localhost:8086    # or: ngrok http 8086
 
 Then **Claude Web → Settings → Connectors → Add custom connector** → `<public-url>/mcp`.
 
+### If MCP is not allowed where you work
+
+Some firms permit neither a desktop client nor custom connectors — a policy about protocols,
+which no amount of open network fixes. The same server answers plain HTTPS for that case:
+
+```bash
+curl <public-url>/openapi.json          # every tool, generated from the same registry
+curl <public-url>/llms.txt              # the same thing as prose, for an agent to read
+curl -X POST <public-url>/api/list_campaigns -H 'content-type: application/json' -d '{}'
+```
+
+One `POST /api/<tool_name>` per tool, the tool's arguments as a JSON object. It is the *same*
+tool surface — the same validation, the same previews (a write stores nothing until
+`confirm: true`), the same refusals, now arriving as a `400` whose body carries the message
+written to be acted on. Nothing is hand-written: the description is generated from the tool
+registry, so it cannot describe a surface the server does not have.
+
 > **Attaching a file in chat is not the same as sending the file.** Claude reads the deck and
 > passes the text, so the server never sees the bytes — and comments, speaker notes and embedded
 > images can only be read from the file itself. To capture those, `POST` it to `/upload`, or use
