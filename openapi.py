@@ -106,8 +106,12 @@ def document(tools: list, server_url: Optional[str] = None) -> dict:
 
 
 def _preamble(instructions: str) -> str:
-    """The server's own instructions, plus the three things an HTTP caller needs that an MCP
-    client is told by the protocol."""
+    """The server's own instructions, plus the things an HTTP caller needs that an MCP client
+    is told by the protocol — including who can reach this deployment, which is a fact
+    `auth.exposure` owns and this document quotes rather than restates."""
+    import auth
+
+    access = auth.exposure()["what_it_means"]
     return f"""{instructions}
 
 ## Calling this over HTTP
@@ -132,6 +136,15 @@ Three conventions that are not in the schemas:
 
 Large files go to `POST /upload` as multipart `file`, which returns an `asset_id` to pass to
 the tool that wants it. `GET /healthz` says whether the backends are live.
+
+**Ask for a subset.** `?tools=a,b,c` on this document or on `/llms.txt` describes only those
+tools. The whole surface is 65 operations, which is more than most callers need and more schema
+than a model should spend its context reading — a filtered document is generated the same way
+and cannot describe a tool the server does not have.
+
+## Who can reach this server
+
+{access}
 """
 
 

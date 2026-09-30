@@ -87,6 +87,11 @@ async def healthz(request: Request):
             "embed_provider": config.EMBED_PROVIDER,
             "clip_provider": config.CLIP_PROVIDER,
             "auth_provider": config.AUTH_PROVIDER,
+            # WHO CAN REACH THIS, from the one function that decides it. Reported here rather
+            # than as a `health_check` component because that report's `ok` is what the
+            # installers refuse an install on, and unconfigured auth is a deployment choice
+            # rather than a broken build.
+            "access": auth.exposure(),
         })
         return JSONResponse(report)
     finally:
@@ -137,19 +142,52 @@ async def call_tool(request: Request):
     return JSONResponse(payload, status_code=400 if refused else 200)
 
 
+async def _requested_tools(request: Request):
+    """The tools the caller asked to be described, or all of them.
+
+    `?tools=a,b,c` exists because the whole document is 186KB across 65 operations, and a
+    custom GPT handed all of it spends its context on a schema instead of on the work. A
+    filtered document is still generated from the registry, so a subset cannot describe a tool
+    the server does not have.
+
+    Returns `(tools, refusal)`. An unknown name is refused with the list rather than silently
+    dropped: a caller who mistypes one of twelve names and gets eleven back has a document that
+    is quietly missing the tool they care about.
+    """
+    tools = await mcp.list_tools()
+    asked = request.query_params.get("tools")
+    if not asked:
+        return tools, None
+    wanted = [name.strip() for name in asked.split(",") if name.strip()]
+    known = {tool.name: tool for tool in tools}
+    unknown = [name for name in wanted if name not in known]
+    if unknown:
+        return None, JSONResponse(
+            {"error": f"no tool named {', '.join(repr(n) for n in unknown)}. "
+                      f"Omit `tools` for all {len(known)}, or see /llms.txt for the names."},
+            status_code=400)
+    return [known[name] for name in wanted], None
+
+
 async def openapi_json(request: Request):
     """The generated description. No auth: a caller cannot authenticate against a surface it
     has not been allowed to read, and this document contains no library data."""
     import openapi
 
-    return JSONResponse(openapi.document(await mcp.list_tools(), _public_url(request)))
+    tools, refusal = await _requested_tools(request)
+    if refusal is not None:
+        return refusal
+    return JSONResponse(openapi.document(tools, _public_url(request)))
 
 
 async def llms_txt(request: Request):
-    """The same, as prose."""
+    """The same, as prose, and filterable the same way."""
     import openapi
 
-    return PlainTextResponse(openapi.llms_txt(await mcp.list_tools(), _public_url(request)))
+    tools, refusal = await _requested_tools(request)
+    if refusal is not None:
+        return refusal
+    return PlainTextResponse(openapi.llms_txt(tools, _public_url(request)))
 
 
 def _public_url(request: Request) -> str:
@@ -186,6 +224,14 @@ def main():
     import rulebook
 
     print(f"Rulebook: {rulebook.version()}", file=sys.stderr)
+    # SAID AT THE MOMENT SOMEBODY STARTS IT, not only in a document they may not have read.
+    # The same sentence `/healthz` and the OpenAPI preamble carry.
+    access = auth.exposure()
+    if access["open_to_the_network"]:
+        print(f"Access: {access['what_it_means']}", file=sys.stderr)
+    else:
+        print(f"Access: {access['auth_provider']} auth, bound to {access['bound_to']}",
+              file=sys.stderr)
     uvicorn.run(app, host=config.HTTP_HOST, port=config.HTTP_PORT)
 
 

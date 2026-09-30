@@ -432,6 +432,34 @@ tool surface — the same validation, the same previews (a write stores nothing 
 written to be acted on. Nothing is hand-written: the description is generated from the tool
 registry, so it cannot describe a surface the server does not have.
 
+**Ask for a subset.** All 65 operations come to about 186 KB, which is more schema than a model
+should spend its context reading. Name the ones you need:
+
+```bash
+curl '<url>/openapi.json?tools=upload_campaign,prepare_evaluation,save_evaluation'   # ~48 KB
+curl '<url>/llms.txt?tools=gaps,coverage'
+```
+
+A misspelled name is refused rather than dropped, so a filtered document is never quietly
+missing the tool you came for.
+
+**Where to point each interface**
+
+| Interface | Point it at |
+|---|---|
+| Claude Desktop | nothing — run `campaign-intelligence configure-desktop`; it speaks stdio locally |
+| Claude Web / claude.ai | Settings → Connectors → Add custom connector → `<url>/mcp` |
+| A custom GPT (Actions) | `<url>/openapi.json?tools=…` — filter it; 65 operations is more than a GPT handles well |
+| Your own agent stack | `<url>/openapi.json` to drive it, `<url>/llms.txt` to read first |
+
+> **This server has no authentication by default, and it says so.** `CAMPAIGN_POC_AUTH_PROVIDER`
+> defaults to `none` (anonymous, allow all) and `CAMPAIGN_POC_HOST` defaults to `0.0.0.0`, so on
+> a network *anyone who can reach the port can read and write the library*. That is a supported
+> way to run it **on a private network** — an internal address behind your own perimeter — and it
+> is not safe on anything reachable from the internet. The server prints which of those it is at
+> startup, and `GET /healthz` reports it under `access`. To narrow it: `CAMPAIGN_POC_HOST=127.0.0.1`
+> for one machine, or configure a provider (`docs/PRODUCTION-ROADMAP.md` § Authentication).
+
 > **Attaching a file in chat is not the same as sending the file.** Claude reads the deck and
 > passes the text, so the server never sees the bytes — and comments, speaker notes and embedded
 > images can only be read from the file itself. To capture those, `POST` it to `/upload`, or use

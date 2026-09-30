@@ -107,6 +107,18 @@ It deliberately does not flatten the tools into REST resources: `POST /campaigns
 and needs a hand-written mapping from verbs to tools, which is the drift this module exists to
 avoid — and the caller is a model reading descriptions, not a developer memorising a scheme.
 
+`?tools=a,b,c` on either surface describes a subset — 65 operations is about 186 KB, and a GPT
+handed all of it spends its context on a schema. A misspelled name is refused with the count
+rather than dropped, because a document quietly missing the tool you came for is worse than an
+error.
+
+**Who can reach the server is a fact, not a warning**, and `auth.exposure()` is the one place
+it is computed: no provider plus a non-loopback bind means anyone who can route to the port.
+`/healthz` reports it under `access`, `main()` prints it at startup, and the generated preamble
+carries it for whoever is deciding where to deploy. It is deliberately NOT a `health_check`
+component — that report's `ok` is what the installers refuse an install on, and unconfigured
+auth on a private network is a deployment choice rather than a broken build.
+
 ### `auth.py`
 
 Pluggable auth for the HTTP surface. Off by default for local use; the seam exists so the

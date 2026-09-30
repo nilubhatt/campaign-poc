@@ -222,3 +222,110 @@ def test_the_description_is_readable_where_it_is_not_json(client):
     assert response.headers["content-type"].startswith("text/plain")
     with pytest.raises(json.JSONDecodeError):
         json.loads(response.text)
+
+
+# ── a subset, for a caller that cannot swallow 65 operations ────────────────
+
+def test_a_caller_can_ask_for_only_the_tools_it_needs(client):
+    """The whole document is 65 operations and about 186KB. A custom GPT handed all of it
+    spends its context on a schema instead of on the work, so `?tools=` describes a subset —
+    still generated, so a subset cannot describe a tool the server does not have."""
+    few = client.get("/openapi.json?tools=upload_campaign,prepare_evaluation").json()
+
+    assert sorted(few["paths"]) == ["/api/prepare_evaluation", "/api/upload_campaign"]
+    assert len(json.dumps(few)) < len(json.dumps(client.get("/openapi.json").json())) / 3
+    # And the subset is still the real thing: schemas and descriptions unchanged.
+    whole = client.get("/openapi.json").json()
+    assert few["paths"]["/api/upload_campaign"] == whole["paths"]["/api/upload_campaign"]
+    assert few["info"]["description"] == whole["info"]["description"]
+
+
+def test_a_misspelled_tool_name_is_refused_rather_than_dropped(client):
+    """A caller who mistypes one of twelve names and gets eleven back has a document quietly
+    missing the tool they came for."""
+    refused = client.get("/openapi.json?tools=upload_campaign,uplaod_campaign")
+
+    assert refused.status_code == 400
+    assert "uplaod_campaign" in refused.json()["error"]
+    assert "65" in refused.json()["error"], "and it says how many there are"
+
+
+def test_the_prose_can_be_filtered_the_same_way(client):
+    text = client.get("/llms.txt?tools=gaps,coverage").text
+
+    assert text.count("- `POST") == 2
+    assert "/api/gaps" in text and "/api/coverage" in text
+    assert client.get("/llms.txt?tools=nope").status_code == 400
+
+
+def test_an_empty_filter_is_the_whole_surface(client):
+    """`?tools=` with nothing after it is a caller who built a URL from an empty list, not a
+    request for a document describing nothing."""
+    assert len(client.get("/openapi.json?tools=").json()["paths"]) == 65
+
+
+# ── who can reach this server ──────────────────────────────────────────────
+
+def test_the_product_says_who_can_reach_it(client, monkeypatch):
+    """Running with no auth on a private network is supported — it is how this ships for a firm
+    with an internal address — but the product has to SAY so rather than leave it to a document
+    nobody opened. One computed fact, read by `/healthz`, the startup banner and the generated
+    preamble."""
+    import auth
+
+    monkeypatch.setattr(config, "AUTH_PROVIDER", "none")
+    monkeypatch.setattr(config, "HTTP_HOST", "0.0.0.0")
+
+    access = client.get("/healthz").json()["access"]
+    assert access["open_to_the_network"] is True
+    assert access["basis"] == "computed"
+    assert "anyone who can reach port" in access["what_it_means"]
+    assert "not safe on anything reachable from the internet" in access["what_it_means"]
+    assert "CAMPAIGN_POC_HOST=127.0.0.1" in access["what_it_means"], "and how to narrow it"
+    assert auth.exposure() == access, "one fact, not two"
+
+
+def test_bound_to_one_machine_is_not_reported_as_open(client, monkeypatch):
+    """The default shape of this product is one marketer's laptop, and calling that exposed
+    would be the boy who cried wolf — the warning that matters would be ignored."""
+    monkeypatch.setattr(config, "AUTH_PROVIDER", "none")
+    monkeypatch.setattr(config, "HTTP_HOST", "127.0.0.1")
+
+    access = client.get("/healthz").json()["access"]
+    assert access["open_to_the_network"] is False
+    assert "only this machine can reach it" in access["what_it_means"]
+
+
+def test_a_configured_provider_is_not_reported_as_anonymous(client, monkeypatch):
+    monkeypatch.setattr(config, "AUTH_PROVIDER", "entra")
+    monkeypatch.setattr(config, "HTTP_HOST", "0.0.0.0")
+
+    access = client.get("/healthz").json()["access"]
+    assert access["open_to_the_network"] is False
+    assert "'entra' provider" in access["what_it_means"]
+
+
+def test_the_generated_document_carries_the_same_statement(client, monkeypatch):
+    """A caller reading the spec learns the deployment requirement, because that caller may be
+    the one deciding where to put it."""
+    monkeypatch.setattr(config, "AUTH_PROVIDER", "none")
+    monkeypatch.setattr(config, "HTTP_HOST", "0.0.0.0")
+
+    description = client.get("/openapi.json").json()["info"]["description"]
+
+    assert "Who can reach this server" in description
+    assert "anyone who can reach port" in description
+
+
+def test_the_access_statement_is_not_a_health_check_component(conn):
+    """`health_check`'s `ok` is what the installers refuse an install on — `all(components)` —
+    so an auth component that is False whenever auth is unconfigured would block every install
+    of the default configuration. Unconfigured auth is a deployment choice, not a broken
+    build."""
+    import core
+
+    report = core.health_check(conn, probe=False)
+
+    assert report["ok"] is True
+    assert "auth" not in report["components"]
+    assert "access" not in report["components"]

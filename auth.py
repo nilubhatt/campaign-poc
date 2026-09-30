@@ -89,3 +89,55 @@ def _bearer(authorization_header: Optional[str]) -> str:
     if not authorization_header or not authorization_header.lower().startswith("bearer "):
         raise AuthError("missing or malformed Authorization: Bearer header")
     return authorization_header.split(" ", 1)[1].strip()
+
+
+# Addresses that reach only this machine. Anything else is a network, and on a network with no
+# provider configured "anonymous" stops meaning "the person sitting here".
+_LOOPBACK = ("127.0.0.1", "localhost", "::1", "127.0.0.0/8")
+
+
+def exposure() -> dict:
+    """WHO CAN REACH THIS SERVER, as a fact rather than a warning.
+
+    `authenticate` defaults to anonymous-allow, which is the right default for the product's
+    ordinary shape: a marketer's own laptop, one user, nothing listening. It becomes a
+    different claim the moment the HTTP surface binds to an address other than loopback —
+    `CAMPAIGN_POC_HOST` defaults to `0.0.0.0`, so "anonymous" then means anyone who can route
+    to the port, which on a corporate network is a lot of people.
+
+    Computed once here, and read by every surface that should say it: `/healthz`, the startup
+    banner, and the generated OpenAPI preamble. A sentence about access written three times is
+    three sentences to keep in step, and this one has to stay true when somebody sets a
+    provider.
+
+    NOT a `health_check` component, deliberately. That report's `ok` is the gate the installers
+    refuse an install on — `ok = all(components)` — so a component that is False whenever auth
+    is unconfigured would block every install of the default configuration. This is a statement
+    about deployment, not a fault in the build.
+    """
+    import config
+
+    provider = config.AUTH_PROVIDER
+    anonymous = provider == "none"
+    local_only = config.HTTP_HOST in _LOOPBACK
+    open_to_network = anonymous and not local_only
+    return {
+        "auth_provider": provider,
+        "bound_to": config.HTTP_HOST,
+        "open_to_the_network": open_to_network,
+        "basis": "computed",
+        "what_it_means": (
+            f"No authentication is configured and this server is bound to "
+            f"{config.HTTP_HOST}, so anyone who can reach port {config.HTTP_PORT} can read "
+            f"and write this library. That is a supported way to run it on a private "
+            f"network — an internal address behind the firm's own perimeter — and it is not "
+            f"safe on anything reachable from the internet. Restrict it to one machine with "
+            f"CAMPAIGN_POC_HOST=127.0.0.1, or configure a provider with "
+            f"CAMPAIGN_POC_AUTH_PROVIDER (see docs/PRODUCTION-ROADMAP.md § Authentication)."
+            if open_to_network else
+            f"No authentication is configured, and this server is bound to "
+            f"{config.HTTP_HOST}, so only this machine can reach it."
+            if anonymous else
+            f"Authentication is handled by the {provider!r} provider, and this server is "
+            f"bound to {config.HTTP_HOST}."),
+    }
