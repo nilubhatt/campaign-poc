@@ -1,7 +1,7 @@
 """
 Unified entry point for the packaged binary.
 
-    campaign-intelligence serve [--host H --port P --embed ollama|hash|voyage]   # HTTP (Web + Desktop)
+    campaign-intelligence serve [--host H --port P --embed ollama|hash|voyage --base-url URL]   # HTTP
     campaign-intelligence stdio                                                  # stdio (Claude Desktop, local)
 
 One executable covers both transports so the same bundle serves every client.
@@ -25,10 +25,14 @@ def main() -> int:
                    version=f"campaign-intelligence {version.FULL}")
     sub = p.add_subparsers(dest="cmd")
 
-    s = sub.add_parser("serve", help="run the HTTP server (MCP /mcp + /upload + /healthz)")
+    s = sub.add_parser("serve", help="run the HTTP server (MCP /mcp + /api + /upload + /openapi.json + /healthz)")
     s.add_argument("--host", default=None)
     s.add_argument("--port", type=int, default=None)
     s.add_argument("--embed", default=None, choices=["ollama", "hash", "voyage"])
+    # An argument as well as CAMPAIGN_POC_BASE_URL because a systemd unit or a scheduled task
+    # inherits no shell, and an argument is what an installer can append to the command.
+    s.add_argument("--base-url", default=None,
+                   help="the public URL this server is reached on, e.g. https://briefs.example.com")
 
     sub.add_parser("stdio", help="run over stdio for a local Claude Desktop connector")
 
@@ -60,6 +64,9 @@ def main() -> int:
         if args.host:  os.environ["CAMPAIGN_POC_HOST"] = args.host
         if args.port:  os.environ["CAMPAIGN_POC_PORT"] = str(args.port)
         if args.embed: os.environ["CAMPAIGN_POC_EMBED_PROVIDER"] = args.embed
+        # Empty means none, as `run.sh --base-url ''` already does - not a URL to warn about.
+        if args.base_url: os.environ["CAMPAIGN_POC_BASE_URL"] = args.base_url
+        elif args.base_url == "": os.environ.pop("CAMPAIGN_POC_BASE_URL", None)
         import http_app
         http_app.main()
     elif cmd == "stdio":

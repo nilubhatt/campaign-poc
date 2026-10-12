@@ -79,7 +79,7 @@ Name: "service"; Description: "Run the server in the background at logon"; Group
 ;
 ; Background service via Task Scheduler (runs at logon). Genuinely optional.
 Filename: "schtasks.exe"; \
-  Parameters: "/Create /F /SC ONLOGON /TN CampaignIntelligenceServer /TR ""'{app}\{#AppExe}' serve"""; \
+  Parameters: "/Create /F /SC ONLOGON /TN CampaignIntelligenceServer /TR ""'{app}\{#AppExe}' serve{code:BaseUrlArg}"""; \
   StatusMsg: "Registering background service..."; Tasks: service; Flags: runhidden
 
 [UninstallRun]
@@ -116,6 +116,97 @@ Filename: "{app}\{#AppExe}"; Parameters: "unconfigure-desktop"; Flags: runhidden
 // Desktop, and replace the success page with the failure. Both are done below.
 var
   GSelfTestFailure: String;
+  GBaseUrlPage: TInputQueryWizardPage;
+
+// The public URL the background service is reached on (a tunnel, or the firm's own HTTPS
+// name). The server answers only to Host names it knows, and a scheduled task inherits no
+// environment, so the URL is appended to the task's `serve` command as --base-url. Asked on a
+// page shown only when the service task is chosen; /BASEURL=... supplies it on a silent install.
+//
+// Checked here for what is safe to WRITE into the /TR command line - the characters
+// auth.BASE_URL_SHAPE allows, since Pascal Script has no regex. Whether it is a usable URL is
+// the server's call: its startup WARNING names a bad one and ignores it.
+// schtasks /TR is limited to 261 characters and [Run] ignores schtasks' exit code, so a URL
+// that does not fit would register no task and say nothing. What fits depends on the install
+// path - it holds the user's name - so it is measured, not assumed: the /TR command is
+// 'PATH' serve --base-url URL, i.e. the path plus 20 characters before the URL. {app} is final
+// by the time this runs (the URL page comes after the directory page).
+function MaxBaseUrlLength: Integer;
+begin
+  Result := 261 - Length(ExpandConstant('{app}\{#AppExe}')) - 20;
+end;
+
+function SafeBaseUrl(Value: String): Boolean;
+var
+  I: Integer;
+begin
+  Result := Length(Value) <= MaxBaseUrlLength;
+  if not Result then
+    exit;
+  for I := 1 to Length(Value) do
+    if Pos(Value[I], 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-:/[]') = 0 then
+    begin
+      Result := False;
+      exit;
+    end;
+end;
+
+function BaseUrlArg(Param: String): String;
+var
+  Url: String;
+begin
+  Result := '';
+  if GBaseUrlPage = nil then
+    exit;
+  Url := Trim(GBaseUrlPage.Values[0]);
+  if Url = '' then
+    exit;
+  // Belt and braces: NextButtonClick refuses an unsafe value on every install, silent or not.
+  if not SafeBaseUrl(Url) then
+  begin
+    Log('Ignoring /BASEURL: it contains characters that cannot go on a command line: ' + Url);
+    exit;
+  end;
+  Result := ' --base-url ' + Url;
+end;
+
+procedure InitializeWizard;
+begin
+  GBaseUrlPage := CreateInputQueryPage(wpSelectTasks,
+    'Public address',
+    'Will Claude Web reach this server through a public URL?',
+    'If it will - through a cloudflared or ngrok tunnel, or your own HTTPS name - enter that URL, ' +
+    'for example https://briefs.example.com. The server answers only to names it knows. ' +
+    'Leave it empty if only this computer uses it.');
+  GBaseUrlPage.Add('Public URL (optional):', False);
+  GBaseUrlPage.Values[0] := ExpandConstant('{param:BASEURL|}');
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := (GBaseUrlPage <> nil) and (PageID = GBaseUrlPage.ID) and
+            not WizardIsTaskSelected('service');
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (GBaseUrlPage <> nil) and (CurPageID = GBaseUrlPage.ID) and
+     not SafeBaseUrl(Trim(GBaseUrlPage.Values[0])) then
+  begin
+    // Inno runs this on a silent install too (it clicks through the pages), and a [Code]
+    // MsgBox IS shown under /SILENT - an unattended install would stop on a dialog. Silent:
+    // log it and refuse, which aborts setup before anything is installed, as install.sh does.
+    if WizardSilent then
+      Log('Refusing /BASEURL: it may contain only letters, digits and . _ - : / [ ] and be ' +
+          'at most ' + IntToStr(MaxBaseUrlLength) + ' characters: ' + GBaseUrlPage.Values[0])
+    else
+      MsgBox('The public URL may contain only letters, digits and . _ - : / [ ], at most ' +
+             IntToStr(MaxBaseUrlLength) + ' characters - for example https://briefs.example.com',
+             mbError, MB_OK);
+    Result := False;
+  end;
+end;
 
 function RunAndCapture(Cmd, Params: String; var Output: String): Integer;
 var

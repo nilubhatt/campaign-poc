@@ -38,7 +38,9 @@ def client(conn):
     """
     import http_app
 
-    return TestClient(http_app.app)
+    # Reached as a laptop install is. TestClient's own default Host, `testserver`, is refused
+    # with a 421 by the DNS-rebinding guard, as any name nobody configured is.
+    return TestClient(http_app.app, base_url="http://localhost:8086")
 
 
 def _tools(client):
@@ -204,9 +206,11 @@ def test_the_generators_are_pure_functions_of_the_registry(conn):
     assert openapi.llms_txt(two).count("- `POST") == 2
 
 
-def test_the_document_names_the_url_it_was_reached_on(client):
+def test_the_document_names_the_url_it_was_reached_on(client, monkeypatch):
     """A tunnel is the ordinary deployment here, and a document naming `localhost` as the
-    server is one nobody else can use."""
+    server is one nobody else can use. Only a name the server answers to is reflected — an
+    unknown one falls back to the configured URL (test_http_guard)."""
+    monkeypatch.setattr(config, "ALLOWED_HOSTS", ("briefs.example.test",))
     spec = client.get("/openapi.json",
                       headers={"x-forwarded-proto": "https",
                                "x-forwarded-host": "briefs.example.test"}).json()
@@ -297,6 +301,9 @@ def test_bound_to_one_machine_is_not_reported_as_open(client, monkeypatch):
 
 
 def test_a_configured_provider_is_not_reported_as_anonymous(client, monkeypatch):
+    import auth
+
+    monkeypatch.setitem(auth._PROVIDERS, "entra", auth.NoAuthProvider())
     monkeypatch.setattr(config, "AUTH_PROVIDER", "entra")
     monkeypatch.setattr(config, "HTTP_HOST", "0.0.0.0")
 

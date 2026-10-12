@@ -85,7 +85,7 @@ flowchart TB
 
     subgraph transport["Transport"]
         STDIO["stdio_server.py<br/>main.py stdio"]
-        HTTP["http_app.py<br/>Streamable HTTP<br/>/mcp · /upload · /healthz"]
+        HTTP["http_app.py<br/>Streamable HTTP<br/>/mcp · /api · /upload · /healthz"]
     end
 
     MCP["<b>mcp_server.py</b><br/>65 typed tools<br/><i>the whole public API</i>"]
@@ -132,7 +132,8 @@ inside the installer. The only network calls the product makes are to `localhost
 | Used by | Claude Desktop (local) | Claude Web / cowork (custom connector) |
 | Started by | the desktop app, per session | `campaign-intelligence serve` |
 | Entry | `main.py stdio` | `http_app.py` → `/mcp` |
-| Extras | — | `POST /upload` (large-file side channel), `GET /healthz` |
+| Extras | — | `POST /upload` (large-file side channel), `GET /healthz`, `POST /api/<tool>` + `GET /openapi.json` / `/llms.txt` (the same tools for a caller that cannot speak MCP) |
+| Guard | — | Host/Origin allowlist, body cap and `auth.authenticate`, on `/mcp`, `/api` and `/upload` alike |
 
 Both mount the *same* `mcp_server.py` tool surface. There is no second implementation of any
 tool for the second transport — a rule the codebase enforces because two implementations of

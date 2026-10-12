@@ -5,11 +5,19 @@
 #   ./run.sh                         # run the HTTP server on demand (foreground)
 #   ./run.sh --service               # install + start a systemd --user service (Linux)
 #   ./run.sh --service --stop        # stop + remove the service
-#   ./run.sh --host 0.0.0.0 --port 8086   # bind for a tunnel (Claude Web); default local-only
+#   ./run.sh --host 0.0.0.0 --port 8086   # bind to the LAN (list the names used in CAMPAIGN_POC_ALLOWED_HOSTS)
+#   ./run.sh --base-url https://<tunnel-name>   # Claude Web through a tunnel on this machine: the
+#                                    # default bind is enough, but the server must know the name it
+#                                    # is reached on (it answers only to known Host names). Also
+#                                    # written into the --service unit, which inherits no shell.
 set -euo pipefail
+# The URL check below uses `[A-Za-z]`, which follows collation order — and so can admit
+# non-ASCII letters — in some glibc UTF-8 locales. Everything this script prints is ASCII.
+export LC_ALL=C
 cd "$(dirname "$0")"
 
 MODE=ondemand; STOP=0; HOST=127.0.0.1; PORT=8086; EMBED=ollama; SETUP=0
+BASE_URL="${CAMPAIGN_POC_BASE_URL:-}"; BASE_URL_FROM=CAMPAIGN_POC_BASE_URL
 while [ $# -gt 0 ]; do case "$1" in
   --setup) SETUP=1;;
   --service) MODE=service;;
@@ -17,8 +25,30 @@ while [ $# -gt 0 ]; do case "$1" in
   --host) HOST="$2"; shift;;
   --port) PORT="$2"; shift;;
   --embed) EMBED="$2"; shift;;
+  --base-url) case "${2-}" in ''|-*) [ $# -ge 2 ] && [ -z "${2-}" ] || {
+                echo "--base-url needs a value, e.g. --base-url https://briefs.example.com"; exit 2; };; esac
+              BASE_URL="$2"; BASE_URL_FROM=--base-url; shift;;
   *) echo "unknown arg: $1"; exit 2;;
 esac; shift; done
+
+# Written unquoted into a systemd unit, where a space splits it and `%` is a specifier: a
+# value that is not a plain URL is refused here rather than registering a broken service.
+# The SAME pattern as auth.BASE_URL_SHAPE (a test checks): what is safe to WRITE here. The
+# server also applies DNS rules (label length, no empty or hyphen-edged label, no `..` in the
+# path) that a pattern shared with bash and .NET cannot carry; for those, the server's startup
+# WARNING has the last word: it names the value and ignores it.
+# Not on --stop or --setup: neither uses the URL, and a bad one left in the shell must not
+# stand between anybody and removing a service.
+BASE_URL_SHAPE='^([Hh][Tt][Tt][Pp][Ss]?://)?([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$'
+# `--stop` alone is not a service removal — it falls through to a foreground start — so only
+# `--service --stop` is exempt. `${BASH_REMATCH[3]:-}`: whether an unmatched group is unset
+# under `set -u` is not something to depend on across bash versions.
+if ! { [ "$MODE" = service ] && [ "$STOP" = 1 ]; } && [ "$SETUP" != 1 ] && [ -n "$BASE_URL" ]; then
+  if ! [[ "$BASE_URL" =~ $BASE_URL_SHAPE ]] || { PORT_PART="${BASH_REMATCH[3]:-}"; [ -n "$PORT_PART" ] &&
+       { [ "$((10#${PORT_PART#:}))" -lt 1 ] || [ "$((10#${PORT_PART#:}))" -gt 65535 ]; }; }; then
+    echo "$BASE_URL_FROM must look like https://name[:port][/path] (got: $BASE_URL)"; exit 2
+  fi
+fi
 
 VENV=.venv; PY="$VENV/bin/python"
 SERVICE=campaign-intelligence
@@ -66,6 +96,7 @@ WorkingDirectory=$(pwd)
 Environment=CAMPAIGN_POC_EMBED_PROVIDER=$EMBED
 Environment=CAMPAIGN_POC_HOST=$HOST
 Environment=CAMPAIGN_POC_PORT=$PORT
+${BASE_URL:+Environment=CAMPAIGN_POC_BASE_URL=$BASE_URL}
 ExecStart=$(pwd)/$PY -m http_app
 Restart=on-failure
 
@@ -79,5 +110,8 @@ EOF
 fi
 
 export CAMPAIGN_POC_EMBED_PROVIDER="$EMBED" CAMPAIGN_POC_HOST="$HOST" CAMPAIGN_POC_PORT="$PORT"
-echo "Serving http://$HOST:$PORT  (/mcp, /upload, /healthz)"
+# Empty means none — including `--base-url ''` over a value inherited from the shell, which the
+# check above did not look at and the server would otherwise still read.
+if [ -n "$BASE_URL" ]; then export CAMPAIGN_POC_BASE_URL="$BASE_URL"; else unset CAMPAIGN_POC_BASE_URL; fi
+echo "Serving http://$HOST:$PORT  (/mcp, /api, /upload, /openapi.json, /healthz)"
 exec "$PY" -m http_app

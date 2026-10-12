@@ -195,6 +195,12 @@ SERVING_HTTP = False
 HTTP_HOST = os.getenv("CAMPAIGN_POC_HOST", "0.0.0.0")
 HTTP_PORT = int(os.getenv("CAMPAIGN_POC_PORT", "8086"))
 PUBLIC_BASE_URL = os.getenv("CAMPAIGN_POC_BASE_URL", f"http://localhost:{HTTP_PORT}").rstrip("/")
+# Host headers the HTTP surface answers to, beyond loopback, the name in PUBLIC_BASE_URL and a
+# specific (non-wildcard) bind address, which are always accepted. Comma-separated; `host`
+# answers on any port, `host:port` on that one. Compared case-insensitively. Everything else
+# gets a 421 — the DNS-rebinding guard (see http_app.GUARDED, auth.host_allowed).
+ALLOWED_HOSTS = tuple(h.strip() for h in os.getenv("CAMPAIGN_POC_ALLOWED_HOSTS", "").split(",")
+                      if h.strip())
 AUTH_MODE = os.getenv("CAMPAIGN_POC_AUTH_MODE", "none").lower()  # legacy display value
 # Pluggable auth: names the registered AuthProvider that handles requests (see auth.py).
 # 'none' (default) = no enforcement. Future: 'entra' (Azure AD / Entra ID), 'oidc' (generic),

@@ -6,12 +6,36 @@
 #   ./install.sh              # install + wire Claude Desktop + ensure Ollama
 #   ./install.sh --service    # also run the server in the background (systemd --user)
 #   ./install.sh --no-ollama  # skip the Ollama install/pull step
+#   ./install.sh --service --base-url https://<name>   # the public URL the service is reached
+#                             # on (a tunnel or your own HTTPS name); it answers only to names
+#                             # it knows, and a systemd unit inherits no shell to read it from
 set -euo pipefail
+export LC_ALL=C   # the URL check's [A-Za-z] follows collation order in some UTF-8 locales
 
-WITH_SERVICE=0; WITH_OLLAMA=1
-for a in "$@"; do case "$a" in
+WITH_SERVICE=0; WITH_OLLAMA=1; BASE_URL=""
+while [ $# -gt 0 ]; do case "$1" in
   --service) WITH_SERVICE=1;; --no-ollama) WITH_OLLAMA=0;;
-  *) echo "unknown arg: $a"; exit 2;; esac; done
+  # A value, not the next flag: `--base-url` last made `shift` fail silently under `set -e`,
+  # and `--base-url --no-ollama` registered a service argparse refuses on every restart.
+  --base-url) case "${2-}" in ''|-*) [ $# -ge 2 ] && [ -z "${2-}" ] || {
+                echo "--base-url needs a value, e.g. --base-url https://briefs.example.com"; exit 2; };; esac
+              BASE_URL="$2"; shift;;
+  *) echo "unknown arg: $1"; exit 2;; esac; shift; done
+
+# Checked before anything is copied. The SAME pattern as auth.BASE_URL_SHAPE (a test checks):
+# it is written unquoted into the unit's ExecStart. DNS rules beyond the pattern are the
+# server's: its startup WARNING has the last word, in the journal.
+BASE_URL_SHAPE='^([Hh][Tt][Tt][Pp][Ss]?://)?([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$'
+if [ -n "$BASE_URL" ]; then
+  if [ "$WITH_SERVICE" != 1 ]; then
+    echo "--base-url is written into the background service; it needs --service. For a server"
+    echo "you start yourself: campaign-intelligence serve --base-url $BASE_URL"; exit 2
+  fi
+  if ! [[ "$BASE_URL" =~ $BASE_URL_SHAPE ]] || { PORT_PART="${BASH_REMATCH[3]:-}"; [ -n "$PORT_PART" ] &&
+       { [ "$((10#${PORT_PART#:}))" -lt 1 ] || [ "$((10#${PORT_PART#:}))" -gt 65535 ]; }; }; then
+    echo "--base-url must look like https://name[:port][/path] (got: $BASE_URL)"; exit 2
+  fi
+fi
 
 here="$(cd "$(dirname "$0")" && pwd)"
 # locate the bundle folder (contains the 'campaign-intelligence' executable)
@@ -77,7 +101,7 @@ if [ "$WITH_SERVICE" = 1 ]; then
 Description=Campaign Intelligence (lean) server
 After=network.target
 [Service]
-ExecStart=$DEST/campaign-intelligence serve
+ExecStart=$DEST/campaign-intelligence serve${BASE_URL:+ --base-url $BASE_URL}
 Restart=on-failure
 [Install]
 WantedBy=default.target

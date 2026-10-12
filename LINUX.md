@@ -11,7 +11,7 @@ cd campaign-poc
 ./run.sh                # ON DEMAND: HTTP server in the foreground (127.0.0.1:8086)
 ./run.sh --service      # BACKGROUND: systemd --user service, starts now + on login
 ./run.sh --service --stop   # stop + remove the service
-./run.sh --host 0.0.0.0 --port 8086   # bind for a tunnel (Claude Web)
+./run.sh --host 0.0.0.0 --port 8086   # bind to the LAN (a tunnel on this machine does not need it)
 ```
 
 Requires `python3` (3.10+) and `curl`. `--setup` needs internet once (Ollama installer + model).
@@ -29,6 +29,7 @@ cd campaign-intelligence
 
 ./install.sh                 # install to ~/.local + wire Claude Desktop + ensure Ollama
 ./install.sh --service       # also run in the background (systemd --user)
+./install.sh --service --base-url https://<name>   # ...reached by Claude Web at that public URL
 ./uninstall.sh               # remove it (--purge also deletes data)
 
 # ...or run in place without installing:
@@ -60,8 +61,13 @@ Check health: `curl http://localhost:8086/healthz` — `vector_backend` should r
   A wrong path doesn't stop the server — text search and uploads work regardless; visual
   similarity is simply off, and the reason is printed at startup (in the client's MCP log
   for a stdio server, or `clip_weights` in `GET /healthz` when running over HTTP).
-- **Claude Web / cowork:** run bound to `0.0.0.0`, open a tunnel
-  (`cloudflared tunnel --url http://localhost:8086`), add `<public-url>/mcp` as a custom connector.
+- **Claude Web / cowork:** open a tunnel on this machine
+  (`cloudflared tunnel --url http://localhost:8086`) — the default loopback bind is enough — and
+  add `<public-url>/mcp` as a custom connector.
+  Start the server with `./run.sh --base-url https://<your-tunnel-name>` — the form is
+  `https://name[:port][/path]`, see README § Claude Web (it is also written into
+  the `--service` unit, which inherits no shell) — it answers only to
+  Host names it knows, and a `421` means the tunnel's is not one of them.
 
 ## Building the bundle yourself
 
