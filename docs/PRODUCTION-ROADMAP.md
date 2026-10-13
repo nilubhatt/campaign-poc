@@ -1,9 +1,10 @@
 # Production Roadmap — Campaign Intelligence (full product)
 
-Status of this document: **planning / deferred.** The immediate priority is getting the
-product working **end-to-end on a local Windows laptop** (Claude Desktop + local server +
-Ollama). Everything below — central deployment, OAuth, TLS, multi-user — is captured here so
-it isn't lost, to be picked up **after** local end-to-end is solid.
+Status of this document: **central deployment is next.** Local end-to-end (Claude Desktop +
+local server + Ollama) is done (§9.1), §6 and the product-review plan are complete, and the
+§3 questions that gated the central deployment were decided on 2026-10-11 — one part remains
+(who administers the VM). What is below — central deployment, OAuth, TLS, multi-user — is the
+next body of work.
 
 > This started as a lightweight PoC. The decision (Sept 2026) is to **extend it into the full
 > product** — no more "lean vs heavy" split. This repo (`campaign-poc`) is the product going
@@ -41,12 +42,12 @@ CLIP). Central cost ≈ the VM itself.
 | # | Question | Status / recommendation |
 |---|---|---|
 | 1 | Which codebase is the product? | **Decided:** evolve this repo; move data layer to Postgres + pgvector. |
-| 2 | Can Claude **Web** reach the VM? (public HTTPS) | **Open — blocking for central deploy.** Is it an **Azure VM with public DNS + inbound 443**? If yes → Azure Front Door / App Gateway for DNS + managed TLS. If internal-only → named tunnel or VPN-only Desktop access. |
+| 2 | Can Claude **Web** reach the VM? (public HTTPS) | **Decided (2026-10-11): yes — an Azure VM with public DNS and inbound 443**, behind Azure Front Door / App Gateway for DNS + managed TLS. Set `CAMPAIGN_POC_BASE_URL` to the public URL: the server answers only to Host names it knows (`auth.allowed_hosts()`), and until `openapi-surface` it answered only to loopback, so this deployment would have been refused with a `421`. **If Front Door / App Gateway rewrites the Host to the origin's name** (an "origin host header" set to the VM's FQDN, or "override with new host name"), add that FQDN to `CAMPAIGN_POC_ALLOWED_HOSTS` too — the guard reads `Host`, never `X-Forwarded-Host`, which a caller can write. Public reachability makes **Entra auth (§5) a precondition of go-live**, not a follow-up — no provider on a public name means anyone on the internet can read and write the library. |
 | 3 | Identity provider | **Decided: Azure AD / Entra ID** (pluggable — see §5). |
-| 4 | Access model — global vs scoped | **Open.** Rec: start **global-read within the company**; add region/team scoping via Entra **group claims** later. |
-| 5 | VM specs & admin | **Open.** GPU or CPU-only? (CPU fine for text + CLIP at this scale, slower ingest.) Who has root? |
-| 6 | Cost model | Rec: users' own Claude accounts do reasoning (no central key). **Confirm.** |
-| 7 | Metrics ownership | **Open — highest data-value item.** Who loads KPI results (the workbook) centrally, how often? A bulk import can make it one step. |
+| 4 | Access model — global vs scoped | **Decided (2026-10-11): global read within the company at launch**; region/team scoping via Entra **group claims** later (`Principal.groups` already carries them). |
+| 5 | VM specs & admin | **Decided (2026-10-11): CPU-only** — fine for text + CLIP at this scale; ingest is slower. **Still open: who administers the VM (root).** |
+| 6 | Cost model | **Decided (2026-10-11): users' own Claude accounts do the reasoning**; no central API key. (Unchanged from how the product works today.) |
+| 7 | Metrics ownership | **Decided (2026-10-11): the campaign owner records actuals (`add_metrics`) when the campaign concludes.** The risk of a distributed owner is coverage, so the backstop is the product's own `gaps` tool, which reports unmeasured records and names the one to fix first; `bulk_import_metrics` stays available for a backfill. |
 
 ---
 
@@ -56,7 +57,7 @@ CLIP). Central cost ≈ the VM itself.
  Users' Claude (Web / Desktop)  ──HTTPS + OAuth──►  Reverse proxy / Azure Front Door (TLS)
                                                         │
                                                         ▼
-                                       MCP server (Streamable HTTP /mcp) + REST /upload
+                         MCP server (Streamable HTTP /mcp) + REST /upload + /api/<tool>
                                                         │
      ┌──────────────────────────────┬──────────────────┴───────────────┬─────────────────┐
      ▼                              ▼                                    ▼                 ▼
@@ -69,7 +70,8 @@ CLIP). Central cost ≈ the VM itself.
 - **Database:** PostgreSQL + **pgvector** (concurrent, durable, real ANN) — replaces SQLite/sqlite-vec.
 - **Text vectors:** chunked (per slide/section), one vector per chunk (see §6.1).
 - **Image vectors:** CLIP visual embeddings **+ perceptual hashes** (see §6.6).
-- **Transport:** MCP over Streamable HTTP (already built) + REST `/upload`.
+- **Transport:** MCP over Streamable HTTP (already built) + REST `/upload`, and the same tools as
+  plain `POST /api/<tool>` with a generated `/openapi.json` for callers that cannot speak MCP.
 - **Auth:** pluggable provider, Entra for this org (§5).
 - **Deploy:** Docker Compose on the VM; existing GitHub Actions CI extends to build/publish.
 
@@ -78,7 +80,9 @@ CLIP). Central cost ≈ the VM itself.
 ## 5. Authentication (pluggable; Entra first)
 
 **Design (implemented as a seam now, no-op default):** `auth.authenticate(header)` is the single
-hook; the active provider is chosen by `CAMPAIGN_POC_AUTH_PROVIDER`. Adding an IdP = implement
+hook, and `http_app.GUARDED` runs it in front of `/mcp`, `/api/<tool>` and `/upload` alike —
+until `openapi-surface` it was not called for `/mcp` at all, so a provider would have protected
+only the side doors. The active provider is chosen by `CAMPAIGN_POC_AUTH_PROVIDER`. Adding an IdP = implement
 `AuthProvider` + `auth.register("<name>", provider)` + set the env. No call sites change. The
 `Principal` carries `subject`, `email`, and **`groups`** (IdP group claims) so access scoping can
 key off them later. See `auth.py`.
@@ -655,6 +659,11 @@ needs atomic values, so a human-readable composite matches nothing.
    complete v1 product** — not a partial cut of them. **Status (2026-09-08): §6.1–6.9 all done**,
    including CLIP (confirmed by the user to carry the torch/model-size dependency — see §6.6).
    169 tests passing (`tests/`) after an adversarial + design review round (§8.5) — CI
-   (`test.yml`) runs them on every push/PR.
-3. **Central deploy:** Postgres, Docker on the VM, TLS (Front Door / App Gateway), **Entra OAuth**
-   via the pluggable provider, access scoping via group claims.
+   (`test.yml`) runs them on every push/PR. (Since then the product-review plan,
+   `PRODUCT-REVIEW-PLAN.md`, took it to ~2,750 by v0.3.0, released 2026-09-23; the
+   `openapi-surface` work to ~2,940.)
+3. **Central deploy — next:** Postgres, Docker on a CPU-only Azure VM, public HTTPS behind Front
+   Door / App Gateway (§3 #2), **Entra OAuth** via the pluggable provider as a go-live
+   precondition (verify the pre-registered `client_id` question in §5 first), global read at
+   launch with group-claim scoping later. Not started: no Postgres code exists yet. Open: the VM
+   administrator.

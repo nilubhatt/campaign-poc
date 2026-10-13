@@ -106,15 +106,22 @@ If you prefer the running HTTP server (e.g. you also use Web), bridge it with `m
 ## 4. Connect Claude Web / cowork
 
 Claude Web reaches your server from the cloud, so it needs a **public HTTPS URL** — run the
-server bound to all interfaces and open a tunnel:
+server and open a tunnel on the same machine (the default loopback bind is enough, and asks no
+firewall question):
 
 ```powershell
-.\run.ps1 -HostAddr 0.0.0.0 -Port 8086     # (Windows Firewall will prompt once — allow it)
+.\run.ps1 -Port 8086
 # in another terminal, tunnel it:
 cloudflared tunnel --url http://localhost:8086      # or: ngrok http 8086
 ```
 
 Then Claude Web → **Settings → Connectors → Add custom connector** → `<public-url>/mcp`.
+
+The server answers only to Host names it knows, so give it the tunnel's: start the tunnel first,
+then `.\run.ps1 -BaseUrl https://<your-tunnel-name>` — the form is `https://name[:port][/path]`,
+see the README (add `-Mode service` to keep it in the
+background task, which inherits nothing from this shell). A `421`
+means the name is not on the list the startup line `Answers to Host:` prints.
 
 ## Notes & next phases
 

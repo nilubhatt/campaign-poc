@@ -4,7 +4,7 @@
 > [`design.md`](design.md) first for *why* it is shaped this way; this document is *where
 > everything is*. [`README.md`](README.md) covers installing and running it.
 
-**37 modules of product code and 106 test files — more lines of test than of product.** The test-to-code ratio is not an accident: almost every rule described below is
+**38 modules of product code and 108 test files — more lines of test than of product.** The test-to-code ratio is not an accident: almost every rule described below is
 pinned by a test that was written to fail first.
 
 ---
@@ -22,6 +22,7 @@ flowchart TB
     subgraph api["Public API"]
         mcp["mcp_server.py<br/><i>65 tools</i>"]
         enums["enums.py<br/><i>forgiving input</i>"]
+        oas["openapi.py<br/><i>the same tools, for<br/>a caller without MCP</i>"]
     end
     subgraph orch["Orchestration"]
         core["core.py"]
@@ -58,7 +59,7 @@ where something was broken.
 
 | Command | What it does |
 |---|---|
-| `serve` | HTTP server (`/mcp`, `/upload`, `/healthz`) |
+| `serve` | HTTP server (`/mcp`, `/api/<tool>`, `/upload`, `/openapi.json`, `/llms.txt`, `/healthz`) |
 | `stdio` | **the path the installers wire into Claude Desktop** |
 | `init` | create the data directory and database; idempotent |
 | `health-check` | check every component; exit 1 if anything is wrong. `--json`, `--wait N` |
@@ -76,7 +77,66 @@ the first image tool call — the transport timeout the product review opened wi
 
 Two transports, one tool surface. `http_app` takes MCPServer's own Streamable HTTP app and
 bolts on `POST /upload` (a side channel for files too big for a tool argument, returns an
-`asset_id`) and `GET /healthz` (liveness plus which backends are live).
+`asset_id`), `GET /healthz` (liveness plus which backends are live), and the OpenAPI surface
+below.
+
+**One guard in front of every route that reaches the library** — `GUARDED`, around `/mcp`,
+`/api/<tool>` and `/upload`, on every method: one Host header (400), Host and Origin through
+`auth.host_allowed` (421 / 403), `application/json` on a non-empty `/api` body (so another web
+page cannot post to it without a preflight), `auth.authenticate` (401), then a body cap counted as
+it streams (413). MCP's built-in Host check is switched off and replaced, because it compared
+strings verbatim and accepted only loopback — Claude Web through a tunnel or a public name got a
+421 — and because it guarded `/mcp` alone. `host_allowed` treats a Host as a name and a port and
+nothing else: `localhost:8086@evil.example` is refused, not read as loopback. The generated
+documents advertise `CAMPAIGN_POC_BASE_URL` whenever it names somewhere other than this
+machine, and are served `no-store`. `/healthz`, `/openapi.json` and
+`/llms.txt` carry no library data and stay open.
+
+### `openapi.py` — the same tool surface, for a caller that cannot speak MCP
+
+Both transports above speak MCP: `stdio` for a desktop client, `/mcp` for a Claude Web
+connector. A firm that permits neither — no desktop client, no custom connectors, only its own
+agent stack making HTTPS calls — could not reach the product at all, however open its network
+was. The block is a policy about protocols, not about ports, so a third endpoint speaking the
+same protocol would answer nothing.
+
+So `http_app` also serves `GET /openapi.json`, `GET /llms.txt`, and `POST /api/<tool_name>`
+for each of the 65 tools.
+
+**Everything here is generated from the tool registry, and that is the whole design.** This
+module writes no paths and describes no tool: it reads what `mcp_server` already exposes and
+renders it — the tool's own JSON Schema as the request body, its docstring as the description,
+the server's own `INSTRUCTIONS` as the preamble. Hand-written REST paths beside the MCP tools
+would be two implementations of one surface, which is the shape every P1 of the §8.7 review
+had. `test_openapi_surface.py` asserts the two sets of names are equal, so a tool added
+tomorrow appears here with no second edit.
+
+Dispatch goes through `mcp.call_tool` — the same entry point the protocol uses — so a tool
+reached over plain HTTP runs the identical validation, the identical consent step (`confirm`
+still previews), and the identical refusals. A refusal becomes a **400** carrying its
+`{"error": ...}` message unchanged, because an HTTP caller reads the status before the body. So
+does a schema rejection, which `call_tool` raises as `ToolError` where `tools/call` returns
+`isError`; a crash is a JSON **500** with the same message MCP gives, and no more.
+
+It deliberately does not flatten the tools into REST resources: `POST /campaigns` reads better
+and needs a hand-written mapping from verbs to tools, which is the drift this module exists to
+avoid — and the caller is a model reading descriptions, not a developer memorising a scheme.
+
+`?tools=a,b,c` on either surface describes a subset — 65 operations is about 186 KB, and a GPT
+handed all of it spends its context on a schema. A misspelled name is refused with the count
+rather than dropped, because a document quietly missing the tool you came for is worse than an
+error. Every `tools=` parameter counts, each name once, and one that names nothing is the whole
+surface.
+
+**Who can reach the server is a fact, not a warning**, and `auth.exposure()` is the one place
+it is computed: no provider plus a non-loopback bind means anyone who can route to the port.
+Loopback is decided through `ipaddress`, so every spelling of it counts; the statement says it is
+computed from the bind address and so cannot see a tunnel; and it lists the Host names the guard
+answers to.
+`/healthz` reports it under `access`, `main()` prints it at startup, and the generated preamble
+carries it for whoever is deciding where to deploy. It is deliberately NOT a `health_check`
+component — that report's `ok` is what the installers refuse an install on, and unconfigured
+auth on a private network is a deployment choice rather than a broken build.
 
 ### `auth.py`
 
@@ -422,7 +482,7 @@ rather than code.
 ## 7. Running the tests
 
 ```bash
-python -m pytest -q                              # everything (~4 min, 2,750+ tests)
+python -m pytest -q                              # everything (~4 min, ~2,900 tests)
 python -m pytest tests/test_gaps.py -q           # one file
 python -m pytest -q -p no:randomly               # fixed order when bisecting
 ```

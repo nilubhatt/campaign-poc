@@ -171,6 +171,7 @@ cd campaign-intelligence
 |---|---|
 | `--no-ollama` | skip installing Ollama and pulling the model (use if you already have it) |
 | `--service` | also run the HTTP server at login, via `systemd --user` |
+| `--base-url https://<name>` | with `--service`: the public URL Claude Web reaches the service on (a tunnel or your own HTTPS name), written into the unit |
 
 With `--service`:
 
@@ -188,7 +189,7 @@ Run **`CampaignIntelligence-Setup.exe`**. Three checkboxes:
 |---|---|---|
 | **Install Ollama and download the embedding model** | ✅ on | downloads and silently installs Ollama, then pulls `nomic-embed-text` (~274 MB) |
 | **Connect Claude Desktop automatically** | ✅ on | writes the stdio connector into `claude_desktop_config.json` |
-| **Run the server in the background at logon** | ⬜ off | a scheduled task running `serve` |
+| **Run the server in the background at logon** | ⬜ off | a scheduled task running `serve`; if you tick it, the next page asks for the public URL Claude Web will reach it on (optional — `/BASEURL=https://…` on a silent install) |
 
 The download step can take several minutes and the installer says so while it runs. Uninstall
 from **Settings → Apps**; it removes the scheduled task and the Claude Desktop entry.
@@ -407,13 +408,83 @@ Claude Desktop is wired by the installer. For Claude Web you need the HTTP trans
 reachable HTTPS URL:
 
 ```bash
-campaign-intelligence serve                       # http://0.0.0.0:8086
+CAMPAIGN_POC_HOST=127.0.0.1 campaign-intelligence serve   # a tunnel on this machine needs no wider bind
 curl http://localhost:8086/healthz                # {"status":"ok","vector_backend":"sqlite-vec",…}
 
 cloudflared tunnel --url http://localhost:8086    # or: ngrok http 8086
 ```
 
 Then **Claude Web → Settings → Connectors → Add custom connector** → `<public-url>/mcp`.
+
+**Tell the server the name it is reached on.** It answers only to Host names it knows —
+loopback, the name in `CAMPAIGN_POC_BASE_URL`, a specific (non-wildcard) bind address, and
+anything in `CAMPAIGN_POC_ALLOWED_HOSTS` —
+and refuses every other with a `421`. That is the DNS-rebinding guard, and a tunnel forwards
+its public name as the Host. So start the tunnel first, then the server with its URL:
+`CAMPAIGN_POC_BASE_URL=https://<your-tunnel-name> campaign-intelligence serve` (from a source
+checkout, `./run.sh --base-url …` or `.\run.ps1 -BaseUrl …`, which also write it into the
+background service; for an installed copy, `campaign-intelligence serve --base-url …`, or
+`./install.sh --service --base-url …` / the Windows installer's public-URL page, which write it
+into the service they create). The value is `https://name[:port][/path]` — an `http://` scheme, an IPv6
+literal in brackets and a path are fine; credentials (`user:pass@`), a query, a fragment, spaces
+and `%` are not. The launchers and the server read the same pattern, so a launcher refuses
+anything of the wrong shape before writing it into a service; the server also applies DNS rules
+(label length, no empty or hyphen-edged label, no `..` in the path), and for those its startup
+`WARNING` names the value and ignores it. The startup
+line `Answers to Host: …` lists the names; a `421` means the one you used is not among them.
+
+### If MCP is not allowed where you work
+
+Some firms permit neither a desktop client nor custom connectors — a policy about protocols,
+which no amount of open network fixes. The same server answers plain HTTPS for that case:
+
+```bash
+curl <public-url>/openapi.json          # every tool, generated from the same registry
+curl <public-url>/llms.txt              # the same thing as prose, for an agent to read
+curl -X POST <public-url>/api/list_campaigns -H 'content-type: application/json' -d '{}'
+```
+
+One `POST /api/<tool_name>` per tool, the tool's arguments as a JSON object sent as
+`content-type: application/json` (anything else is refused — that is what stops another web
+page posting to it). It is the *same* tool surface — the same validation, the same previews (a
+write stores nothing until `confirm: true`), the same refusals, now arriving as a `400` whose
+body carries the message written to be acted on; a tool that crashes is a `500` carrying the
+same message MCP would. It sits behind the same guard as `/mcp`: the Host allowlist, a 4 MiB
+body cap, and the auth provider (`401`). Nothing is hand-written: the description is generated from the tool
+registry, so it cannot describe a surface the server does not have.
+
+**Ask for a subset.** All 65 operations come to about 186 KB, which is more schema than a model
+should spend its context reading. Name the ones you need:
+
+```bash
+curl '<url>/openapi.json?tools=upload_campaign,prepare_evaluation,save_evaluation'   # ~48 KB
+curl '<url>/llms.txt?tools=gaps,coverage'
+```
+
+A misspelled name is refused rather than dropped, so a filtered document is never quietly
+missing the tool you came for.
+
+**Where to point each interface**
+
+| Interface | Point it at |
+|---|---|
+| Claude Desktop | nothing — run `campaign-intelligence configure-desktop`; it speaks stdio locally |
+| Claude Web / claude.ai | Settings → Connectors → Add custom connector → `<url>/mcp` |
+| A custom GPT (Actions) | `<url>/openapi.json?tools=…` — filter it; 65 operations is more than a GPT handles well |
+| Your own agent stack | `<url>/openapi.json` to drive it, `<url>/llms.txt` to read first |
+
+> **This server has no authentication by default, and it says so.** `CAMPAIGN_POC_AUTH_PROVIDER`
+> defaults to `none` (anonymous, allow all) and `CAMPAIGN_POC_HOST` defaults to `0.0.0.0`, so on
+> a network *anyone who can reach the port can read and write the library*. That is a supported
+> way to run it **on a private network** — an internal address behind your own perimeter — and it
+> is not safe on anything reachable from the internet. Colleagues reaching it by a LAN address or
+> internal name need that name in `CAMPAIGN_POC_ALLOWED_HOSTS` (comma-separated); any other gets a
+> `421`, which is the DNS-rebinding guard rather than a fault. The server prints which of those it is at
+> startup, and `GET /healthz` reports it under `access`. To narrow it: `CAMPAIGN_POC_HOST=127.0.0.1`
+> for one machine, or configure a provider (`docs/PRODUCTION-ROADMAP.md` § Authentication) —
+> which then covers `/mcp`, `/api/<tool>` and `/upload` alike. The statement is computed from the
+> bind address, so it cannot see a tunnel: a loopback bind behind one is reachable from wherever
+> the tunnel is, and it says so.
 
 > **Attaching a file in chat is not the same as sending the file.** Claude reads the deck and
 > passes the text, so the server never sees the bytes — and comments, speaker notes and embedded
@@ -422,8 +493,9 @@ Then **Claude Web → Settings → Connectors → Add custom connector** → `<p
 > happened: `commentary_checked: false` means nothing was read, not that the deck had no
 > comments.
 
-> **Auth** is a no-op seam today (`CAMPAIGN_POC_AUTH_MODE=none`). claude.ai connectors generally
-> want OAuth — implement `auth.authenticate()` and set the mode to `oauth`.
+> **Auth** is a no-op seam today (`CAMPAIGN_POC_AUTH_PROVIDER=none`). claude.ai connectors
+> generally want OAuth — implement an `AuthProvider`, `auth.register("<name>", provider)`, and set
+> `CAMPAIGN_POC_AUTH_PROVIDER=<name>` (see `auth.py` and the roadmap's § Authentication).
 
 ---
 
@@ -545,7 +617,7 @@ All 65 of them. Claude picks the tool; you speak English.
 - `docs/DEFERRALS.md` — every deferred decision and why
 
 ```bash
-python -m pytest -q          # ~2,750 tests, about 4 minutes
+python -m pytest -q          # ~2,900 tests, about 4 minutes
 ```
 
 ## Roadmap

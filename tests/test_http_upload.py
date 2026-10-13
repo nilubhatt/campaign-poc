@@ -18,7 +18,8 @@ import store
 def client(conn):
     # `conn` fixture already isolates config.DATA_DIR/UPLOAD_DIR/etc. via monkeypatch
     store.init_db()
-    return TestClient(http_app.app)
+    # Reached as a laptop install is: `testserver`, TestClient's default Host, gets a 421.
+    return TestClient(http_app.app, base_url="http://localhost:8086")
 
 
 def test_upload_accepts_a_png_image(client):
