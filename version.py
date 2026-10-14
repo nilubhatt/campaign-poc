@@ -22,7 +22,7 @@ from pathlib import Path
 
 # Bumped by hand at release, and the single source of truth — a second copy disagrees with
 # the first the day somebody is in a hurry.
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 # Written by CI into build_info.txt next to this file (one line: "<commit> <iso-date>").
 # Absent in a source checkout, which is itself the useful answer: "not a released build".
