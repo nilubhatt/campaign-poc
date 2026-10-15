@@ -27,9 +27,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Not on macOS (issue #23): setup-python's macOS CPython is built without
+      # --enable-loadable-sqlite-extensions, so the bundled sqlite3 had no
+      # enable_load_extension, vec0.dylib could never load, and every macOS release ran on
+      # the pure-Python vector fallback. Homebrew's python@3.12 has it.
       - uses: actions/setup-python@v5
+        if: runner.os != 'macOS'
         with:
           python-version: '3.12'
+
+      - name: Python with loadable SQLite extensions (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install python@3.12
+          "$(brew --prefix python@3.12)/bin/python3.12" -m venv "$RUNNER_TEMP/py"
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/py/bin/python" -c "import sqlite3; sqlite3.connect(':memory:').enable_load_extension(True)"
 
       # A tag is the only place the version is stated twice, and the two have already
       # disagreed once (the Windows installer said 0.2.7 while version.py said 0.3.0). Fail
@@ -139,6 +152,23 @@ jobs:
           _verify/campaign-intelligence/campaign-intelligence check-weights | tee out.txt
           grep -q "source: bundled" out.txt
 
+      # Issue #23: the macOS bundle shipped vec0.dylib and could not load it, and nothing
+      # noticed because the product falls back quietly. The packaged product, in a fresh data
+      # directory, must report the real vector index.
+      - name: Verify the packaged product loads sqlite-vec (Linux/macOS)
+        if: runner.os != 'Windows'
+        env:
+          CAMPAIGN_POC_DATA: ${{ runner.temp }}/vec-check
+        run: |
+          _verify/campaign-intelligence/campaign-intelligence init > /dev/null
+          _verify/campaign-intelligence/campaign-intelligence health-check --json > vec.json || true
+          python - <<'PY'
+          import json
+          db = json.load(open("vec.json"))["components"]["database"]
+          assert "vector_index=sqlite-vec" in db["detail"], f"the packaged product is not using sqlite-vec: {db}"
+          print("database:", db["detail"])
+          PY
+
       # Item 4.2: zero egress, tested rather than asserted. The customer's network blocks
       # huggingface.co, which is how all three P0s surfaced at once — so the install-time
       # gate must complete with no network at all, against the PACKAGED binary, since that
@@ -201,6 +231,22 @@ jobs:
           $out
           if ($LASTEXITCODE -ne 0) { throw "packaged product cannot resolve its weights" }
           if ($out -notcontains "source: bundled") { throw "packaged product did not use the bundled weights" }
+
+      - name: Verify the packaged product loads sqlite-vec (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CAMPAIGN_POC_DATA: ${{ runner.temp }}\vec-check
+        run: |
+          & _verify\campaign-intelligence.exe init | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "init failed in a fresh data directory" }
+          $report = (& _verify\campaign-intelligence.exe health-check --json | Out-String) | ConvertFrom-Json
+          $db = $report.components.database
+          "database: $($db.detail)"
+          if ($db.detail -notmatch 'vector_index=sqlite-vec') { throw "the packaged product is not using sqlite-vec: $($db | ConvertTo-Json -Compress)" }
+          # health-check exits 1 here (a runner has no Ollama), and the pwsh wrapper would
+          # make that the step's result; the database line is what this step asserts.
+          $global:LASTEXITCODE = 0
 
       # §4.4. The macOS release was a tarball: Terminal to extract, an install.sh that is
       # itself quarantined when it arrives through a browser, and Finder opening a .sh in a

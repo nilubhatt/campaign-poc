@@ -40,11 +40,10 @@ echo "Installing to $DEST ..."
 rm -rf "$STAGE"; mkdir -p "$STAGE"; cp -a "$BUNDLE"/. "$STAGE"/
 
 # Gatekeeper quarantines anything that arrived through a browser. The flag travels to every
-# file inside the archive when FINDER expands it - not when `tar xzf` does, which is the path
-# LINUX.md documents, and which is why nobody ever reported the dialog this comment predicts.
-# It is still worth one line: double-clicking the tarball in Finder is what a marketer does,
-# and there the first launch is "cannot be opened because the developer cannot be verified",
-# with no reason to connect that to the deck they just tried to upload.
+# file inside the archive whether FINDER expands it or `tar xzf` does (measured on macOS 26.6
+# for issue #23: all 14,762 files of the v0.4.0 tarball), and an unsigned binary carrying it
+# is refused - a dialog that it cannot be verified, and SIGKILL in Terminal with no output -
+# with no reason for a marketer to connect that to the deck they just tried to upload.
 # On the .pkg path this is inert - a pkg payload is never quarantined - and the dialog a
 # marketer meets there is on the package itself, which no strip can reach. That is 4.4/D130.
 #

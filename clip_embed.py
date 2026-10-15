@@ -11,6 +11,7 @@ slow.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import threading
@@ -228,6 +229,57 @@ def weights_status() -> WeightsResolution:
             remedy=_LOCAL_WEIGHTS_REMEDY.format(var=config.CLIP_WEIGHTS_ENV_VAR),
         )
     return _resolution
+
+
+def _checksum(path: Path) -> str:
+    """Compare a checkpoint with the `<name>.sha256` shipped beside it.
+
+    Returns "matches", "does not match <file>" or "no .sha256 file beside it". An empty or
+    unreadable sidecar is a mismatch: a payload whose checksum cannot be read has not been
+    shown to be intact."""
+    sidecar = path.with_name(path.name + ".sha256")
+    if not sidecar.is_file():
+        return "no .sha256 file beside it"
+    try:
+        expected = (sidecar.read_text(encoding="utf-8").split() or [""])[0].lower()
+    except (OSError, UnicodeDecodeError):
+        expected = ""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return "matches" if digest.hexdigest() == expected else f"does not match {sidecar.name}"
+
+
+def verify_weights() -> tuple[WeightsResolution, str]:
+    """What `check-weights` reports: resolved, intact against the shipped checksum, and
+    loadable. Issue #23: resolving alone passed a weights file truncated to 1,000 bytes,
+    which is the damage this command is run to catch.
+
+    Returns the resolution (ok=False with a reason on any failure) and the checksum verdict
+    for display. A mismatch is final without loading: the file is already known to be wrong."""
+    status = resolve_weights()
+    if not status.ok or not status.path:
+        return status, "not checked"
+    path = Path(status.path)
+    checksum = _checksum(path)
+    if checksum.startswith("does not match"):
+        return WeightsResolution(
+            ok=False, source=status.source, path=status.path,
+            reason=f"Visual search is off: {path.name} {checksum}, so the file is damaged "
+                   f"or incomplete.",
+            remedy=_LOCAL_WEIGHTS_REMEDY.format(var=config.CLIP_WEIGHTS_ENV_VAR),
+        ), checksum
+    if config.CLIP_PROVIDER == "openclip":
+        try:
+            _load_model()
+        except Exception as exc:
+            return WeightsResolution(
+                ok=False, source=status.source, path=status.path,
+                reason=f"Visual search is off: the model could not be loaded ({exc}).",
+                remedy=_LOCAL_WEIGHTS_REMEDY.format(var=config.CLIP_WEIGHTS_ENV_VAR),
+            ), checksum
+    return status, checksum
 
 
 def warm_up() -> None:
