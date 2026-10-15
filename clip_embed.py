@@ -234,7 +234,8 @@ def weights_status() -> WeightsResolution:
 def _checksum(path: Path) -> str:
     """Compare a checkpoint with the `<name>.sha256` shipped beside it.
 
-    Returns "matches", "does not match <file>" or "no .sha256 file beside it". An empty or
+    Returns "matches", "does not match <file>", "could not be read (...)" or "no .sha256
+    file beside it". An empty or
     unreadable sidecar is a mismatch: a payload whose checksum cannot be read has not been
     shown to be intact."""
     sidecar = path.with_name(path.name + ".sha256")
@@ -245,9 +246,12 @@ def _checksum(path: Path) -> str:
     except (OSError, UnicodeDecodeError):
         expected = ""
     digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(1 << 20), b""):
-            digest.update(block)
+    try:
+        with open(path, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                digest.update(block)
+    except OSError as exc:
+        return f"could not be read ({exc.strerror or exc})"
     return "matches" if digest.hexdigest() == expected else f"does not match {sidecar.name}"
 
 
@@ -263,11 +267,11 @@ def verify_weights() -> tuple[WeightsResolution, str]:
         return status, "not checked"
     path = Path(status.path)
     checksum = _checksum(path)
-    if checksum.startswith("does not match"):
+    if checksum.startswith(("does not match", "could not be read")):
         return WeightsResolution(
             ok=False, source=status.source, path=status.path,
-            reason=f"Visual search is off: {path.name} {checksum}, so the file is damaged "
-                   f"or incomplete.",
+            reason=f"Visual search is off: {path.name} {checksum}, so it cannot be shown "
+                   f"to be intact.",
             remedy=_LOCAL_WEIGHTS_REMEDY.format(var=config.CLIP_WEIGHTS_ENV_VAR),
         ), checksum
     if config.CLIP_PROVIDER == "openclip":

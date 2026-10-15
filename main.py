@@ -172,7 +172,7 @@ def main() -> int:
     elif cmd == "check-weights":
         # Exists so the build can verify the PACKAGED product rather than the source tree:
         # CI extracts the archive and runs this, which exercises app_dir() under a frozen
-        # binary and the real install layout. Also what the post-install self-test calls.
+        # binary and the real install layout. (The installers' self-test is health-check.)
         # Resolved, checked against the shipped .sha256 and loaded (issue #23: resolving
         # alone said `ok: True` for a file truncated to 1,000 bytes).
         import clip_embed

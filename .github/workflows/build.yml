@@ -147,10 +147,15 @@ jobs:
       # half is dead on arrival, which is exactly how the original defect escaped.
       - name: Verify the packaged product finds its weights (Linux/macOS)
         if: runner.os != 'Windows'
+        # bash -eo pipefail, not the default bash -e: through `| tee` a failing
+        # check-weights would otherwise pass this step (issue #23 review).
+        shell: bash
         run: |
           mkdir -p _verify && tar -xzf "${{ matrix.asset }}" -C _verify
           _verify/campaign-intelligence/campaign-intelligence check-weights | tee out.txt
           grep -q "source: bundled" out.txt
+          grep -q "checksum: matches" out.txt
+          grep -q "ok:     True" out.txt
 
       # Issue #23: the macOS bundle shipped vec0.dylib and could not load it, and nothing
       # noticed because the product falls back quietly. The packaged product, in a fresh data
@@ -186,10 +191,9 @@ jobs:
           # runner images do not relax it, so the -r form fails with "write failed
           # /proc/self/uid_map: Operation not permitted". Root needs no user namespace.
           #
-          # And health-check, not check-weights: the weaker command only stats a path, which
-          # would pass without a network whether or not the product could actually work
-          # offline. This LOADS the vision model, which is where open_clip reaches for the
-          # Hub. Exit code is not the assertion - a runner has no Ollama, so text_search is
+          # And health-check, not check-weights: the claim is that the whole install-time
+          # gate needs no network, and health-check is that gate. It LOADS the vision model,
+          # which is where open_clip reaches for the Hub. Exit code is not the assertion - a runner has no Ollama, so text_search is
           # legitimately down; visual_search is what this step is about.
           sudo unshare -n _verify/campaign-intelligence/campaign-intelligence \
             health-check --json | tee offline.json > /dev/null || true
@@ -238,6 +242,9 @@ jobs:
         env:
           CAMPAIGN_POC_DATA: ${{ runner.temp }}\vec-check
         run: |
+          # health-check exits 1 on a runner (no Ollama); never let that throw before the
+          # database line is read, whatever this pwsh's default is.
+          $PSNativeCommandUseErrorActionPreference = $false
           & _verify\campaign-intelligence.exe init | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "init failed in a fresh data directory" }
           $report = (& _verify\campaign-intelligence.exe health-check --json | Out-String) | ConvertFrom-Json

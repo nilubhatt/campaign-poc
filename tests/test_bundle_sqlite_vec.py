@@ -47,3 +47,13 @@ def test_every_platform_asserts_the_packaged_product_uses_sqlite_vec():
         assert "init" in step["run"], "health-check needs a database to report the backend"
         assert "CAMPAIGN_POC_DATA" in step.get("env", {}), "use a fresh data directory"
         assert re.search(r"vector_index=sqlite-vec", step["run"])
+
+
+def test_the_linux_macos_weights_gate_sees_check_weights_fail():
+    # Review of #23: under the default `bash -e`, `check-weights | tee out.txt` takes tee's
+    # status, and `source: bundled` is printed before `ok: False`, so a damaged payload
+    # passed. `shell: bash` gives pipefail; the ok line is asserted as well.
+    step = next(s for s in _steps() if s.get("name") == "Verify the packaged product finds its weights (Linux/macOS)")
+    assert step.get("shell") == "bash"
+    assert 'grep -q "ok:     True"' in step["run"]
+    assert 'grep -q "checksum: matches"' in step["run"]

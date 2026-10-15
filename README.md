@@ -324,7 +324,7 @@ Expect a long array of floats. `health-check` reports this as `text_search`, and
 <summary><b>3 · The CLIP weights are intact and load</b></summary>
 
 ```bash
-campaign-intelligence check-weights     # exit 1 if missing, damaged or unloadable
+campaign-intelligence check-weights     # installed copy: exit 1 if missing, damaged or unloadable
 ```
 
 An installed copy finds them beside the executable in `<install dir>/models/`. Expect

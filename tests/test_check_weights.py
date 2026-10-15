@@ -112,3 +112,23 @@ def test_an_unresolved_path_still_fails_without_hashing_or_loading(tmp_path, wei
     out = capsys.readouterr().out
     assert "ok:     False" in out
     assert loaded == []
+
+
+def test_an_unreadable_checkpoint_is_reported_not_a_traceback(weights, monkeypatch, capsys):
+    _sidecar(weights, hashlib.sha256(weights.read_bytes()).hexdigest())
+    real_open = open
+
+    def denied(path, *args, **kwargs):
+        if str(path) == str(weights):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", denied)
+    loaded = _loads(monkeypatch)
+
+    assert main.main() == 1
+
+    out = capsys.readouterr().out
+    assert "checksum: could not be read" in out
+    assert "ok:     False" in out
+    assert loaded == []
