@@ -57,3 +57,10 @@ def test_the_linux_macos_weights_gate_sees_check_weights_fail():
     assert step.get("shell") == "bash"
     assert 'grep -q "ok:     True"' in step["run"]
     assert 'grep -q "checksum: matches"' in step["run"]
+
+
+def test_the_windows_weights_gate_requires_the_checksum_too():
+    # Round-2 review of #23: parity with the Linux/macOS gate. Without it, a Windows zip that
+    # lost its .sha256 would pass (check-weights only loads the file when there is none).
+    step = next(s for s in _steps() if s.get("name") == "Verify the packaged product finds its weights (Windows)")
+    assert '-notcontains "checksum: matches"' in step["run"]

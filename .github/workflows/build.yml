@@ -235,6 +235,7 @@ jobs:
           $out
           if ($LASTEXITCODE -ne 0) { throw "packaged product cannot resolve its weights" }
           if ($out -notcontains "source: bundled") { throw "packaged product did not use the bundled weights" }
+          if ($out -notcontains "checksum: matches") { throw "packaged product's weights do not match their shipped checksum" }
 
       - name: Verify the packaged product loads sqlite-vec (Windows)
         if: runner.os == 'Windows'
