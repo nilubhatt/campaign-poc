@@ -321,14 +321,15 @@ Expect a long array of floats. `health-check` reports this as `text_search`, and
 </details>
 
 <details open>
-<summary><b>3 · The CLIP weights resolved</b></summary>
+<summary><b>3 · The CLIP weights are intact and load</b></summary>
 
 ```bash
-campaign-intelligence check-weights     # exit 1 if they did not resolve
+campaign-intelligence check-weights     # installed copy: exit 1 if missing, damaged or unloadable
 ```
 
 An installed copy finds them beside the executable in `<install dir>/models/`. Expect
-`open_clip_model.safetensors`, **302,588,458 bytes**.
+`open_clip_model.safetensors`, **302,588,458 bytes**, and `checksum: matches`: it is compared
+with the `.sha256` shipped beside it, then loaded.
 </details>
 
 <details>
@@ -381,7 +382,7 @@ In Claude Desktop:
 |---|---|---|
 | Install refused, names a component | the self-test blocked it — working as designed | fix what it named, re-run the installer |
 | `text_search` fails, Ollama is running | model never pulled | `ollama pull nomic-embed-text` |
-| `visual_search` unavailable | weights missing or corrupt | `check-weights`; reinstall, or set `CAMPAIGN_POC_CLIP_WEIGHTS_PATH` |
+| `visual_search` unavailable | weights missing or corrupt | `check-weights` says which; reinstall, or set `CAMPAIGN_POC_CLIP_WEIGHTS_PATH` |
 | Claude does not see the tools | host cached the old schemas | **fully quit** and reopen the host app |
 | A parameter "does not exist" but should | same cause | `health_check` lists every tool's real parameters |
 | Records stored but searches find nothing | indexing stopped at the time budget | `finish_indexing` |
@@ -617,7 +618,7 @@ All 65 of them. Claude picks the tool; you speak English.
 - `docs/DEFERRALS.md` — every deferred decision and why
 
 ```bash
-python -m pytest -q          # ~2,900 tests, about 4 minutes
+python -m pytest -q          # ~2,950 tests, about 5 minutes
 ```
 
 ## Roadmap

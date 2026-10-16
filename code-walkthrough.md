@@ -4,7 +4,7 @@
 > [`design.md`](design.md) first for *why* it is shaped this way; this document is *where
 > everything is*. [`README.md`](README.md) covers installing and running it.
 
-**38 modules of product code and 108 test files — more lines of test than of product.** The test-to-code ratio is not an accident: almost every rule described below is
+**38 modules of product code and 110 test files — more lines of test than of product.** The test-to-code ratio is not an accident: almost every rule described below is
 pinned by a test that was written to fail first.
 
 ---
@@ -63,7 +63,7 @@ where something was broken.
 | `stdio` | **the path the installers wire into Claude Desktop** |
 | `init` | create the data directory and database; idempotent |
 | `health-check` | check every component; exit 1 if anything is wrong. `--json`, `--wait N` |
-| `check-weights` | did the CLIP checkpoint resolve? |
+| `check-weights` | does the CLIP checkpoint resolve, match its shipped `.sha256` and load? |
 | `configure-desktop` | merge this server into Claude Desktop's config (backs up first) |
 | `unconfigure-desktop` | remove it again (used by uninstallers) |
 | `disclosure` | what this product stores about people, where, for how long |
@@ -482,7 +482,7 @@ rather than code.
 ## 7. Running the tests
 
 ```bash
-python -m pytest -q                              # everything (~4 min, ~2,900 tests)
+python -m pytest -q                              # everything (~5 min, ~2,950 tests)
 python -m pytest tests/test_gaps.py -q           # one file
 python -m pytest -q -p no:randomly               # fixed order when bisecting
 ```

@@ -36,7 +36,7 @@ def main() -> int:
 
     sub.add_parser("stdio", help="run over stdio for a local Claude Desktop connector")
 
-    sub.add_parser("check-weights", help="report whether the CLIP weights resolved (exit 1 if not)")
+    sub.add_parser("check-weights", help="check the CLIP weights resolve, match their shipped checksum and load (exit 1 if not)")
     sub.add_parser("disclosure", help="print what this product stores about people, where, "
                                       "for how long, and how to see or remove it")
     sub.add_parser("init", help="create the data directory and database (idempotent); "
@@ -172,11 +172,14 @@ def main() -> int:
     elif cmd == "check-weights":
         # Exists so the build can verify the PACKAGED product rather than the source tree:
         # CI extracts the archive and runs this, which exercises app_dir() under a frozen
-        # binary and the real install layout. Also what the post-install self-test calls.
+        # binary and the real install layout. (The installers' self-test is health-check.)
+        # Resolved, checked against the shipped .sha256 and loaded (issue #23: resolving
+        # alone said `ok: True` for a file truncated to 1,000 bytes).
         import clip_embed
-        status = clip_embed.weights_status()
+        status, checksum = clip_embed.verify_weights()
         print(f"source: {status.source}")
         print(f"path:   {status.path or '(not a local file)'}")
+        print(f"checksum: {checksum}")
         print(f"ok:     {status.ok}")
         if not status.ok:
             print(f"{status.reason} {status.remedy}")

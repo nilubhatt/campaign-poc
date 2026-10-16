@@ -87,7 +87,7 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (tested, reviewed, 
       rule and would have recreated defects 01/03 verbatim on the customer's machine while
       reporting itself healthy. Source checkouts still resolve the tag.
       CI's verification now unpacks the **shipped archive** and runs the frozen binary's new
-      `check-weights` subcommand (which item 4.1's post-install self-test also calls) — the
+      `check-weights` subcommand (the installers' post-install self-test is `health-check`) — the
       first version overrode `BUNDLED_WEIGHTS_DIR` on the source tree and proved nothing
       about packaging. `installer/linux/install.sh` verifies the sidecar after copying, so a
       truncated copy fails the install instead of surfacing later inside a tool call.

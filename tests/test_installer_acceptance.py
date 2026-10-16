@@ -265,8 +265,8 @@ def test_the_self_test_makes_no_outbound_connection(tmp_path):
         "    return _real(self, address)\n"
         "socket.socket.connect = _blocked\n"
         f"sys.path.insert(0, {str(ROOT)!r})\n"
-        # health-check, not check-weights: the weaker one only stats a path, and the claim
-        # being tested is that the whole install-time gate — including actually LOADING the
+        # health-check, not check-weights: the claim being tested is that the whole
+        # install-time gate — including actually LOADING the
         # vision model, which is where open_clip reaches for the Hub — needs no network.
         "sys.argv = ['campaign-intelligence', 'health-check']\n"
         "import main\n"

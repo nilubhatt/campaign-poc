@@ -661,7 +661,7 @@ needs atomic values, so a human-readable composite matches nothing.
    169 tests passing (`tests/`) after an adversarial + design review round (§8.5) — CI
    (`test.yml`) runs them on every push/PR. (Since then the product-review plan,
    `PRODUCT-REVIEW-PLAN.md`, took it to ~2,750 by v0.3.0, released 2026-09-23; the
-   `openapi-surface` work to ~2,940.)
+   `openapi-surface` work to ~2,940; issue #23 to ~2,950.)
 3. **Central deploy — next:** Postgres, Docker on a CPU-only Azure VM, public HTTPS behind Front
    Door / App Gateway (§3 #2), **Entra OAuth** via the pluggable provider as a go-live
    precondition (verify the pre-registered `client_id` question in §5 first), global read at
