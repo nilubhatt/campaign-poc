@@ -414,12 +414,32 @@ def test_a_stale_server_is_not_killed_while_starts_are_failing(fake_runtime, mon
 
 def test_a_stale_server_that_cannot_be_stopped_is_reported_as_such(fake_runtime, monkeypatch):
     assert bundled_ollama.ensure_running(timeout=15)
-    fake_runtime.stands_for[_pid()] = "/old/install/ollama/ollama"
-    monkeypatch.setattr(bundled_ollama, "_kill", lambda pid, deadline=None: False)
-    monkeypatch.setattr(bundled_ollama, "_spawn", lambda: pytest.fail("started over a live one"))
+    pid = _pid()
+    fake_runtime.stands_for[pid] = "/old/install/ollama/ollama"
+    # Scoped, so the real _kill is back before the fixture's teardown stops the server.
+    with monkeypatch.context() as m:
+        m.setattr(bundled_ollama, "_kill", lambda pid, deadline=None: False)
+        m.setattr(bundled_ollama, "_spawn", lambda: pytest.fail("started over a live one"))
+        assert bundled_ollama.ensure_running(timeout=15) is False
+        assert "could not stop the previous bundled embedder" in bundled_ollama.last_problem
+    assert bundled_ollama.stop() is True and _gone(pid)
 
-    assert bundled_ollama.ensure_running(timeout=15) is False
-    assert "could not stop the previous bundled embedder" in bundled_ollama.last_problem
+
+def test_a_starter_whose_budget_went_on_the_lock_does_not_misdiagnose(fake_runtime, monkeypatch):
+    with monkeypatch.context() as m:
+        m.setattr(bundled_ollama, "_listener",
+                  lambda deadline=None: pytest.fail("looked up the owner past the deadline"))
+        m.setattr(bundled_ollama, "_spawn", lambda: pytest.fail("started past the deadline"))
+        assert bundled_ollama._start_locked(time.monotonic() - 1) is False
+        assert "ran out of time" in bundled_ollama.last_problem
+
+
+def test_an_ollama_this_account_cannot_see_is_named_as_such(fake_runtime, monkeypatch):
+    with monkeypatch.context() as m:
+        m.setattr(bundled_ollama, "_version", lambda timeout=1.0: "0.1.0")
+        m.setattr(bundled_ollama, "_listener", lambda deadline=None: (None, None))
+        assert bundled_ollama.ensure_running(timeout=5) is False
+        assert "cannot see" in bundled_ollama.last_problem
 
 
 def test_alive_does_not_raise_for_a_pid_that_is_gone():

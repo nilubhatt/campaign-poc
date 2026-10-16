@@ -139,7 +139,8 @@ def _listener_pid(deadline: Optional[float] = None) -> Optional[int]:
             return int(out) if out.isdigit() else None
         if sys.platform == "darwin":
             out = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
-                                 capture_output=True, text=True, timeout=10).stdout.split()
+                                 capture_output=True, text=True,
+                                 timeout=_left(deadline, 10)).stdout.split()
             return int(out[0]) if out and out[0].isdigit() else None
         return _linux_listener_pid(port)
     except (OSError, subprocess.SubprocessError, ValueError):
@@ -302,7 +303,8 @@ def stop() -> bool:
             pids.add(hinted)
     except (OSError, ValueError, KeyError, TypeError):
         pass
-    stopped = bool(pids) and all(_kill(pid) for pid in pids)
+    results = [_kill(pid) for pid in pids]       # every one tried, not up to the first failure
+    stopped = bool(pids) and all(results)
     if stopped or not pids:
         # Kept when a kill failed: it is the only hint to a server that has not bound yet.
         with contextlib.suppress(OSError):
@@ -315,10 +317,10 @@ def stop() -> bool:
 @contextlib.contextmanager
 def _machine_lock(deadline: float):
     """One starter at a time across this account's processes, so two that both find the port
-    free do not both start a server. Per account on macOS and Windows, whose temp directories
-    are; on Linux the file is made writable by all so other accounts share it. A start that
-    races another account's loses the bind, reports it, and the next call finds the winner.
-    Bounded: past the deadline the caller carries on without it."""
+    free do not both start a server. Per account: the temp directory is on macOS and Windows,
+    and on Linux a lock file another account created cannot be opened (fs.protected_regular).
+    A start that races another account's loses the bind, reports it, and the next call finds
+    the winner. Bounded: past the deadline the caller carries on without it."""
     path = Path(tempfile.gettempdir()) / f"campaign-intelligence-embedder-{config.BUNDLED_OLLAMA_PORT}.lock"
     held = False
     try:
@@ -326,9 +328,6 @@ def _machine_lock(deadline: float):
     except OSError:
         yield
         return
-    if os.name != "nt":
-        with contextlib.suppress(OSError):
-            os.chmod(path, 0o666)
     try:
         while True:
             try:
@@ -442,6 +441,11 @@ def ensure_running(timeout: float = 20.0, warm: bool = True) -> bool:
 
 def _start_locked(deadline: float) -> bool:
     global last_problem
+    if time.monotonic() >= deadline:
+        # The budget went on waiting for another starter. Every step below (a lookup, a kill,
+        # a start) would run past it and could misread a slow lookup as "nobody owns this".
+        return _answering() or _fail("ran out of time waiting for another process to start "
+                                     "the bundled embedder; try again")
     version = _version()
     if version is not None:
         pid, exe = _listener(deadline)
@@ -451,6 +455,12 @@ def _start_locked(deadline: float) -> bool:
                 # use it rather than fight it.
                 last_problem = None
                 return True
+            if version:
+                return _fail(
+                    f"an Ollama {version} that this account cannot see is answering on port "
+                    f"{config.BUNDLED_OLLAMA_PORT}, probably this product's embedder started by "
+                    f"another account. Stop it from that account, or set "
+                    f"CAMPAIGN_POC_BUNDLED_OLLAMA_PORT to a free port.")
         if pid is not None and exe and looks_bundled(exe):
             if _same_file(exe, binary()) and version == (expected_version() or version):
                 last_problem = None
