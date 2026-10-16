@@ -445,10 +445,15 @@ The text embedder an installed copy ships with: a CPU-only Ollama and `nomic-emb
 `<app>/ollama/`, staged at build time by `scripts/fetch_ollama.py` (pinned release, pinned model
 digests), because the customer's network blocks ollama.com and the model registry. `config`
 points `OLLAMA_URL` at it (`127.0.0.1:11435`) when it is present and the user has not set one.
-`ensure_running()` starts it on first need, with its own `OLLAMA_MODELS`; `embedding` calls it
-again when a connection fails, so a reboot or an upgrade heals itself. `stop()` (the
-`stop-embedder` command) is what the installers run before replacing or deleting the directory
-it runs from, and only kills a process recorded in `ollama.pid` that is still named ollama.
+`ensure_running()` starts it on first need, with its own `OLLAMA_MODELS`, under a lock shared
+by every process on the machine, and loads the model before returning; `embedding` calls it
+again when a connection fails, so a reboot or an upgrade heals itself (the health check's
+probe does not: a diagnostic does not repair). Which server is ours is decided by the port, not
+by a pid file: whatever listens on 11435 is ours when its executable sits in this product's
+layout, and current when it is this install's and reports the version this install staged;
+anything else of ours is replaced, and anything not ours is never touched. `stop()` (the
+`stop-embedder` command) uses the same rule, so it finds the server whichever data directory
+started it; the installers run it before replacing or deleting the directory it runs from.
 
 ### `images.py` and `chunking.py`
 

@@ -205,7 +205,8 @@ def main() -> int:
         bundled_ollama.ensure_running(timeout=30)
         wait = getattr(args, "wait", 0.0)
         if wait:
-            print(f"Waiting up to {wait:g}s for everything to come up...")
+            # stderr: `--wait --json` must print nothing but the JSON on stdout.
+            print(f"Waiting up to {wait:g}s for everything to come up...", file=sys.stderr)
         report = core.wait_until_ready(timeout=wait) if wait else core.health_check_cli()
         if getattr(args, "json", False):
             import json
@@ -227,8 +228,13 @@ def main() -> int:
 
     elif cmd == "stop-embedder":
         import bundled_ollama
-        print("Stopped the bundled embedder." if bundled_ollama.stop()
-              else "The bundled embedder was not running.")
+        if bundled_ollama.stop():
+            print("Stopped the bundled embedder.")
+        elif bundled_ollama._ours():
+            print("The bundled embedder is still running and could not be stopped.")
+            return 1
+        else:
+            print("The bundled embedder was not running.")
 
     elif cmd == "configure-desktop":
         _configure_desktop(http_url=args.http)

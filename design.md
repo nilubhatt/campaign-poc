@@ -121,9 +121,11 @@ flowchart TB
     CORE --> CLIP
 ```
 
-**Nothing in this diagram leaves the machine.** Ollama runs locally; the CLIP checkpoint ships
-inside the installer. The only network calls the product makes are to `localhost:11434`
-(Ollama) — and the installers' one-time download of Ollama itself.
+**Nothing in this diagram leaves the machine.** Ollama and its model ship inside the installer,
+as does the CLIP checkpoint, so nothing is downloaded at install time either (a customer network
+blocks ollama.com and the model registry). The only network calls the product makes are on
+loopback, to the embedder: the bundled one on `127.0.0.1:11435` in an installed copy, or the
+user's own Ollama on `localhost:11434` in a source checkout or when `OLLAMA_URL` names one.
 
 ### The two transports, and why both
 

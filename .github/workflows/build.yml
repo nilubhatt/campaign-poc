@@ -178,6 +178,9 @@ jobs:
         run: |
           _verify/campaign-intelligence/campaign-intelligence init > /dev/null
           _verify/campaign-intelligence/campaign-intelligence health-check --json > vec.json || true
+          # health-check starts the bundled embedder; left running, every later step would be
+          # served by this one instead of the runtime it means to test.
+          _verify/campaign-intelligence/campaign-intelligence stop-embedder
           python - <<'PY'
           import json
           db = json.load(open("vec.json"))["components"]["database"]
@@ -205,26 +208,11 @@ jobs:
           import json
           text = json.load(open("embed.json"))["components"]["text_search"]
           assert text["ok"], f"the bundled embedder does not answer: {text}"
+          # Answered by THIS bundle's runtime, not one some earlier step left on the port.
+          assert "served by" in text["detail"] and "_verify/campaign-intelligence/ollama/" in text["detail"], (
+              f"text_search was not served by the packaged runtime: {text['detail']}")
           print("text_search:", text["detail"])
           PY
-
-      - name: Verify the packaged product embeds text with its own Ollama (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          CAMPAIGN_POC_DATA: ${{ runner.temp }}\embed-check
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $false
-          if (Get-Command ollama -ErrorAction SilentlyContinue) {
-            throw "an ollama is on PATH, so this would not prove the bundled one"
-          }
-          & _verify\campaign-intelligence.exe init | Out-Null
-          $report = (& _verify\campaign-intelligence.exe health-check --json | Out-String) | ConvertFrom-Json
-          & _verify\campaign-intelligence.exe stop-embedder
-          $text = $report.components.text_search
-          "text_search: $($text.detail)"
-          if (-not $text.ok) { throw "the bundled embedder does not answer: $($text | ConvertTo-Json -Compress)" }
-          $global:LASTEXITCODE = 0
 
       # Item 4.2: zero egress, tested rather than asserted. The customer's network blocks
       # huggingface.co, which is how all three P0s surfaced at once — so the install-time
@@ -305,17 +293,42 @@ jobs:
         env:
           CAMPAIGN_POC_DATA: ${{ runner.temp }}\vec-check
         run: |
-          # health-check exits 1 on a runner (no Ollama); never let that throw before the
-          # database line is read, whatever this pwsh's default is.
+          # health-check's exit code is not this step's subject; never let it throw before
+          # the database line is read, whatever this pwsh's default is.
           $PSNativeCommandUseErrorActionPreference = $false
           & _verify\campaign-intelligence.exe init | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "init failed in a fresh data directory" }
           $report = (& _verify\campaign-intelligence.exe health-check --json | Out-String) | ConvertFrom-Json
+          # health-check starts the bundled embedder; left running, every later step would be
+          # served by this one instead of the runtime it means to test.
+          & _verify\campaign-intelligence.exe stop-embedder | Out-Null
           $db = $report.components.database
           "database: $($db.detail)"
           if ($db.detail -notmatch 'vector_index=sqlite-vec') { throw "the packaged product is not using sqlite-vec: $($db | ConvertTo-Json -Compress)" }
-          # health-check exits 1 here (a runner has no Ollama), and the pwsh wrapper would
-          # make that the step's result; the database line is what this step asserts.
+          # A non-zero exit from the commands above must not become the step's result; the
+          # database line is what this step asserts.
+          $global:LASTEXITCODE = 0
+
+      # Windows' half of the embed check, after the step that unpacks _verify.
+      - name: Verify the packaged product embeds text with its own Ollama (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CAMPAIGN_POC_DATA: ${{ runner.temp }}\embed-check
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          if (Get-Command ollama -ErrorAction SilentlyContinue) {
+            throw "an ollama is on PATH, so this would not prove the bundled one"
+          }
+          & _verify\campaign-intelligence.exe init | Out-Null
+          $report = (& _verify\campaign-intelligence.exe health-check --json | Out-String) | ConvertFrom-Json
+          & _verify\campaign-intelligence.exe stop-embedder
+          $text = $report.components.text_search
+          "text_search: $($text.detail)"
+          if (-not $text.ok) { throw "the bundled embedder does not answer: $($text | ConvertTo-Json -Compress)" }
+          # Answered by THIS bundle's runtime, not one some earlier step left on the port.
+          $own = [regex]::Escape((Resolve-Path _verify).Path + '\ollama\ollama.exe')
+          if ($text.detail -notmatch "served by $own") { throw "text_search was not served by the packaged runtime: $($text.detail)" }
           $global:LASTEXITCODE = 0
 
       # §4.4. The macOS release was a tarball: Terminal to extract, an install.sh that is
@@ -377,6 +390,11 @@ jobs:
           report = json.load(open("installed.json"))
           bad = [name for name, c in report["components"].items() if not c.get("ok")]
           assert not bad, f"the installed product fails its own self-test: {bad}"
+          # And its text search answered from the INSTALLED runtime: the port is shared, and a
+          # server some earlier step left running would otherwise pass this for it.
+          served = report["components"]["text_search"]["detail"]
+          assert "served by" in served and "CampaignIntelligence/ollama/ollama" in served, (
+              f"text_search was not served by the installed runtime: {served}")
           print("installed and green:", sorted(report["components"]))
           PY
           # The positive control for the broken-bundle step below: a product the gate ACCEPTS
@@ -484,6 +502,12 @@ jobs:
           $bad = $report.components.PSObject.Properties |
                  Where-Object { -not $_.Value.ok } | ForEach-Object { $_.Name }
           if ($bad) { throw "the installed product fails its own self-test: $($bad -join ', ')" }
+          # And its text search answered from the INSTALLED runtime: the port is shared, and a
+          # server some earlier step left running would otherwise pass this for it.
+          $served = $report.components.text_search.detail
+          if ($served -notmatch 'served by .*Programs\\CampaignIntelligence\\ollama\\ollama\.exe') {
+            throw "text_search was not served by the installed runtime: $served"
+          }
           Write-Host "installed and green: $($report.components.PSObject.Properties.Name -join ', ')"
           # The positive control for the broken-bundle step below.
           $cfg = Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'

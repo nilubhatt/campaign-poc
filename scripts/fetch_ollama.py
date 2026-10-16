@@ -238,6 +238,8 @@ def stage(dest: Path, cache: Path) -> None:
     finally:
         _stop(proc)
     verify_models(models)
+    # What the product compares a running server against, to replace an older one.
+    (dest / "VERSION").write_text(OLLAMA_VERSION.lstrip("v") + "\n", encoding="utf-8")
     size = sum(p.stat().st_size for p in dest.rglob("*") if p.is_file())
     print(f"staged Ollama {OLLAMA_VERSION} + {MODEL} in {dest} ({size / 1048576:.0f} MB)")
 

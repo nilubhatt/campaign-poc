@@ -10,6 +10,7 @@ of this size does not need them) and the model files, under <app>/ollama/:
     bin/ollama + lib/ollama (Linux), ollama.exe + lib/ollama (Windows), flat (macOS)
                                                the runtime, from a pinned Ollama release
     models/manifests, models/blobs             nomic-embed-text, as `ollama pull` lays it out
+    VERSION                                    the Ollama version staged, e.g. 0.40.5
 
 It runs on 127.0.0.1:<BUNDLED_OLLAMA_PORT> (11435) with OLLAMA_MODELS pointing at that
 directory, so it never meets an Ollama the user runs on 11434 and never reads or writes
@@ -17,14 +18,27 @@ their models. Nothing registers it as a service: whichever process needs the emb
 starts it (`ensure_running`), later ones find it answering and use it, and it outlives them
 the way a service would, so the model stays loaded between Claude Desktop sessions. The
 installers stop it (`stop`) before they replace or remove the directory it runs from.
+
+WHICH server is ours is decided by the port, not by a pid file. The port is one per machine,
+while a pid file lives in a data directory, and every process can have its own
+(CAMPAIGN_POC_DATA, another user, an installer run as someone else). Deciding by pid file let a
+start race, or a second data directory, hide a running server from `stop`, and the installer
+then deleted files under it. So: whatever listens on the port is found, and it is ours when
+its executable sits in this product's layout (`.../ollama/ollama`, `.../ollama/bin/ollama`,
+`...\\ollama\\ollama.exe` in a directory holding campaign-intelligence, or one that has been
+deleted). It is CURRENT when that executable is this install's and it reports the version this
+install staged; anything else of ours is replaced. Anything not ours is never touched.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -32,7 +46,13 @@ from typing import Optional
 
 import config
 
-_lock = threading.Lock()
+_thread_lock = threading.Lock()
+# A start that failed is not retried for this long: every embed of a deck would otherwise
+# start a server that cannot bind and wait for it again.
+_RETRY_AFTER_FAILURE_SECONDS = 10.0
+_last_failure: dict = {}
+# What went wrong last, in words, for the health check's remedy.
+last_problem: Optional[str] = None
 
 
 def runtime_dir() -> Path:
@@ -65,77 +85,250 @@ def log_file() -> Path:
     return config.DATA_DIR / "ollama.log"
 
 
-def _answering(timeout: float = 1.0) -> bool:
+def expected_version() -> Optional[str]:
+    try:
+        return (runtime_dir() / "VERSION").read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def _version(timeout: float = 1.0) -> Optional[str]:
+    """The version whatever answers on the port reports, "" for an answer that is not
+    Ollama's, or None when nothing answers."""
     import httpx
 
     try:
         # trust_env=False: a corporate HTTP_PROXY would otherwise carry a loopback request
         # to a proxy that cannot reach it.
-        return httpx.get(f"{url()}/api/version", timeout=timeout,
-                         trust_env=False).status_code == 200
+        response = httpx.get(f"{url()}/api/version", timeout=timeout, trust_env=False)
     except Exception:                      # noqa: BLE001 - any failure means "not answering"
-        return False
-
-
-def _read_pid_file() -> Optional[dict]:
+        return None
     try:
-        info = json.loads(_pid_file().read_text(encoding="utf-8"))
-        return info if isinstance(info, dict) and isinstance(info.get("pid"), int) else None
-    except (OSError, ValueError):
+        return str(response.json().get("version") or "") if response.status_code == 200 else ""
+    except ValueError:
+        return ""
+
+
+def _answering() -> bool:
+    return _version() is not None
+
+
+# ── who is listening, and what is it ───────────────────────────────────────────────────
+
+def _listener_pid() -> Optional[int]:
+    """The pid listening on the bundled port, when this account can see it."""
+    port = config.BUNDLED_OLLAMA_PORT
+    try:
+        if os.name == "nt":
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 f"(Get-NetTCPConnection -LocalPort {port} -State Listen "
+                 f"-ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess"],
+                capture_output=True, text=True, timeout=20).stdout.strip()
+            return int(out) if out.isdigit() else None
+        if sys.platform == "darwin":
+            out = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                                 capture_output=True, text=True, timeout=10).stdout.split()
+            return int(out[0]) if out and out[0].isdigit() else None
+        return _linux_listener_pid(port)
+    except (OSError, subprocess.SubprocessError, ValueError):
         return None
 
 
-def _is_ollama(pid: int) -> bool:
-    """The recorded pid is still an Ollama process. A pid outlives nothing: after a reboot
-    the number can belong to anything, and `stop` must never kill whatever that is."""
+def _linux_listener_pid(port: int) -> Optional[int]:
+    """From /proc, so no `ss` or `lsof` is needed: the listening socket's inode, then the
+    process holding it (only this account's processes are readable, which is the point)."""
+    inodes = set()
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            lines = Path(table).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) > 9 and fields[3] == "0A" and int(fields[1].split(":")[1], 16) == port:
+                inodes.add(fields[9])
+    if not inodes:
+        return None
+    for fd_dir in Path("/proc").glob("[0-9]*/fd"):
+        try:
+            for fd in fd_dir.iterdir():
+                link = os.readlink(fd)
+                if link.startswith("socket:[") and link[8:-1] in inodes:
+                    return int(fd_dir.parent.name)
+        except OSError:
+            continue
+    return None
+
+
+def _exe_of(pid: int) -> Optional[str]:
+    """The executable a process runs, or None when it is gone or cannot be read."""
     try:
         if os.name == "nt":
-            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                                 capture_output=True, text=True, timeout=10).stdout
-            return "ollama" in out.lower()
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x1000, False, pid)   # QUERY_LIMITED_INFORMATION
+            if not handle:
+                return None
+            try:
+                size = wintypes.DWORD(32768)
+                buf = ctypes.create_unicode_buffer(size.value)
+                if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                    return None
+                return buf.value
+            finally:
+                kernel32.CloseHandle(handle)
+        if sys.platform.startswith("linux"):
+            return re.sub(r" \(deleted\)$", "", os.readlink(f"/proc/{pid}/exe"))
+        # macOS: `comm` is the full path of the executable.
         out = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
-                             capture_output=True, text=True, timeout=10).stdout
-        return "ollama" in out.lower()
-    except (OSError, subprocess.SubprocessError):
+                             capture_output=True, text=True, timeout=10).stdout.strip()
+        return out or None
+    except (OSError, subprocess.SubprocessError, AttributeError):
+        return None
+
+
+def looks_bundled(exe: str) -> bool:
+    """An Ollama in this product's layout: never the user's own, wherever theirs lives
+    (/usr/local/bin, Ollama.app, %LOCALAPPDATA%\\Programs\\Ollama)."""
+    path = Path(exe)
+    if path.name.lower() not in ("ollama", "ollama.exe"):
+        return False
+    runtime = path.parent.parent if path.parent.name == "bin" else path.parent
+    if runtime.name != "ollama":
+        return False
+    app = runtime.parent
+    if not app.exists():
+        return True        # an install that has since been deleted or moved
+    return any((app / name).exists()
+               for name in ("campaign-intelligence", "campaign-intelligence.exe"))
+
+
+def _same_file(a: str, b: Path) -> bool:
+    try:
+        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+    except OSError:
         return False
 
 
-def stop() -> bool:
-    """Stop the bundled Ollama this product started, and its model runner with it.
+def _ours() -> Optional[tuple[int, str]]:
+    pid = _listener_pid()
+    if pid is None:
+        return None
+    exe = _exe_of(pid)
+    return (pid, exe) if exe and looks_bundled(exe) else None
 
-    Only a process recorded in the pid file and still named ollama is touched. Returns
-    whether one was stopped."""
-    info = _read_pid_file()
-    stopped = False
-    if info and _is_ollama(info["pid"]):
-        pid = info["pid"]
-        try:
-            if os.name == "nt":
-                # /T: the model runner is a child process holding the runtime's DLLs open,
-                # and a leftover one is what makes an upgrade fail to replace them.
-                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                               capture_output=True, timeout=30)
-            else:
-                # Started with start_new_session, so the pid is its process group and the
-                # runner is in it.
-                os.killpg(pid, signal.SIGTERM)
-                for _ in range(50):
-                    if not _is_ollama(pid):
-                        break
-                    time.sleep(0.1)
-                else:
-                    os.killpg(pid, signal.SIGKILL)
-            stopped = True
-        except (OSError, subprocess.SubprocessError):
-            pass
+
+def _alive(pid: int) -> bool:
+    if os.name == "nt":
+        return _exe_of(pid) is not None
     try:
-        _pid_file().unlink()
+        os.kill(pid, 0)
     except OSError:
+        return False
+    state = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
+                           capture_output=True, text=True).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+def _kill(pid: int) -> bool:
+    """Stop a server of ours and its model runner. True once it is gone."""
+    try:
+        if os.name == "nt":
+            # /T: the model runner is a child process holding the runtime's DLLs open, and a
+            # leftover one is what makes an upgrade fail to replace them.
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, timeout=30)
+        else:
+            # A server this product started leads its own process group (start_new_session)
+            # with the runner in it; anything else gets a plain signal.
+            group = os.getpgid(pid) == pid
+            (os.killpg if group else os.kill)(pid, signal.SIGTERM)
+            for _ in range(50):
+                if not _alive(pid):
+                    return True
+                time.sleep(0.1)
+            (os.killpg if group else os.kill)(pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
         pass
+    # taskkill and SIGKILL return before the process has gone; an installer about to copy
+    # over its files needs it gone.
+    for _ in range(100):
+        if not _alive(pid):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def stop() -> bool:
+    """Stop the bundled Ollama of this product that is running on the port, whichever install
+    or data directory started it. Returns whether one was stopped. Never touches a process
+    that is not in this product's layout."""
+    pids = set()
+    found = _ours()
+    if found:
+        pids.add(found[0])
+    # The pid file as a hint: a server that is still starting has not bound the port yet.
+    try:
+        info = json.loads(_pid_file().read_text(encoding="utf-8"))
+        hinted = int(info["pid"])
+        exe = _exe_of(hinted)
+        if exe and looks_bundled(exe):
+            pids.add(hinted)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    stopped = bool(pids) and all(_kill(pid) for pid in pids)
+    with contextlib.suppress(OSError):
+        _pid_file().unlink()
     return stopped
 
 
-def _spawn() -> None:
+# ── starting it ────────────────────────────────────────────────────────────────────────
+
+@contextlib.contextmanager
+def _machine_lock(deadline: float):
+    """One starter at a time across processes, so two that both find the port free do not
+    both start a server. Bounded: past the deadline the caller carries on without it."""
+    path = Path(tempfile.gettempdir()) / f"campaign-intelligence-embedder-{config.BUNDLED_OLLAMA_PORT}.lock"
+    held = False
+    try:
+        handle = open(path, "a+b")
+    except OSError:
+        yield
+        return
+    try:
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.1)
+        yield
+    finally:
+        if held:
+            with contextlib.suppress(OSError):
+                if os.name == "nt":
+                    import msvcrt
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+        handle.close()
+
+
+def _spawn() -> subprocess.Popen:
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     # The user's own OLLAMA_* settings are for THEIR Ollama; inheriting OLLAMA_HOST or
     # OLLAMA_MODELS would put this one on their port or in their model store.
@@ -145,47 +338,112 @@ def _spawn() -> None:
                # The model store is read-only in spirit: nothing here should ever delete a
                # blob it does not recognise.
                OLLAMA_NOPRUNE="1")
-    kwargs = {}
-    if os.name == "nt":
-        kwargs["creationflags"] = (subprocess.CREATE_NO_WINDOW
-                                   | subprocess.CREATE_NEW_PROCESS_GROUP)
-    else:
-        kwargs["start_new_session"] = True
-    with open(log_file(), "ab") as log:
-        proc = subprocess.Popen([str(binary()), "serve"], stdin=subprocess.DEVNULL,
-                                stdout=log, stderr=subprocess.STDOUT, env=env,
-                                cwd=str(runtime_dir()), **kwargs)
-    _pid_file().write_text(json.dumps({"pid": proc.pid, "binary": str(binary())}),
-                           encoding="utf-8")
+    flags = {}
+    if os.name != "nt":
+        flags["start_new_session"] = True
+    # One log per run of the server, so it cannot grow without bound.
+    with open(log_file(), "wb") as log:
+        args = dict(stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, env=env,
+                    cwd=str(runtime_dir()), **flags)
+        if os.name != "nt":
+            return subprocess.Popen([str(binary()), "serve"], **args)
+        base = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+        try:
+            # Out of the launching app's job object where that is allowed, so closing Claude
+            # Desktop does not take the embedder (and the loaded model) with it.
+            return subprocess.Popen([str(binary()), "serve"],
+                                    creationflags=base | 0x01000000, **args)  # BREAKAWAY_FROM_JOB
+        except OSError:
+            return subprocess.Popen([str(binary()), "serve"], creationflags=base, **args)
 
 
-def ensure_running(timeout: float = 20.0) -> bool:
-    """Make sure the bundled Ollama is answering, starting it if it is not.
+def _log_tail() -> str:
+    try:
+        lines = log_file().read_text(encoding="utf-8", errors="replace").strip().splitlines()
+    except OSError:
+        return ""
+    return lines[-1][:300] if lines else ""
+
+
+def _warm(deadline: float) -> None:
+    """Load the model now. The server answers before the model is in memory, and the first
+    embed paying the load is what made a 3-second health probe report a working embedder as
+    slow. Best effort: the caller's check is what decides."""
+    import httpx
+
+    left = deadline - time.monotonic()
+    if left <= 0.5:
+        return
+    with contextlib.suppress(Exception):
+        httpx.post(f"{url()}/api/embeddings",
+                   json={"model": config.OLLAMA_EMBED_MODEL, "prompt": "warm up",
+                         "keep_alive": config.OLLAMA_KEEP_ALIVE},
+                   timeout=left, trust_env=False)
+
+
+def _fail(message: str) -> bool:
+    global last_problem
+    last_problem = message
+    _last_failure[str(binary())] = time.monotonic()
+    print(f"[campaign-intelligence] {message}", file=sys.stderr, flush=True)
+    return False
+
+
+def ensure_running(timeout: float = 20.0, warm: bool = True) -> bool:
+    """Make sure the bundled Ollama of THIS install is answering, starting it if it is not,
+    and replacing one left running by another install directory or version.
 
     A no-op returning True when this process does not use the bundled embedder. Never
-    raises: a failure to start leaves the embedder unreachable, which the callers already
-    report with a remedy, and `log_file()` holds Ollama's own account of why."""
+    raises: a failure is reported through the embedder being unreachable, with
+    `last_problem` and `log_file()` saying why. Everything, including stopping a stale
+    server, happens inside `timeout`."""
+    global last_problem
     if not in_use():
         return True
-    with _lock:
-        info = _read_pid_file()
-        if _answering():
-            # Answering, but from a different install directory: an upgrade or a moved
-            # install left the previous copy running, serving from files that may no
-            # longer exist. Replace it rather than talk to it.
-            if info and info.get("binary") != str(binary()) and _is_ollama(info["pid"]):
-                stop()
-            else:
+    deadline = time.monotonic() + max(0.5, timeout)
+    with _thread_lock, _machine_lock(deadline):
+        version = _version()
+        if version is not None:
+            found = _ours()
+            if found is None:
+                if version and version == expected_version() and _listener_pid() is None:
+                    # Answering with our version, owner not visible (another account's
+                    # process): use it rather than fight it.
+                    return True
+                return _fail(
+                    f"port {config.BUNDLED_OLLAMA_PORT} is in use by another program, so the "
+                    f"bundled embedder cannot start. Set CAMPAIGN_POC_BUNDLED_OLLAMA_PORT to "
+                    f"a free port.")
+            pid, exe = found
+            if _same_file(exe, binary()) and version == (expected_version() or version):
+                last_problem = None
+                if warm:
+                    _warm(deadline)
                 return True
-        try:
-            _spawn()
-        except OSError as exc:
-            print(f"[campaign-intelligence] could not start the bundled embedder "
-                  f"{binary()}: {exc}", file=sys.stderr, flush=True)
+            _kill(pid)      # another install's, or an older version: replace it
+        failed_at = _last_failure.get(str(binary()))
+        if failed_at is not None and time.monotonic() - failed_at < _RETRY_AFTER_FAILURE_SECONDS:
             return False
-        deadline = time.monotonic() + max(0.5, timeout)
+        try:
+            proc = _spawn()
+        except OSError as exc:
+            return _fail(f"could not start the bundled embedder {binary()}: {exc}")
         while time.monotonic() < deadline:
             if _answering():
+                if proc.poll() is None:
+                    # Recorded only once it serves: a starter that lost a race must not
+                    # leave its dead pid where the live one's belongs.
+                    with contextlib.suppress(OSError):
+                        _pid_file().write_text(
+                            json.dumps({"pid": proc.pid, "binary": str(binary())}),
+                            encoding="utf-8")
+                last_problem = None
+                if warm:
+                    _warm(deadline)
                 return True
+            if proc.poll() is not None:
+                return _fail(f"the bundled embedder exited at start ({proc.returncode}): "
+                             f"{_log_tail() or 'see ' + str(log_file())}")
             time.sleep(0.25)
-        return _answering()
+        return _fail(f"the bundled embedder did not answer within {timeout:g}s; "
+                     f"see {log_file()}")

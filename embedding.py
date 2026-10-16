@@ -8,6 +8,8 @@ corpus later outgrows brute force (move to a vector index) or you change embedde
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import math
 import sys
 import time
@@ -184,8 +186,9 @@ def _embed_ollama(text: str, timeout: float = 0) -> list[float]:
         # reboot, an upgrade that stopped it, a crash. Start it and try once more, within the
         # same budget, rather than report an outage this process can fix by itself.
         started = time.monotonic()
-        if not bundled_ollama.in_use() or not bundled_ollama.ensure_running(
-                timeout=timeout or config.EMBED_TIMEOUT_SECONDS):
+        if (not _autostart.get() or not bundled_ollama.in_use()
+                or not bundled_ollama.ensure_running(
+                    timeout=timeout or config.EMBED_TIMEOUT_SECONDS)):
             raise
         left = (timeout or config.EMBED_TIMEOUT_SECONDS) - (time.monotonic() - started)
         return _post_ollama(text, max(0.1, left))
@@ -199,6 +202,22 @@ def is_loopback(url: str) -> bool:
     from urllib.parse import urlsplit
 
     return (urlsplit(url).hostname or "").lower() in ("localhost", "127.0.0.1", "::1")
+
+
+# A diagnostic must not repair what it is diagnosing (§2.3): the health check's probe asks
+# whether the embedder answers, and starting it from inside the probe would report a server
+# the probe itself had just started. Callers that SHOULD start it (the CLI health check,
+# which the installers run, and every real embed) do so explicitly or by default.
+_autostart = contextvars.ContextVar("embedding_autostart", default=True)
+
+
+@contextlib.contextmanager
+def without_autostart():
+    token = _autostart.set(False)
+    try:
+        yield
+    finally:
+        _autostart.reset(token)
 
 
 def _post_ollama(text: str, timeout: float = 0) -> list[float]:
