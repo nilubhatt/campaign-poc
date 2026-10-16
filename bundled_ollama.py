@@ -59,6 +59,16 @@ def runtime_dir() -> Path:
     return config.app_dir() / "ollama"
 
 
+# Helper commands (powershell, taskkill) run without a console window: the server itself is a
+# console program, and a window flashing up on every lookup is not something a marketer
+# should see.
+_HIDDEN = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
+
+def _left(deadline: Optional[float], default: float) -> float:
+    return default if deadline is None else max(0.5, min(default, deadline - time.monotonic()))
+
+
 def binary() -> Path:
     return config.bundled_ollama_binary()
 
@@ -115,7 +125,7 @@ def _answering() -> bool:
 
 # ── who is listening, and what is it ───────────────────────────────────────────────────
 
-def _listener_pid() -> Optional[int]:
+def _listener_pid(deadline: Optional[float] = None) -> Optional[int]:
     """The pid listening on the bundled port, when this account can see it."""
     port = config.BUNDLED_OLLAMA_PORT
     try:
@@ -124,7 +134,8 @@ def _listener_pid() -> Optional[int]:
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command",
                  f"(Get-NetTCPConnection -LocalPort {port} -State Listen "
                  f"-ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess"],
-                capture_output=True, text=True, timeout=20).stdout.strip()
+                capture_output=True, text=True, timeout=_left(deadline, 20), **_HIDDEN
+            ).stdout.strip()
             return int(out) if out.isdigit() else None
         if sys.platform == "darwin":
             out = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
@@ -182,7 +193,9 @@ def _exe_of(pid: int) -> Optional[str]:
                 kernel32.CloseHandle(handle)
         if sys.platform.startswith("linux"):
             return re.sub(r" \(deleted\)$", "", os.readlink(f"/proc/{pid}/exe"))
-        # macOS: `comm` is the full path of the executable.
+        # macOS: `comm` is the path the process was started by (argv[0]), which for a server
+        # this product starts is the absolute path of the runtime, since app_dir() resolves
+        # sys.executable. Another account's process is not visible here at all.
         out = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
                              capture_output=True, text=True, timeout=10).stdout.strip()
         return out or None
@@ -213,12 +226,15 @@ def _same_file(a: str, b: Path) -> bool:
         return False
 
 
-def _ours() -> Optional[tuple[int, str]]:
-    pid = _listener_pid()
-    if pid is None:
-        return None
-    exe = _exe_of(pid)
-    return (pid, exe) if exe and looks_bundled(exe) else None
+def _listener(deadline: Optional[float] = None) -> tuple[Optional[int], Optional[str]]:
+    """The listener's pid and executable, either None when it cannot be seen."""
+    pid = _listener_pid(deadline)
+    return (pid, _exe_of(pid) if pid is not None else None)
+
+
+def _ours(deadline: Optional[float] = None) -> Optional[tuple[int, str]]:
+    pid, exe = _listener(deadline)
+    return (pid, exe) if pid is not None and exe and looks_bundled(exe) else None
 
 
 def _alive(pid: int) -> bool:
@@ -226,40 +242,47 @@ def _alive(pid: int) -> bool:
         return _exe_of(pid) is not None
     try:
         os.kill(pid, 0)
-    except OSError:
+        if sys.platform.startswith("linux"):
+            # Field 3 of /proc/<pid>/stat is the state; Z is a zombie. No `ps` needed.
+            return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        state = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
+                               capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, IndexError, subprocess.SubprocessError):
         return False
-    state = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
-                           capture_output=True, text=True).stdout.strip()
     return bool(state) and not state.startswith("Z")
 
 
-def _kill(pid: int) -> bool:
-    """Stop a server of ours and its model runner. True once it is gone."""
+def _kill(pid: int, deadline: Optional[float] = None) -> bool:
+    """Stop a server of ours and its model runner. True once it is gone. Bounded by
+    `deadline` when one is given; the installers' stop has the default 15 seconds."""
+    deadline = deadline if deadline is not None else time.monotonic() + 15
+
+    def gone_by(until: float) -> bool:
+        while time.monotonic() < until:
+            if not _alive(pid):
+                return True
+            time.sleep(0.1)
+        return not _alive(pid)
+
     try:
         if os.name == "nt":
             # /T: the model runner is a child process holding the runtime's DLLs open, and a
             # leftover one is what makes an upgrade fail to replace them.
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                           capture_output=True, timeout=30)
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True,
+                           timeout=_left(deadline, 30), **_HIDDEN)
         else:
             # A server this product started leads its own process group (start_new_session)
             # with the runner in it; anything else gets a plain signal.
             group = os.getpgid(pid) == pid
             (os.killpg if group else os.kill)(pid, signal.SIGTERM)
-            for _ in range(50):
-                if not _alive(pid):
-                    return True
-                time.sleep(0.1)
+            if gone_by(min(deadline, time.monotonic() + 5)):
+                return True
             (os.killpg if group else os.kill)(pid, signal.SIGKILL)
     except (OSError, subprocess.SubprocessError):
         pass
     # taskkill and SIGKILL return before the process has gone; an installer about to copy
     # over its files needs it gone.
-    for _ in range(100):
-        if not _alive(pid):
-            return True
-        time.sleep(0.1)
-    return False
+    return gone_by(max(deadline, time.monotonic() + 1))
 
 
 def stop() -> bool:
@@ -280,8 +303,10 @@ def stop() -> bool:
     except (OSError, ValueError, KeyError, TypeError):
         pass
     stopped = bool(pids) and all(_kill(pid) for pid in pids)
-    with contextlib.suppress(OSError):
-        _pid_file().unlink()
+    if stopped or not pids:
+        # Kept when a kill failed: it is the only hint to a server that has not bound yet.
+        with contextlib.suppress(OSError):
+            _pid_file().unlink()
     return stopped
 
 
@@ -289,8 +314,11 @@ def stop() -> bool:
 
 @contextlib.contextmanager
 def _machine_lock(deadline: float):
-    """One starter at a time across processes, so two that both find the port free do not
-    both start a server. Bounded: past the deadline the caller carries on without it."""
+    """One starter at a time across this account's processes, so two that both find the port
+    free do not both start a server. Per account on macOS and Windows, whose temp directories
+    are; on Linux the file is made writable by all so other accounts share it. A start that
+    races another account's loses the bind, reports it, and the next call finds the winner.
+    Bounded: past the deadline the caller carries on without it."""
     path = Path(tempfile.gettempdir()) / f"campaign-intelligence-embedder-{config.BUNDLED_OLLAMA_PORT}.lock"
     held = False
     try:
@@ -298,6 +326,9 @@ def _machine_lock(deadline: float):
     except OSError:
         yield
         return
+    if os.name != "nt":
+        with contextlib.suppress(OSError):
+            os.chmod(path, 0o666)
     try:
         while True:
             try:
@@ -396,54 +427,70 @@ def ensure_running(timeout: float = 20.0, warm: bool = True) -> bool:
     A no-op returning True when this process does not use the bundled embedder. Never
     raises: a failure is reported through the embedder being unreachable, with
     `last_problem` and `log_file()` saying why. Everything, including stopping a stale
-    server, happens inside `timeout`."""
-    global last_problem
+    server, happens inside `timeout`; the model is loaded after the lock is released, since
+    loading needs no exclusivity and can take most of the budget."""
     if not in_use():
         return True
     deadline = time.monotonic() + max(0.5, timeout)
-    with _thread_lock, _machine_lock(deadline):
-        version = _version()
-        if version is not None:
-            found = _ours()
-            if found is None:
-                if version and version == expected_version() and _listener_pid() is None:
-                    # Answering with our version, owner not visible (another account's
-                    # process): use it rather than fight it.
-                    return True
-                return _fail(
-                    f"port {config.BUNDLED_OLLAMA_PORT} is in use by another program, so the "
-                    f"bundled embedder cannot start. Set CAMPAIGN_POC_BUNDLED_OLLAMA_PORT to "
-                    f"a free port.")
-            pid, exe = found
+    with _thread_lock:
+        with _machine_lock(deadline):
+            ok = _start_locked(deadline)
+    if ok and warm:
+        _warm(deadline)
+    return ok
+
+
+def _start_locked(deadline: float) -> bool:
+    global last_problem
+    version = _version()
+    if version is not None:
+        pid, exe = _listener(deadline)
+        if pid is None:
+            if version and version == expected_version():
+                # Answering with our version, owner not visible (another account's process):
+                # use it rather than fight it.
+                last_problem = None
+                return True
+        if pid is not None and exe and looks_bundled(exe):
             if _same_file(exe, binary()) and version == (expected_version() or version):
                 last_problem = None
-                if warm:
-                    _warm(deadline)
                 return True
-            _kill(pid)      # another install's, or an older version: replace it
-        failed_at = _last_failure.get(str(binary()))
-        if failed_at is not None and time.monotonic() - failed_at < _RETRY_AFTER_FAILURE_SECONDS:
-            return False
-        try:
-            proc = _spawn()
-        except OSError as exc:
-            return _fail(f"could not start the bundled embedder {binary()}: {exc}")
-        while time.monotonic() < deadline:
-            if _answering():
-                if proc.poll() is None:
-                    # Recorded only once it serves: a starter that lost a race must not
-                    # leave its dead pid where the live one's belongs.
-                    with contextlib.suppress(OSError):
-                        _pid_file().write_text(
-                            json.dumps({"pid": proc.pid, "binary": str(binary())}),
-                            encoding="utf-8")
-                last_problem = None
-                if warm:
-                    _warm(deadline)
-                return True
-            if proc.poll() is not None:
-                return _fail(f"the bundled embedder exited at start ({proc.returncode}): "
-                             f"{_log_tail() or 'see ' + str(log_file())}")
-            time.sleep(0.25)
-        return _fail(f"the bundled embedder did not answer within {timeout:g}s; "
-                     f"see {log_file()}")
+            # Another install's, or an older version: replace it. Not while a start failed
+            # moments ago, which would leave nothing answering at all.
+            if _recently_failed():
+                return False
+            if not _kill(pid, deadline):
+                return _fail(f"could not stop the previous bundled embedder (pid {pid}, {exe}), "
+                             f"so this install's cannot start")
+        else:
+            return _fail(
+                f"port {config.BUNDLED_OLLAMA_PORT} is in use by another program, so the "
+                f"bundled embedder cannot start. Set CAMPAIGN_POC_BUNDLED_OLLAMA_PORT to a free "
+                f"port.")
+    if _recently_failed():
+        return False
+    try:
+        proc = _spawn()
+    except OSError as exc:
+        return _fail(f"could not start the bundled embedder {binary()}: {exc}")
+    while time.monotonic() < deadline:
+        if _answering():
+            if proc.poll() is None:
+                # Recorded only once it serves: a starter that lost a race must not leave its
+                # dead pid where the live one's belongs.
+                with contextlib.suppress(OSError):
+                    _pid_file().write_text(
+                        json.dumps({"pid": proc.pid, "binary": str(binary())}),
+                        encoding="utf-8")
+            last_problem = None
+            return True
+        if proc.poll() is not None:
+            return _fail(f"the bundled embedder exited at start ({proc.returncode}): "
+                         f"{_log_tail() or 'see ' + str(log_file())}")
+        time.sleep(0.25)
+    return _fail(f"the bundled embedder did not answer in time; see {log_file()}")
+
+
+def _recently_failed() -> bool:
+    failed_at = _last_failure.get(str(binary()))
+    return failed_at is not None and time.monotonic() - failed_at < _RETRY_AFTER_FAILURE_SECONDS

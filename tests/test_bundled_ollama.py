@@ -183,10 +183,14 @@ FAKE_OLLAMA = textwrap.dedent("""\
     #!{python}
     # Stands in for `ollama serve`: answers /api/version with VERSION_TO_REPORT (or the file
     # beside it) on OLLAMA_HOST, embeds anything, and records the environment it was given.
-    import json, os, sys
+    import json, os, sys, time
     from http.server import BaseHTTPRequestHandler, HTTPServer
     here = os.path.dirname(os.path.abspath(__file__))
     assert sys.argv[1:] == ["serve"], sys.argv
+    with open(os.path.join(here, "starts.log"), "a") as fh:
+        fh.write(str(os.getpid()) + " ")
+    if os.path.exists(os.path.join(here, "SLOW")):
+        time.sleep(1.5)            # a real server takes a moment to bind
     with open(os.path.join(here, "env.json"), "w") as fh:
         json.dump({{k: v for k, v in os.environ.items() if k.startswith("OLLAMA_")}}, fh)
     version = open(os.path.join(here, "REPORTS")).read().strip()
@@ -335,6 +339,7 @@ def test_two_starters_at_once_leave_one_server_that_stop_can_find(fake_runtime, 
         bundled_ollama._exe_of = lambda pid: {str(fake_runtime.path)!r}
         print(json.dumps(bundled_ollama.ensure_running(timeout=20, warm=False)))
     """))
+    (fake_runtime.parent / "SLOW").write_text("")
     starters = [subprocess.Popen([sys.executable, str(script), str(tmp_path / f"data{i}")],
                                  stdout=subprocess.PIPE, text=True) for i in range(2)]
     results = [json.loads(p.communicate(timeout=60)[0]) for p in starters]
@@ -345,6 +350,10 @@ def test_two_starters_at_once_leave_one_server_that_stop_can_find(fake_runtime, 
     servers = subprocess.run(["pgrep", "-f", str(fake_runtime.path)], capture_output=True,
                              text=True).stdout.split()
     assert servers == [str(listener)], f"more than one server: {servers}"
+    # The lock, not the bind, is what kept it to one: the second starter waited for the
+    # first and found it answering, so only one server was ever started.
+    starts = (fake_runtime.parent / "starts.log").read_text().split()
+    assert len(starts) == 1, f"{len(starts)} servers were started: {starts}"
     assert bundled_ollama.stop() is True and _gone(listener)
 
 
@@ -390,6 +399,31 @@ def test_a_start_that_dies_is_not_waited_on_or_retried_at_once(fake_runtime, mon
 
         monkeypatch.setattr(bundled_ollama, "_spawn", lambda: pytest.fail("retried at once"))
         assert bundled_ollama.ensure_running(timeout=20) is False
+
+
+def test_a_stale_server_is_not_killed_while_starts_are_failing(fake_runtime, monkeypatch):
+    # Replacing a working server and then not starting one leaves nothing answering.
+    assert bundled_ollama.ensure_running(timeout=15)
+    old = _pid()
+    fake_runtime.stands_for[old] = "/old/install/ollama/ollama"
+    bundled_ollama._last_failure[str(bundled_ollama.binary())] = time.monotonic()
+
+    assert bundled_ollama.ensure_running(timeout=15) is False
+    assert _alive(old), "killed a working server while starts were failing"
+
+
+def test_a_stale_server_that_cannot_be_stopped_is_reported_as_such(fake_runtime, monkeypatch):
+    assert bundled_ollama.ensure_running(timeout=15)
+    fake_runtime.stands_for[_pid()] = "/old/install/ollama/ollama"
+    monkeypatch.setattr(bundled_ollama, "_kill", lambda pid, deadline=None: False)
+    monkeypatch.setattr(bundled_ollama, "_spawn", lambda: pytest.fail("started over a live one"))
+
+    assert bundled_ollama.ensure_running(timeout=15) is False
+    assert "could not stop the previous bundled embedder" in bundled_ollama.last_problem
+
+
+def test_alive_does_not_raise_for_a_pid_that_is_gone():
+    assert bundled_ollama._alive(2 ** 22 + 54321) is False
 
 
 def test_stop_never_kills_a_process_that_is_not_ours(app):
