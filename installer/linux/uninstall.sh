@@ -8,6 +8,9 @@ systemctl --user disable --now campaign-intelligence 2>/dev/null || true
 rm -f "$HOME/.config/systemd/user/campaign-intelligence.service"
 systemctl --user daemon-reload 2>/dev/null || true
 
+# The bundled embedder runs out of the directory about to be deleted; stop it first. An
+# install from before it was bundled has no such command and nothing to stop.
+[ -x "$HOME/.local/share/campaign-intelligence/campaign-intelligence" ] && "$HOME/.local/share/campaign-intelligence/campaign-intelligence" stop-embedder >/dev/null 2>&1 || true
 rm -f  "$HOME/.local/bin/campaign-intelligence"
 rm -rf "$HOME/.local/share/campaign-intelligence"
 

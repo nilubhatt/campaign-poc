@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import actions
+import bundled_ollama
 import chunking
 import clip_embed
 import commitments
@@ -763,6 +764,17 @@ def _vision_notice(detail: str) -> dict:
     return notices.notice("visual_search_offline", detail=detail,
                           cause=f"clip_weights_{status.source or 'unknown'}",
                           remedy=status.remedy or notices.remedy_for("visual_search_offline"))
+
+
+def _bundled_embedder_remedy() -> str:
+    """What to do when the embedder this build ships with is not answering. "Run `ollama
+    pull`" is advice for an Ollama the user installed, and on the network this bundle exists
+    for, it is advice nobody can follow."""
+    return (f"The embedder ships with this install and runs on {config.OLLAMA_URL}; it is "
+            f"started automatically. Its own log is {bundled_ollama.log_file()}. If it "
+            f"was just started it may still be loading the model; try again in a minute. "
+            f"If the log shows missing files under {bundled_ollama.runtime_dir()}, "
+            f"reinstall.")
 
 
 class _WrongDimension(RuntimeError):
@@ -3715,7 +3727,8 @@ def health_check(conn, *, probe: bool = True) -> dict:
                            if missing_model
                            else f"{config.EMBED_PROVIDER} embedder: {exc}"),
                 "affects": "Searching the library, uploading decks and evaluations.",
-                "remedy": (f"If this is Ollama, check it is running at {config.OLLAMA_URL} "
+                "remedy": (_bundled_embedder_remedy() if bundled_ollama.in_use() else
+                           f"If this is Ollama, check it is running at {config.OLLAMA_URL} "
                            f"and that `ollama pull {config.OLLAMA_EMBED_MODEL}` has been "
                            f"run. If it was just started it may still be loading the "
                            f"model — try again in a minute."),

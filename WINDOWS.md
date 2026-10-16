@@ -6,8 +6,10 @@ install** via the PowerShell launcher. All work with both **Claude Desktop** and
 ## Option 0 — one-click installer (end users)
 
 Download `CampaignIntelligence-Setup.exe` from the repo's Releases (built by CI). It installs
-the app, and via checkboxes: installs **Ollama** + pulls the model, **wires Claude Desktop
-automatically**, and optionally runs the server in the background at logon. Uninstall from
+the app with its own text embedder (a CPU-only Ollama and `nomic-embed-text`, so nothing is
+downloaded and a network that blocks ollama.com is not a problem), **wires Claude Desktop
+automatically**, and optionally runs the server in the background at logon. The embedder runs
+on `127.0.0.1:11435`, started by the product when it first needs it. Uninstall from
 *Add/Remove Programs*. Build it yourself with `installer\windows\campaign-intelligence.iss`
 (Inno Setup 6, after `build.ps1`).
 
@@ -125,8 +127,10 @@ means the name is not on the list the startup line `Answers to Host:` prints.
 
 ## Notes & next phases
 
-- **Ollama on Windows** runs as a background service on `localhost:11434` and uses your NVIDIA
-  GPU if present (CPU otherwise — fine for this small embed model).
+- **The installed product** runs its bundled Ollama on `127.0.0.1:11435`, CPU only (fine for
+  this small embed model); the installer stops it before an upgrade or uninstall. A source
+  install uses an Ollama you run yourself on `localhost:11434`, which uses your NVIDIA GPU if
+  present.
 - **Hardened Windows Service:** the `-Mode service` switch uses Task Scheduler (simple, runs at
   logon). For a true always-on service independent of login, wrap `python -m http_app` with
   **NSSM** or **WinSW** — a Phase-2 upgrade.

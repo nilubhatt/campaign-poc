@@ -122,6 +122,17 @@ jobs:
           print(f"staged checkpoint: {known[actual]} ({actual[:12]}...)")
           PY
 
+      # The embedder ships inside the bundle (bundled_ollama.py): the customer's network blocks
+      # ollama.com and the model registry, so the installers' download-and-pull could never
+      # finish there. Fetched here, on a runner that can reach both: a pinned Ollama release
+      # checked against its published SHA-256, GPU back-ends left out (1.3 GB of 1.4 GB on
+      # Linux and Windows), and nomic-embed-text pulled by that runtime and checked against
+      # pinned digests. The script also embeds once with it, so a runtime that cannot run on
+      # this platform fails here.
+      - name: Stage the bundled embedder (Ollama + nomic-embed-text)
+        timeout-minutes: 20
+        run: python scripts/fetch_ollama.py dist/campaign-intelligence/ollama --cache "${{ runner.temp }}/ollama-cache"
+
       # Per-OS, which it was not: the macOS archive shipped the LINUX installer, so a Mac
       # user got systemd units and ~/.local/share paths (item 4.1 — macOS had no installer
       # of its own at all).
@@ -174,6 +185,47 @@ jobs:
           print("database:", db["detail"])
           PY
 
+      # The bundled embedder, from the packaged product, on a runner with no Ollama installed
+      # (nothing in this job provisions one any more). text_search is the component the
+      # bundle exists for; it is stopped afterwards so no step after this one inherits it.
+      - name: Verify the packaged product embeds text with its own Ollama (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          CAMPAIGN_POC_DATA: ${{ runner.temp }}/embed-check
+        run: |
+          if command -v ollama >/dev/null 2>&1; then
+            echo "an ollama is on PATH, so this would not prove the bundled one" >&2; exit 1
+          fi
+          bin=_verify/campaign-intelligence/campaign-intelligence
+          "$bin" init > /dev/null
+          "$bin" health-check --json > embed.json || true
+          "$bin" stop-embedder
+          python - <<'PY'
+          import json
+          text = json.load(open("embed.json"))["components"]["text_search"]
+          assert text["ok"], f"the bundled embedder does not answer: {text}"
+          print("text_search:", text["detail"])
+          PY
+
+      - name: Verify the packaged product embeds text with its own Ollama (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CAMPAIGN_POC_DATA: ${{ runner.temp }}\embed-check
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          if (Get-Command ollama -ErrorAction SilentlyContinue) {
+            throw "an ollama is on PATH, so this would not prove the bundled one"
+          }
+          & _verify\campaign-intelligence.exe init | Out-Null
+          $report = (& _verify\campaign-intelligence.exe health-check --json | Out-String) | ConvertFrom-Json
+          & _verify\campaign-intelligence.exe stop-embedder
+          $text = $report.components.text_search
+          "text_search: $($text.detail)"
+          if (-not $text.ok) { throw "the bundled embedder does not answer: $($text | ConvertTo-Json -Compress)" }
+          $global:LASTEXITCODE = 0
+
       # Item 4.2: zero egress, tested rather than asserted. The customer's network blocks
       # huggingface.co, which is how all three P0s surfaced at once — so the install-time
       # gate must complete with no network at all, against the PACKAGED binary, since that
@@ -193,16 +245,22 @@ jobs:
           #
           # And health-check, not check-weights: the claim is that the whole install-time
           # gate needs no network, and health-check is that gate. It LOADS the vision model,
-          # which is where open_clip reaches for the Hub. Exit code is not the assertion - a runner has no Ollama, so text_search is
-          # legitimately down; visual_search is what this step is about.
-          sudo unshare -n _verify/campaign-intelligence/campaign-intelligence \
-            health-check --json | tee offline.json > /dev/null || true
+          # which is where open_clip reaches for the Hub. And text_search too, now that the
+          # embedder ships in the bundle: it is the half the customer's network blocked.
+          # Loopback is brought up inside the namespace (a new one starts with `lo` down) so
+          # the product can reach the embedder it starts beside itself, and nothing else.
+          # Exit code is still not the assertion; the two components are.
+          bin="$PWD/_verify/campaign-intelligence/campaign-intelligence"
+          sudo unshare -n sh -c "ip link set lo up && \"$bin\" init > /dev/null && \
+            { \"$bin\" health-check --json; \"$bin\" stop-embedder > /dev/null; }" \
+            | tee offline.json > /dev/null || true
           python - <<'PY'
           import json
           report = json.load(open("offline.json"))
-          vision = report["components"]["visual_search"]
-          assert vision["ok"], f"the packaged product cannot load its vision model offline: {vision}"
-          print("visual_search ok with no network:", vision["detail"])
+          for name in ("visual_search", "text_search"):
+              component = report["components"][name]
+              assert component["ok"], f"{name} does not work with no network: {component}"
+              print(f"{name} ok with no network:", component["detail"])
           PY
 
       - name: Verify the packaged product needs no network (macOS)
@@ -216,14 +274,18 @@ jobs:
           HTTPS_PROXY: http://127.0.0.1:9
           ALL_PROXY: http://127.0.0.1:9
         run: |
+          # text_search as well: the bundled embedder is on loopback, which the product
+          # reaches directly whatever HTTP_PROXY says (a corporate proxy cannot reach it).
           _verify/campaign-intelligence/campaign-intelligence health-check --json \
             > offline.json || true
+          _verify/campaign-intelligence/campaign-intelligence stop-embedder
           python - <<'PY'
           import json
           report = json.load(open("offline.json"))
-          vision = report["components"]["visual_search"]
-          assert vision["ok"], f"the packaged product cannot load its vision model offline: {vision}"
-          print("visual_search ok with every request proxied to a closed port:", vision["detail"])
+          for name in ("visual_search", "text_search"):
+              component = report["components"][name]
+              assert component["ok"], f"{name} does not work with every request proxied to a closed port: {component}"
+              print(f"{name} ok with every request proxied to a closed port:", component["detail"])
           PY
 
       - name: Verify the packaged product finds its weights (Windows)
@@ -277,38 +339,11 @@ jobs:
       # INSTALLS it, on a clean runner, and then requires that the product the installer left
       # behind answers its own self-test — the acceptance criterion §4.1 states and the one
       # thing a build that only compiles cannot check.
-      # Ollama, the headless way, BEFORE the package runs. Measured on a runner: Ollama's own
-      # macOS installer downloads, unpacks to /Applications, then fails at `Unable to find
-      # application named 'Ollama'` — it wants a GUI session to launch the app, and a runner
-      # has none. `install.sh` handled that correctly (the guard reported it and the gate
-      # refused the install, naming text_search), which is the product working; what was wrong
-      # was this job expecting a green install on a machine where the dependency cannot be
-      # installed. Homebrew gives the CLI and server without the .app, so `command -v ollama`
-      # succeeds and the installer skips its own download — which is also the state of a
-      # machine that already has Ollama, the commonest real case.
-      - name: Provision Ollama (macOS runners have no GUI session)
-        if: runner.os == 'macOS'
-        timeout-minutes: 15
-        run: |
-          brew install ollama
-          # `brew services`, not a backgrounded `ollama serve`. A process started with `&` in
-          # one step does not reliably survive into the next one, and the install two steps
-          # later found nothing listening: "FAIL text_search: ollama did not answer within 3s",
-          # after `health-check --wait 60` had retried for a minute. A launchd service outlives
-          # the step that started it.
-          brew services start ollama
-          # A plain wait loop: `A && break || sleep` reads as if-then-else and is not one.
-          for _ in $(seq 1 45); do
-            if curl -sf http://localhost:11434/api/tags >/dev/null; then
-              break
-            fi
-            sleep 2
-          done
-          curl -sf http://localhost:11434/api/tags >/dev/null \
-            || { echo "ollama never came up, so the gate cannot pass" >&2; exit 1; }
-          ollama pull nomic-embed-text
-          ollama list
-
+      # No Ollama is provisioned for these installs. They used to install one (Homebrew on
+      # macOS, Chocolatey on Windows) so the gate's text_search could pass, which proved the
+      # product worked next to an Ollama this job had set up. The embedder now ships in the
+      # bundle, so the gate passing on a runner with none is the proof that matters, and
+      # the Chocolatey feed's outages stop failing release builds.
       # A ceiling on every step that RUNS an installer. The first dispatch hung for 99
       # minutes inside the silent Windows install — most likely the Ollama task, which
       # downloads and installs a second installer and then pulls 274MB — and would have
@@ -322,9 +357,6 @@ jobs:
           # so a failure here arrived as "an error occurred while running scripts" and nothing
           # else. A red build that says nothing is the same defect this product was built
           # against, in its own CI. Dump the log whichever way it goes.
-          curl -sf http://localhost:11434/api/tags >/dev/null \
-            || { echo "ollama is not answering BEFORE the install — the gate will refuse it "\
-                      "and that is the runner's fault, not the product's" >&2; exit 1; }
           set +e
           sudo installer -pkg CampaignIntelligence.pkg -target / -verbose
           status=$?
@@ -418,26 +450,6 @@ jobs:
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" installer\windows\campaign-intelligence.iss
           Copy-Item installer\windows\Output\CampaignIntelligence-Setup.exe .
 
-      # Same reason as macOS, one platform over: the Inno `ollama` task downloads and runs
-      # OllamaSetup.exe, and the first dispatch hung for 99 minutes inside that step. With
-      # Ollama already on PATH the task's own `Get-Command ollama` succeeds and it skips
-      # straight to serve-and-pull.
-      - name: Provision Ollama (so the installer's own task skips its download)
-        if: runner.os == 'Windows'
-        timeout-minutes: 15
-        shell: pwsh
-        run: |
-          choco install ollama --no-progress -y
-          $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
-                      [Environment]::GetEnvironmentVariable('Path','User')
-          Start-Process ollama -ArgumentList 'serve' -WindowStyle Hidden
-          for ($i = 0; $i -lt 30; $i++) {
-            try { Invoke-WebRequest http://localhost:11434/api/tags -UseBasicParsing | Out-Null; break }
-            catch { Start-Sleep 2 }
-          }
-          ollama pull nomic-embed-text
-          ollama list
-
       # D25, owed since 4.1: "the `[Code]` path has still never been executed anywhere;
       # compiling it is new but is not the same thing". Inno's `[Code]` section holds the gate
       # — the self-test that must block the success page — and a build that only ran ISCC
@@ -448,24 +460,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # PATH refreshed from the machine environment FIRST. `choco install ollama` updates
-          # the machine PATH, but this shell was started before that and a child process
-          # inherits the PARENT's environment — so the installer's own
-          # `Get-Command ollama` missed it, downloaded OllamaSetup.exe itself, and hung.
-          # Provisioning Ollama only helps if the process that launches the installer can see
-          # it.
-          $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
-                      [Environment]::GetEnvironmentVariable('Path','User')
-          if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
-            throw "ollama is not on PATH, so the installer will try to install it itself"
-          }
-          # /TASKS="desktop" — the ollama task is DESELECTED, because this job provisioned
-          # Ollama itself two steps ago. Measured: with the task on, the installer ran
-          # OllamaSetup.exe, which installed and launched the Ollama app and then never
-          # returned; the step timed out at 25 minutes having printed nothing, and cleanup
-          # killed two orphan ollama processes. Running a second installer inside a silent
-          # install is the hang, and the gate still gets a real text_search because Ollama is
-          # already there — which is also the commonest state of a customer's machine.
+          # /TASKS="desktop" — the ollama task is DESELECTED. Measured: with the task on, the
+          # installer ran OllamaSetup.exe, which installed and launched the Ollama app and
+          # then never returned; the step timed out at 25 minutes having printed nothing. The
+          # task now does nothing when the bundle carries its own embedder, and deselecting it
+          # keeps that true even if the bundle ever does not. The gate's text_search is the
+          # bundled embedder: nothing on this runner provides another.
           $p = Start-Process -FilePath .\CampaignIntelligence-Setup.exe `
                -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',`
                              '/TASKS=desktop','/LOG=install.log' -Wait -PassThru
@@ -562,10 +562,10 @@ jobs:
           #
           # Exit code is NOT the assertion, and the Linux and macOS halves say so and clear it
           # while this one did not. `health-check` exits non-zero when ANY component is down,
-          # and text_search is down here by construction: every request is proxied to a closed
-          # port. The claim being tested is narrower — the VISION model loads from the bundle
-          # with no network — so the report is read and the status discarded. Whenever this
-          # step actually ran it would have failed on a product behaving exactly as intended.
+          # and the database is not this step's subject. The claims are narrower: the VISION
+          # model loads from the bundle with no network, and the bundled embedder answers on
+          # loopback with every proxied request going nowhere. So the report is read and the
+          # status discarded.
           # pwsh 7.4 turns a native command's non-zero exit into a TERMINATING error when
           # ErrorActionPreference is Stop, which is what GitHub sets — so the step died on the
           # call itself, before the line below could clear anything.
@@ -578,12 +578,18 @@ jobs:
           # this one had an extra directory in it and could never have run. It went unnoticed
           # because the job had never got this far: the install step before it hung.
           & _verify\campaign-intelligence.exe health-check --json > offline.json
+          & _verify\campaign-intelligence.exe stop-embedder
           $global:LASTEXITCODE = 0
           $report = Get-Content offline.json | ConvertFrom-Json
           if (-not $report.components.visual_search.ok) {
             throw "the packaged product cannot load its vision model offline: $($report.components.visual_search.detail)"
           }
-          Write-Host "visual_search ok with every request proxied to a closed port"
+          # And the bundled embedder, which is on loopback and reached directly whatever
+          # HTTP_PROXY says.
+          if (-not $report.components.text_search.ok) {
+            throw "text search does not work with every request proxied to a closed port: $($report.components.text_search.detail)"
+          }
+          Write-Host "visual_search and text_search ok with every request proxied to a closed port"
           exit 0
 
       - name: Upload build artifacts

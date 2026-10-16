@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import sys
+import time
 from typing import Optional
 
 import config
@@ -174,6 +175,34 @@ def _embed_voyage(text: str, timeout: float = 0) -> list[float]:
 
 def _embed_ollama(text: str, timeout: float = 0) -> list[float]:
     import httpx
+
+    import bundled_ollama
+    try:
+        return _post_ollama(text, timeout)
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        # The bundled embedder is started by whoever needs it first, and it can be gone: a
+        # reboot, an upgrade that stopped it, a crash. Start it and try once more, within the
+        # same budget, rather than report an outage this process can fix by itself.
+        started = time.monotonic()
+        if not bundled_ollama.in_use() or not bundled_ollama.ensure_running(
+                timeout=timeout or config.EMBED_TIMEOUT_SECONDS):
+            raise
+        left = (timeout or config.EMBED_TIMEOUT_SECONDS) - (time.monotonic() - started)
+        return _post_ollama(text, max(0.1, left))
+
+
+def is_loopback(url: str) -> bool:
+    """A URL on this machine. Requests to it must not go through HTTP_PROXY: corporate
+    machines set one, httpx honours it for loopback too, and the proxy cannot reach the
+    embedder running beside the product, so text search failed on exactly the managed
+    machines the bundled embedder is for."""
+    from urllib.parse import urlsplit
+
+    return (urlsplit(url).hostname or "").lower() in ("localhost", "127.0.0.1", "::1")
+
+
+def _post_ollama(text: str, timeout: float = 0) -> list[float]:
+    import httpx
     r = httpx.post(
         f"{config.OLLAMA_URL}/api/embeddings",
         # keep_alive: warming at startup is pointless if Ollama unloads the model after
@@ -182,6 +211,7 @@ def _embed_ollama(text: str, timeout: float = 0) -> list[float]:
         json={"model": config.OLLAMA_EMBED_MODEL, "prompt": text,
               "keep_alive": config.OLLAMA_KEEP_ALIVE},
         timeout=timeout or config.EMBED_TIMEOUT_SECONDS,
+        trust_env=not is_loopback(config.OLLAMA_URL),
     )
     r.raise_for_status()
     return r.json()["embedding"]
@@ -240,7 +270,8 @@ def model_digest() -> Optional[str]:
         import httpx
 
         response = httpx.post(f"{config.OLLAMA_URL}/api/show",
-                              json={"model": config.OLLAMA_EMBED_MODEL}, timeout=2.0)
+                              json={"model": config.OLLAMA_EMBED_MODEL}, timeout=2.0,
+                              trust_env=not is_loopback(config.OLLAMA_URL))
         if response.status_code == 200:
             body = response.json()
             digest = (body.get("details") or {}).get("parent_model") or body.get("digest")

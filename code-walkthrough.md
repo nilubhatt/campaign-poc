@@ -4,7 +4,7 @@
 > [`design.md`](design.md) first for *why* it is shaped this way; this document is *where
 > everything is*. [`README.md`](README.md) covers installing and running it.
 
-**38 modules of product code and 110 test files — more lines of test than of product.** The test-to-code ratio is not an accident: almost every rule described below is
+**39 modules of product code and 111 test files — more lines of test than of product.** The test-to-code ratio is not an accident: almost every rule described below is
 pinned by a test that was written to fail first.
 
 ---
@@ -439,6 +439,17 @@ inside somebody's first tool call.
 The bundled `hash` provider is for offline smoke tests **only** — it has no semantics, and
 scores a paraphrase and an unrelated pair identically.
 
+### `bundled_ollama.py`
+
+The text embedder an installed copy ships with: a CPU-only Ollama and `nomic-embed-text` under
+`<app>/ollama/`, staged at build time by `scripts/fetch_ollama.py` (pinned release, pinned model
+digests), because the customer's network blocks ollama.com and the model registry. `config`
+points `OLLAMA_URL` at it (`127.0.0.1:11435`) when it is present and the user has not set one.
+`ensure_running()` starts it on first need, with its own `OLLAMA_MODELS`; `embedding` calls it
+again when a connection fails, so a reboot or an upgrade heals itself. `stop()` (the
+`stop-embedder` command) is what the installers run before replacing or deleting the directory
+it runs from, and only kills a process recorded in `ollama.pid` that is still named ollama.
+
 ### `images.py` and `chunking.py`
 
 Perceptual hashing for creative-reuse detection, and chunk packing at 1,800 characters. One
@@ -482,7 +493,7 @@ rather than code.
 ## 7. Running the tests
 
 ```bash
-python -m pytest -q                              # everything (~5 min, ~2,950 tests)
+python -m pytest -q                              # everything (~5 min, ~3,000 tests)
 python -m pytest tests/test_gaps.py -q           # one file
 python -m pytest -q -p no:randomly               # fixed order when bisecting
 ```
