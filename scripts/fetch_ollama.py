@@ -205,6 +205,19 @@ def verify_models(models: Path) -> None:
                 raise SystemExit(f"{manifest} names {name}, which is not in {blobs}")
 
 
+def readable_by_all(root: Path) -> None:
+    """Every staged file readable, every directory listable, by anyone. Ollama writes some of
+    its model store owner-only (models/metadata/*.json is 0600), and the macOS package stages
+    the bundle as root while install.sh copies it as the user: `cp` was refused, measured on a
+    runner. What the owner can execute, everyone can."""
+    for path in [root, *root.rglob("*")]:
+        if path.is_symlink():
+            continue
+        mode = path.stat().st_mode
+        wanted = 0o755 if path.is_dir() or mode & 0o100 else 0o644
+        os.chmod(path, mode | wanted)
+
+
 def stage(dest: Path, cache: Path) -> None:
     # Absolute: the runtime is started with its own directory as the working directory, and
     # a relative path (which is what CI passes) would then name a file that is not there.
@@ -240,6 +253,7 @@ def stage(dest: Path, cache: Path) -> None:
     verify_models(models)
     # What the product compares a running server against, to replace an older one.
     (dest / "VERSION").write_text(OLLAMA_VERSION.lstrip("v") + "\n", encoding="utf-8")
+    readable_by_all(dest)
     size = sum(p.stat().st_size for p in dest.rglob("*") if p.is_file())
     print(f"staged Ollama {OLLAMA_VERSION} + {MODEL} in {dest} ({size / 1048576:.0f} MB)")
 

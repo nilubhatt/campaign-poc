@@ -446,37 +446,43 @@ def _start_locked(deadline: float) -> bool:
         # a start) would run past it and could misread a slow lookup as "nobody owns this".
         return _answering() or _fail("ran out of time waiting for another process to start "
                                      "the bundled embedder; try again")
-    version = _version()
-    if version is not None:
-        pid, exe = _listener(deadline)
-        if pid is None:
-            if version and version == expected_version():
-                # Answering with our version, owner not visible (another account's process):
-                # use it rather than fight it.
-                last_problem = None
-                return True
-            if version:
-                return _fail(
-                    f"an Ollama {version} that this account cannot see is answering on port "
-                    f"{config.BUNDLED_OLLAMA_PORT}, probably this product's embedder started by "
-                    f"another account. Stop it from that account, or set "
-                    f"CAMPAIGN_POC_BUNDLED_OLLAMA_PORT to a free port.")
-        if pid is not None and exe and looks_bundled(exe):
-            if _same_file(exe, binary()) and version == (expected_version() or version):
-                last_problem = None
-                return True
-            # Another install's, or an older version: replace it. Not while a start failed
-            # moments ago, which would leave nothing answering at all.
-            if _recently_failed():
-                return False
-            if not _kill(pid, deadline):
-                return _fail(f"could not stop the previous bundled embedder (pid {pid}, {exe}), "
-                             f"so this install's cannot start")
-        else:
+    # The listener decides, not whether the version probe answered in time: a slow answer
+    # from an old server read as "nothing running", a second server was started that could
+    # not bind, and the old one answering was taken for the new one (measured on a CI runner).
+    version = _version(timeout=3.0)
+    pid, exe = _listener(deadline)
+    if pid is None and version is not None:
+        if version and version == expected_version():
+            # Answering with our version, owner not visible (another account's process):
+            # use it rather than fight it.
+            last_problem = None
+            return True
+        if version:
+            return _fail(
+                f"an Ollama {version} that this account cannot see is answering on port "
+                f"{config.BUNDLED_OLLAMA_PORT}, probably this product's embedder started by "
+                f"another account. Stop it from that account, or set "
+                f"CAMPAIGN_POC_BUNDLED_OLLAMA_PORT to a free port.")
+    if pid is not None:
+        if not (exe and looks_bundled(exe)):
             return _fail(
                 f"port {config.BUNDLED_OLLAMA_PORT} is in use by another program, so the "
                 f"bundled embedder cannot start. Set CAMPAIGN_POC_BUNDLED_OLLAMA_PORT to a free "
                 f"port.")
+        if _same_file(exe, binary()):
+            if version is None:
+                # Ours, listening, not answering yet: starting up, or busy loading.
+                version = _await_version(deadline)
+            if version is not None and version == (expected_version() or version):
+                last_problem = None
+                return True
+        # Another install's, an older version, or ours and not answering at all: replace it.
+        # Not while a start failed moments ago, which would leave nothing answering at all.
+        if _recently_failed():
+            return False
+        if not _kill(pid, deadline):
+            return _fail(f"could not stop the previous bundled embedder (pid {pid}, {exe}), "
+                         f"so this install's cannot start")
     if _recently_failed():
         return False
     try:
@@ -484,21 +490,31 @@ def _start_locked(deadline: float) -> bool:
     except OSError as exc:
         return _fail(f"could not start the bundled embedder {binary()}: {exc}")
     while time.monotonic() < deadline:
-        if _answering():
-            if proc.poll() is None:
-                # Recorded only once it serves: a starter that lost a race must not leave its
-                # dead pid where the live one's belongs.
-                with contextlib.suppress(OSError):
-                    _pid_file().write_text(
-                        json.dumps({"pid": proc.pid, "binary": str(binary())}),
-                        encoding="utf-8")
-            last_problem = None
-            return True
         if proc.poll() is not None:
             return _fail(f"the bundled embedder exited at start ({proc.returncode}): "
                          f"{_log_tail() or 'see ' + str(log_file())}")
+        # Success is THIS process answering: something else answering on the port while it
+        # is still trying to bind is not it.
+        if _answering() and _listener_pid(deadline) in (proc.pid, None):
+            # Recorded only once it serves.
+            with contextlib.suppress(OSError):
+                _pid_file().write_text(
+                    json.dumps({"pid": proc.pid, "binary": str(binary())}),
+                    encoding="utf-8")
+            last_problem = None
+            return True
         time.sleep(0.25)
     return _fail(f"the bundled embedder did not answer in time; see {log_file()}")
+
+
+def _await_version(deadline: float) -> Optional[str]:
+    until = min(deadline, time.monotonic() + 10)
+    while time.monotonic() < until:
+        version = _version(timeout=2.0)
+        if version is not None:
+            return version
+        time.sleep(0.25)
+    return None
 
 
 def _recently_failed() -> bool:

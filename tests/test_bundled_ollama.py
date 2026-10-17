@@ -191,6 +191,9 @@ FAKE_OLLAMA = textwrap.dedent("""\
         fh.write(str(os.getpid()) + " ")
     if os.path.exists(os.path.join(here, "SLOW")):
         time.sleep(1.5)            # a real server takes a moment to bind
+    if os.path.exists(os.path.join(here, "DIE")):
+        print("Error: listen tcp: bind: address already in use")
+        sys.exit(1)
     with open(os.path.join(here, "env.json"), "w") as fh:
         json.dump({{k: v for k, v in os.environ.items() if k.startswith("OLLAMA_")}}, fh)
     version = open(os.path.join(here, "REPORTS")).read().strip()
@@ -385,20 +388,53 @@ def test_something_else_on_the_port_is_left_alone_and_named(fake_runtime, capsys
 
 
 def test_a_start_that_dies_is_not_waited_on_or_retried_at_once(fake_runtime, monkeypatch):
-    # The port is held by something that does not speak HTTP: the server cannot bind and
-    # exits at once. Waiting the whole budget for it, again for every chunk of a deck, is
-    # what this guards against.
+    # The server exits as soon as it starts (here: it says it cannot bind). Waiting the
+    # whole budget for it, again for every chunk of a deck, is what this guards against.
+    (fake_runtime.parent / "DIE").write_text("")
+    started = time.monotonic()
+    assert bundled_ollama.ensure_running(timeout=20) is False
+    assert time.monotonic() - started < 10
+    assert "exited at start" in bundled_ollama.last_problem
+    assert "address already in use" in bundled_ollama.last_problem, "the log's reason is lost"
+
+    with monkeypatch.context() as m:
+        m.setattr(bundled_ollama, "_spawn", lambda: pytest.fail("retried at once"))
+        assert bundled_ollama.ensure_running(timeout=20) is False
+
+
+def test_something_on_the_port_that_does_not_speak_http_is_refused_without_a_start(fake_runtime, monkeypatch):
     with socket.socket() as blocker:
         blocker.bind(("127.0.0.1", config.BUNDLED_OLLAMA_PORT))
         blocker.listen()
-        monkeypatch.setattr(bundled_ollama, "_version", lambda timeout=1.0: None)
-        started = time.monotonic()
-        assert bundled_ollama.ensure_running(timeout=20) is False
+        fake_runtime.stands_for[os.getpid()] = sys.executable      # what it really is
+        with monkeypatch.context() as m:
+            m.setattr(bundled_ollama, "_spawn", lambda: pytest.fail("started over a foreign listener"))
+            started = time.monotonic()
+            assert bundled_ollama.ensure_running(timeout=20) is False
         assert time.monotonic() - started < 10
-        assert "exited at start" in bundled_ollama.last_problem
+        assert "in use by another program" in bundled_ollama.last_problem
 
-        monkeypatch.setattr(bundled_ollama, "_spawn", lambda: pytest.fail("retried at once"))
-        assert bundled_ollama.ensure_running(timeout=20) is False
+
+def test_a_slow_answer_from_an_old_server_is_not_taken_for_a_new_one(fake_runtime, monkeypatch):
+    # Measured on a CI runner: the old server's version came back after the probe's timeout,
+    # a second server was started that could not bind, and the old one answering was taken
+    # for it. The listener decides now.
+    assert bundled_ollama.ensure_running(timeout=15)
+    old = _pid()
+    (fake_runtime.parent / "VERSION").write_text("10.0.0")
+    (fake_runtime.parent / "REPORTS").write_text("10.0.0")
+    real_version = bundled_ollama._version
+    calls = []
+
+    def slow_first(timeout=1.0):
+        calls.append(1)
+        return None if len(calls) == 1 else real_version(timeout)
+
+    with monkeypatch.context() as m:
+        m.setattr(bundled_ollama, "_version", slow_first)
+        assert bundled_ollama.ensure_running(timeout=20)
+    assert _gone(old), "the old server is still the one answering"
+    assert bundled_ollama._version() == "10.0.0"
 
 
 def test_a_stale_server_is_not_killed_while_starts_are_failing(fake_runtime, monkeypatch):
@@ -745,6 +781,31 @@ def test_the_windows_installer_stops_the_embedder_and_ships_its_model_uncompress
     install = iss[iss.index("procedure InstallOllama"):]
     install = install[:install.index("\nend;")]
     assert install.index("ollama\\models") < install.index("OllamaSetup.exe")
+
+
+def test_the_windows_installer_leaves_no_embedder_running_after_its_self_test():
+    iss = (ROOT / "installer" / "windows" / "campaign-intelligence.iss").read_text(encoding="utf-8")
+    step = iss[iss.index("procedure CurStepChanged"):]
+    assert step.index("SelfTest()") < step.index("StopEmbedder()") < step.index("ConfigureDesktop()")
+    stop = iss[iss.index("procedure StopEmbedder"):]
+    assert "stop-embedder" in stop[:stop.index("\nend;")]
+
+
+def test_staged_files_are_readable_by_the_account_that_installs_them(tmp_path):
+    # The macOS package stages as root and copies as the user; Ollama writes some files 0600.
+    store = tmp_path / "ollama" / "models" / "metadata"
+    store.mkdir(parents=True)
+    (store / "sha256-x.json").write_text("{}")
+    os.chmod(store / "sha256-x.json", 0o600)
+    tool = tmp_path / "ollama" / "ollama"
+    tool.write_text("")
+    os.chmod(tool, 0o700)
+
+    fetch_ollama.readable_by_all(tmp_path / "ollama")
+
+    assert (store / "sha256-x.json").stat().st_mode & 0o777 == 0o644
+    assert tool.stat().st_mode & 0o777 == 0o755
+    assert store.stat().st_mode & 0o755 == 0o755
 
 
 def test_stop_embedder_is_a_command():

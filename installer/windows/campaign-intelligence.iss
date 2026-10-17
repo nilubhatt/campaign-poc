@@ -303,6 +303,18 @@ begin
   Exec(ExpandConstant('{app}\{#AppExe}'), 'init', '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
+procedure StopEmbedder();
+var
+  Code: Integer;
+begin
+  // The self-test started the bundled embedder, and it outlives the process that started it.
+  // Left running, the installer is not finished in the eyes of anything that waits for it and
+  // its descendants: `Start-Process -Wait` (CI, and the IT tools that deploy this) hung until
+  // its timeout. The first real use starts it again.
+  Exec(ExpandConstant('{app}\{#AppExe}'), 'stop-embedder', '', SW_HIDE,
+       ewWaitUntilTerminated, Code);
+end;
+
 procedure ConfigureDesktop();
 var
   Code: Integer;
@@ -355,6 +367,7 @@ begin
     InstallOllama();
     InitData();
     SelfTest();
+    StopEmbedder();
     ConfigureDesktop();
   end;
 end;
