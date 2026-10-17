@@ -508,6 +508,25 @@ def test_a_start_whose_listener_cannot_be_looked_up_still_counts_when_it_answers
         assert bundled_ollama.ensure_running(timeout=3, warm=False) is True
 
 
+def test_one_lookup_that_named_someone_else_rules_out_the_fallback(fake_runtime, monkeypatch):
+    answers = iter([(True, 1)] + [(False, None)] * 1000)
+    with monkeypatch.context() as m:
+        m.setattr(bundled_ollama, "_listener", lambda deadline=None: (None, None))   # port free
+        m.setattr(bundled_ollama, "_lookup_listener", lambda deadline=None: next(answers))
+        assert bundled_ollama.ensure_running(timeout=3, warm=False) is False
+
+
+def test_an_unreadable_proc_is_cannot_tell_not_nobody(monkeypatch):
+    def denied(self, *a, **k):
+        raise PermissionError(13, "denied")
+    monkeypatch.setattr(Path, "read_text", denied)
+    with pytest.raises(OSError):
+        bundled_ollama._linux_listener_pid(11435)
+    monkeypatch.setattr(sys, "platform", "linux")
+    if os.name != "nt":
+        assert bundled_ollama._lookup_listener() == (False, None)
+
+
 def test_stop_never_kills_a_process_that_is_not_ours(app):
     # A pid outlives nothing: after a reboot the recorded number can be anything. This
     # process is python, so the real executable check must refuse it.

@@ -119,9 +119,9 @@ def _version(timeout: float = 1.0) -> Optional[str]:
         return ""
 
 
-def _answering() -> bool:
+def _answering(deadline: Optional[float] = None) -> bool:
     # 2 s, not 1: a server busy loading the model answers /api/version late.
-    return _version(timeout=2.0) is not None
+    return _version(timeout=_left(deadline, 2.0)) is not None
 
 
 # ── who is listening, and what is it ───────────────────────────────────────────────────
@@ -162,15 +162,20 @@ def _linux_listener_pid(port: int) -> Optional[int]:
     """From /proc, so no `ss` or `lsof` is needed: the listening socket's inode, then the
     process holding it (only this account's processes are readable, which is the point)."""
     inodes = set()
+    readable = False
     for table in ("/proc/net/tcp", "/proc/net/tcp6"):
         try:
             lines = Path(table).read_text().splitlines()[1:]
+            readable = True
         except OSError:
             continue
         for line in lines:
             fields = line.split()
             if len(fields) > 9 and fields[3] == "0A" and int(fields[1].split(":")[1], 16) == port:
                 inodes.add(fields[9])
+    if not readable:
+        # A restricted /proc is "cannot tell", not "nobody is listening".
+        raise OSError("neither /proc/net/tcp nor /proc/net/tcp6 can be read")
     if not inodes:
         return None
     for fd_dir in Path("/proc").glob("[0-9]*/fd"):
@@ -455,7 +460,7 @@ def _start_locked(deadline: float) -> bool:
     if time.monotonic() >= deadline:
         # The budget went on waiting for another starter. Every step below (a lookup, a kill,
         # a start) would run past it and could misread a slow lookup as "nobody owns this".
-        return _answering() or _fail("ran out of time waiting for another process to start "
+        return _answering(deadline) or _fail("ran out of time waiting for another process to start "
                                      "the bundled embedder; try again")
     # The listener decides, not whether the version probe answered in time: a slow answer
     # from an old server read as "nothing running", a second server was started that could
@@ -507,7 +512,7 @@ def _start_locked(deadline: float) -> bool:
         proc = _spawn()
     except OSError as exc:
         return _fail(f"could not start the bundled embedder {binary()}: {exc}")
-    unconfirmed = False
+    any_lookup_worked = False
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             return _fail(f"the bundled embedder exited at start ({proc.returncode}): "
@@ -515,13 +520,13 @@ def _start_locked(deadline: float) -> bool:
         # Success is THIS process answering: something else answering on the port while it
         # is still trying to bind is not it. Its own child is always visible to this account,
         # so a lookup that worked and found another pid, or none, is not success.
-        if _answering():
+        if _answering(deadline):
             worked, owner = _lookup_listener(deadline)
             if owner == proc.pid:
                 return _started(proc)
-            unconfirmed = not worked
+            any_lookup_worked = any_lookup_worked or worked
         time.sleep(0.25)
-    if unconfirmed and proc.poll() is None and _answering():
+    if not any_lookup_worked and proc.poll() is None and _answering(deadline):
         # Every lookup failed (the tool is unavailable), but the process started is alive and
         # the port answers: the best this machine can tell.
         return _started(proc)
@@ -541,7 +546,7 @@ def _started(proc: subprocess.Popen) -> bool:
 def _await_version(deadline: float) -> Optional[str]:
     until = min(deadline, time.monotonic() + 10)
     while time.monotonic() < until:
-        version = _version(timeout=2.0)
+        version = _version(timeout=_left(until, 2.0))
         if version is not None:
             return version
         time.sleep(0.25)
