@@ -120,31 +120,42 @@ def _version(timeout: float = 1.0) -> Optional[str]:
 
 
 def _answering() -> bool:
-    return _version() is not None
+    # 2 s, not 1: a server busy loading the model answers /api/version late.
+    return _version(timeout=2.0) is not None
 
 
 # ── who is listening, and what is it ───────────────────────────────────────────────────
 
 def _listener_pid(deadline: Optional[float] = None) -> Optional[int]:
     """The pid listening on the bundled port, when this account can see it."""
-    port = config.BUNDLED_OLLAMA_PORT
+    return _lookup_listener(deadline)[1]
+
+
+def _lookup_listener(deadline: Optional[float] = None) -> tuple[bool, Optional[int]]:
+    """(whether the lookup itself worked, the pid). A lookup that timed out or failed is not
+    "nobody is listening", and the start loop must not read it as its own server."""
     try:
-        if os.name == "nt":
-            out = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                 f"(Get-NetTCPConnection -LocalPort {port} -State Listen "
-                 f"-ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess"],
-                capture_output=True, text=True, timeout=_left(deadline, 20), **_HIDDEN
-            ).stdout.strip()
-            return int(out) if out.isdigit() else None
-        if sys.platform == "darwin":
-            out = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
-                                 capture_output=True, text=True,
-                                 timeout=_left(deadline, 10)).stdout.split()
-            return int(out[0]) if out and out[0].isdigit() else None
-        return _linux_listener_pid(port)
+        return True, _lookup_listener_or_raise(deadline)
     except (OSError, subprocess.SubprocessError, ValueError):
-        return None
+        return False, None
+
+
+def _lookup_listener_or_raise(deadline: Optional[float]) -> Optional[int]:
+    port = config.BUNDLED_OLLAMA_PORT
+    if os.name == "nt":
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             f"(Get-NetTCPConnection -LocalPort {port} -State Listen "
+             f"-ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess"],
+            capture_output=True, text=True, timeout=_left(deadline, 20), **_HIDDEN
+        ).stdout.strip()
+        return int(out) if out.isdigit() else None
+    if sys.platform == "darwin":
+        out = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                             capture_output=True, text=True,
+                             timeout=_left(deadline, 10)).stdout.split()
+        return int(out[0]) if out and out[0].isdigit() else None
+    return _linux_listener_pid(port)
 
 
 def _linux_listener_pid(port: int) -> Optional[int]:
@@ -463,6 +474,13 @@ def _start_locked(deadline: float) -> bool:
                 f"{config.BUNDLED_OLLAMA_PORT}, probably this product's embedder started by "
                 f"another account. Stop it from that account, or set "
                 f"CAMPAIGN_POC_BUNDLED_OLLAMA_PORT to a free port.")
+    if pid is None and version == "":
+        # Something answers HTTP on the port and is not an Ollama; it cannot be seen, so it
+        # is another account's or another program's. A start would only fail to bind.
+        return _fail(
+            f"port {config.BUNDLED_OLLAMA_PORT} is in use by another program, so the "
+            f"bundled embedder cannot start. Set CAMPAIGN_POC_BUNDLED_OLLAMA_PORT to a free "
+            f"port.")
     if pid is not None:
         if not (exe and looks_bundled(exe)):
             return _fail(
@@ -489,22 +507,35 @@ def _start_locked(deadline: float) -> bool:
         proc = _spawn()
     except OSError as exc:
         return _fail(f"could not start the bundled embedder {binary()}: {exc}")
+    unconfirmed = False
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             return _fail(f"the bundled embedder exited at start ({proc.returncode}): "
                          f"{_log_tail() or 'see ' + str(log_file())}")
         # Success is THIS process answering: something else answering on the port while it
-        # is still trying to bind is not it.
-        if _answering() and _listener_pid(deadline) in (proc.pid, None):
-            # Recorded only once it serves.
-            with contextlib.suppress(OSError):
-                _pid_file().write_text(
-                    json.dumps({"pid": proc.pid, "binary": str(binary())}),
-                    encoding="utf-8")
-            last_problem = None
-            return True
+        # is still trying to bind is not it. Its own child is always visible to this account,
+        # so a lookup that worked and found another pid, or none, is not success.
+        if _answering():
+            worked, owner = _lookup_listener(deadline)
+            if owner == proc.pid:
+                return _started(proc)
+            unconfirmed = not worked
         time.sleep(0.25)
+    if unconfirmed and proc.poll() is None and _answering():
+        # Every lookup failed (the tool is unavailable), but the process started is alive and
+        # the port answers: the best this machine can tell.
+        return _started(proc)
     return _fail(f"the bundled embedder did not answer in time; see {log_file()}")
+
+
+def _started(proc: subprocess.Popen) -> bool:
+    global last_problem
+    # Recorded only once it serves.
+    with contextlib.suppress(OSError):
+        _pid_file().write_text(json.dumps({"pid": proc.pid, "binary": str(binary())}),
+                               encoding="utf-8")
+    last_problem = None
+    return True
 
 
 def _await_version(deadline: float) -> Optional[str]:

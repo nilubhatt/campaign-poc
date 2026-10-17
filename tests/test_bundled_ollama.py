@@ -482,6 +482,32 @@ def test_alive_does_not_raise_for_a_pid_that_is_gone():
     assert bundled_ollama._alive(2 ** 22 + 54321) is False
 
 
+def test_an_invisible_listener_that_is_not_ollama_is_named_without_a_start(fake_runtime, monkeypatch):
+    with monkeypatch.context() as m:
+        m.setattr(bundled_ollama, "_version", lambda timeout=1.0: "")
+        m.setattr(bundled_ollama, "_listener", lambda deadline=None: (None, None))
+        m.setattr(bundled_ollama, "_spawn", lambda: pytest.fail("started into an occupied port"))
+        assert bundled_ollama.ensure_running(timeout=5) is False
+    assert "CAMPAIGN_POC_BUNDLED_OLLAMA_PORT" in bundled_ollama.last_problem
+
+
+def test_a_start_is_success_only_when_its_own_process_answers(fake_runtime, monkeypatch):
+    # Lookups that work and name someone else are not success, however the port answers.
+    with monkeypatch.context() as m:
+        m.setattr(bundled_ollama, "_listener", lambda deadline=None: (None, None))   # port free
+        m.setattr(bundled_ollama, "_lookup_listener", lambda deadline=None: (True, 1))
+        assert bundled_ollama.ensure_running(timeout=3, warm=False) is False
+    assert "did not answer in time" in bundled_ollama.last_problem
+
+
+def test_a_start_whose_listener_cannot_be_looked_up_still_counts_when_it_answers(fake_runtime, monkeypatch):
+    # The lookup tool failing everywhere must not stop the embedder from ever starting.
+    with monkeypatch.context() as m:
+        m.setattr(bundled_ollama, "_listener", lambda deadline=None: (None, None))   # port free
+        m.setattr(bundled_ollama, "_lookup_listener", lambda deadline=None: (False, None))
+        assert bundled_ollama.ensure_running(timeout=3, warm=False) is True
+
+
 def test_stop_never_kills_a_process_that_is_not_ours(app):
     # A pid outlives nothing: after a reboot the recorded number can be anything. This
     # process is python, so the real executable check must refuse it.
