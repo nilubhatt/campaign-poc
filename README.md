@@ -134,7 +134,7 @@ loaded, and the installers stop it before an upgrade or uninstall.
 
 ### macOS
 
-**One command, in Terminal** (Apple silicon; from the release after v0.4.1, the first that
+**One command, in Terminal** (Apple silicon; from v0.5.0, the first release that
 publishes the script — nothing to copy out of a guide, no security prompt):
 
 ```bash
