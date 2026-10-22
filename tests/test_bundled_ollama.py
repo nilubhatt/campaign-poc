@@ -224,7 +224,10 @@ def fake_runtime(app, monkeypatch):
     (app / "campaign-intelligence").write_text("")
     binary.write_text(FAKE_OLLAMA.format(python=sys.executable))
     binary.chmod(0o755)
-    (binary.parent / "VERSION").write_text("9.9.9")
+    # VERSION lives in the runtime directory (fetch_ollama writes it there), which on Linux is
+    # one level above bin/ollama; REPORTS sits beside the fake binary, which reads it.
+    runtime = config.app_dir() / "ollama"
+    (runtime / "VERSION").write_text("9.9.9")
     (binary.parent / "REPORTS").write_text("9.9.9")
     monkeypatch.setattr(config, "EMBED_PROVIDER", "ollama")
     monkeypatch.setattr(config, "BUNDLED_OLLAMA_PORT", _free_port())
@@ -233,7 +236,8 @@ def fake_runtime(app, monkeypatch):
     stands_for = {}
     monkeypatch.setattr(bundled_ollama, "_exe_of",
                         lambda pid: stands_for.get(pid, str(binary)) if _alive(pid) else None)
-    yield types.SimpleNamespace(path=binary, parent=binary.parent, stands_for=stands_for)
+    yield types.SimpleNamespace(path=binary, parent=binary.parent, runtime=runtime,
+                                stands_for=stands_for)
     bundled_ollama.stop()
 
 
@@ -302,7 +306,7 @@ def test_an_older_version_on_the_same_path_is_replaced(fake_runtime):
     # An upgrade in place: same path, new runtime, and the old server still running.
     assert bundled_ollama.ensure_running(timeout=15)
     old = _pid()
-    (fake_runtime.parent / "VERSION").write_text("10.0.0")
+    (fake_runtime.runtime / "VERSION").write_text("10.0.0")
     (fake_runtime.parent / "REPORTS").write_text("10.0.0")   # what a new start will say
 
     assert bundled_ollama.ensure_running(timeout=15)
@@ -421,7 +425,7 @@ def test_a_slow_answer_from_an_old_server_is_not_taken_for_a_new_one(fake_runtim
     # for it. The listener decides now.
     assert bundled_ollama.ensure_running(timeout=15)
     old = _pid()
-    (fake_runtime.parent / "VERSION").write_text("10.0.0")
+    (fake_runtime.runtime / "VERSION").write_text("10.0.0")
     (fake_runtime.parent / "REPORTS").write_text("10.0.0")
     real_version = bundled_ollama._version
     calls = []

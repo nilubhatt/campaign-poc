@@ -629,7 +629,8 @@ jobs:
               path = pathlib.Path(name)
               if path.is_file():
                   digest = hashlib.sha256(path.read_bytes()).hexdigest()
-                  pathlib.Path(name + ".sha256").write_text(f"{digest}  {name}\n")
+                  # newline="\n": on Windows the default writes CRLF, which `shasum -c` rejects.
+                  pathlib.Path(name + ".sha256").write_text(f"{digest}  {name}\n", newline="\n")
                   print(f"{digest}  {name}")
           PY
           if [ "${{ runner.os }}" = "macOS" ]; then cp installer/macos/install-macos.sh .; fi

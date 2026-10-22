@@ -8,6 +8,7 @@ import hashlib
 import http.server
 import json
 import os
+import shutil
 import subprocess
 import tarfile
 import threading
@@ -16,15 +17,17 @@ from pathlib import Path
 import pytest
 import yaml
 
+pytestmark = pytest.mark.skipif(
+    not (shutil.which("curl") and shutil.which("shasum")),
+    reason="the script needs curl and shasum, which every Mac (and the CI runner) has")
+
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "installer" / "macos" / "install-macos.sh"
 ASSET = "campaign-intelligence-macos-arm64.tar.gz"
 
 FAKE_INSTALL = """#!/usr/bin/env bash
 # Records what it was given, as the bundle's install.sh would be run.
-stdin_is_devnull=no
-if [ ! -t 0 ] && [ "$(cat | wc -c | tr -d ' ')" = 0 ]; then stdin_is_devnull=yes; fi
-printf '{"args": "%s", "stdin_empty": "%s", "dir": "%s"}' "$*" "$stdin_is_devnull" "$(cd "$(dirname "$0")" && pwd)" > "$RECORD"
+printf '{"args": "%s", "dir": "%s"}' "$*" "$(cd "$(dirname "$0")" && pwd)" > "$RECORD"
 """
 
 
@@ -51,19 +54,24 @@ def release(tmp_path):
     server.server_close()
 
 
-def _shims(tmp_path, system="Darwin", machine="arm64"):
+def _shims(tmp_path, system="Darwin", machine="arm64", hardware=None):
     shims = tmp_path / "shims"
     shims.mkdir(exist_ok=True)
     (shims / "uname").write_text(
         f'#!/bin/sh\ncase "$1" in -s) echo {system};; -m) echo {machine};; *) echo {system};; esac\n')
     (shims / "uname").chmod(0o755)
+    # The hardware question the script asks first; a Rosetta shell answers uname -m wrongly.
+    arm = "1" if (hardware or machine) == "arm64" else "0"
+    (shims / "sysctl").write_text(f"#!/bin/sh\necho {arm}\n")
+    (shims / "sysctl").chmod(0o755)
     return shims
 
 
-def _run(tmp_path, base, *args, system="Darwin", machine="arm64", piped=False):
+def _run(tmp_path, base, *args, system="Darwin", machine="arm64", piped=False, script=None,
+         hardware=None, extra_env=None):
     record = tmp_path / "record.json"
     env = {
-        "PATH": f"{_shims(tmp_path, system, machine)}{os.pathsep}{os.environ['PATH']}",
+        "PATH": f"{_shims(tmp_path, system, machine, hardware)}{os.pathsep}{os.environ['PATH']}",
         "HOME": str(tmp_path / "home"),
         "TMPDIR": str(tmp_path / "tmp"),
         "CAMPAIGN_INTELLIGENCE_RELEASE_URL": base,
@@ -72,8 +80,9 @@ def _run(tmp_path, base, *args, system="Darwin", machine="arm64", piped=False):
     (tmp_path / "tmp").mkdir(exist_ok=True)
     for var in ("NO_PROXY", "no_proxy"):
         env[var] = "127.0.0.1"
+    env.update(extra_env or {})
     if piped:   # exactly as published: curl ... | bash
-        result = subprocess.run(["bash", "-s", "--", *args], input=SCRIPT.read_text(),
+        result = subprocess.run(["bash", "-s", "--", *args], input=script or SCRIPT.read_text(),
                                 capture_output=True, text=True, env=env, timeout=120)
     else:
         result = subprocess.run(["bash", str(SCRIPT), *args], capture_output=True, text=True,
@@ -136,6 +145,21 @@ def test_a_machine_it_cannot_serve_is_told_before_anything_downloads(tmp_path, r
     assert says in result.stderr
 
 
+def test_a_rosetta_terminal_on_apple_silicon_is_not_turned_away(tmp_path, release):
+    # A shell running under Rosetta says x86_64; the hardware says arm64, and that decides.
+    _, base = release
+    result, ran = _run(tmp_path, base, machine="x86_64", hardware="arm64")
+    assert result.returncode == 0 and ran is not None, result.stderr
+
+
+def test_a_release_that_does_not_exist_is_named_not_blamed_on_the_network(tmp_path, release):
+    served, base = release
+    (served / f"{ASSET}.sha256").unlink()
+    result, ran = _run(tmp_path, base, extra_env={"CAMPAIGN_INTELLIGENCE_VERSION": "0.5.0"})
+    assert result.returncode != 0 and ran is None
+    assert "no release 0.5.0" in result.stderr and "internet" not in result.stderr
+
+
 def test_the_release_publishes_the_script_and_a_checksum_beside_every_download():
     steps = yaml.safe_load((ROOT / ".github" / "workflows" / "build.yml")
                            .read_text(encoding="utf-8"))["jobs"]["build"]["steps"]
@@ -153,7 +177,40 @@ def test_the_release_publishes_the_script_and_a_checksum_beside_every_download()
     assert f'asset="{ASSET}"' in SCRIPT.read_text()
 
 
-def test_the_script_is_all_or_nothing_when_cut_short():
-    # A download cut short must run nothing: the body is a function called on the last line.
-    lines = [l for l in SCRIPT.read_text().splitlines() if l.strip()]
-    assert lines[-1] == 'main "$@"'
+def test_the_script_is_all_or_nothing_when_cut_short(tmp_path, release):
+    # A download cut short by the network, at any point, runs nothing.
+    _, base = release
+    text = SCRIPT.read_text()
+    for cut in range(200, len(text) - 1, max(1, len(text) // 25)):
+        result, ran = _run(tmp_path, base, piped=True, script=text[:cut])
+        assert ran is None, f"a script cut at byte {cut} of {len(text)} installed something"
+    result, ran = _run(tmp_path, base, piped=True, script=text)
+    assert ran is not None
+
+
+def test_the_digest_is_compared_whatever_file_the_checksum_line_names(tmp_path, release):
+    # `shasum -c` checks the file a line NAMES; a line naming another file proved nothing
+    # about the download. The script compares the digest of the file it downloaded.
+    served, base = release
+    other = hashlib.sha256(b"some other file").hexdigest()
+    (served / f"{ASSET}.sha256").write_text(f"{other}  /etc/hosts\n")
+    result, ran = _run(tmp_path, base)
+    assert result.returncode != 0 and ran is None
+    assert "checksum does not match" in result.stderr
+
+
+def test_a_checksum_with_windows_line_endings_is_still_read(tmp_path, release):
+    served, base = release
+    line = (served / f"{ASSET}.sha256").read_text().strip()
+    (served / f"{ASSET}.sha256").write_bytes((line + "\r\n").encode())
+    result, ran = _run(tmp_path, base)
+    assert result.returncode == 0 and ran is not None, result.stderr
+
+
+def test_a_checksum_file_that_is_not_a_sha256_stops_before_the_download(tmp_path, release):
+    served, base = release
+    (served / f"{ASSET}.sha256").write_text("<html>blocked by policy</html>\n")
+    result, ran = _run(tmp_path, base)
+    assert result.returncode != 0 and ran is None
+    assert "not a SHA-256" in result.stderr
+    assert "Downloading" not in result.stdout, "800 MB fetched before the checksum was read"
