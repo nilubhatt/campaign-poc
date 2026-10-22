@@ -158,7 +158,37 @@ TRANSPORT_CEILING_SECONDS = _positive_seconds("CAMPAIGN_POC_TRANSPORT_CEILING_SE
 # Default is Ollama — LOCAL and FREE (run `ollama pull nomic-embed-text` once).
 # Voyage is an optional swap (better quality, but a paid API key), never the default.
 EMBED_PROVIDER = os.getenv("CAMPAIGN_POC_EMBED_PROVIDER", "ollama").lower()
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+# A build that ships its own Ollama (bundled_ollama.py) runs it on a private port, because
+# the customer's network blocks both ollama.com and the model registry, so the embedder an
+# installer used to download could never arrive. OLLAMA_URL, when set, still wins: it is how
+# somebody points the product at an Ollama they run themselves.
+BUNDLED_OLLAMA_PORT = int(os.getenv("CAMPAIGN_POC_BUNDLED_OLLAMA_PORT", "11435"))
+
+
+def bundled_ollama_binary() -> Path:
+    """Where the shipped Ollama's executable is, in each platform's own release layout:
+    Linux keeps it in bin/ beside lib/ollama/, Windows has ollama.exe beside lib\\ollama\\,
+    and macOS is one flat directory. Each finds its libraries relative to itself."""
+    runtime = app_dir() / "ollama"
+    if os.name == "nt":
+        return runtime / "ollama.exe"
+    if sys.platform == "darwin":
+        return runtime / "ollama"
+    return runtime / "bin" / "ollama"
+
+
+def _bundled_ollama_present() -> bool:
+    return (bundled_ollama_binary().is_file()
+            and (app_dir() / "ollama" / "models" / "manifests").is_dir())
+
+
+def _default_ollama_url() -> str:
+    return os.getenv("OLLAMA_URL") or (
+        f"http://127.0.0.1:{BUNDLED_OLLAMA_PORT}" if _bundled_ollama_present()
+        else "http://localhost:11434")
+
+
+OLLAMA_URL = _default_ollama_url()
 OLLAMA_EMBED_MODEL = os.getenv("CAMPAIGN_POC_OLLAMA_MODEL", "nomic-embed-text")
 # How long Ollama should keep the embedding model resident. Default "-1" = indefinitely,
 # which trades ~270MB of the user's RAM for never paying a model reload inside a tool call —

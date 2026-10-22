@@ -1221,16 +1221,20 @@ def test_ci_does_not_run_a_second_installer_inside_the_silent_install():
     processes. It happened with Ollama ALREADY provisioned and the model pulled, because the
     installer could not see it.
 
-    So CI provisions Ollama itself and deselects the task. The gate still gets a real
-    `text_search` — which is also the commonest state of a customer's machine, one that already
-    has Ollama."""
+    So CI deselects the task. The gate still gets a real `text_search`, from the embedder the
+    bundle now carries (bundled_ollama.py) — and CI no longer provisions an Ollama of its own,
+    because one on the runner would let the gate pass without proving the bundled one."""
     ci = _ci_code()
 
     assert "/TASKS=desktop" in ci, (
         "the silent install still runs the installer's own Ollama task, which is the hang"
     )
     assert ci.count("/TASKS=desktop") >= 2, "only one of the two Windows installs deselects it"
-    assert "Provision Ollama" in ci, "nothing provisions Ollama, so the gate cannot pass"
+    assert "Provision Ollama" not in ci, (
+        "CI installs an Ollama of its own, so the gate's text_search no longer proves the "
+        "bundled embedder")
+    assert "choco install ollama" not in ci and "brew install ollama" not in ci
+    assert "scripts/fetch_ollama.py" in ci, "nothing stages the bundled embedder"
 
 
 def test_an_expected_non_zero_self_test_is_not_the_steps_verdict():

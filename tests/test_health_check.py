@@ -174,7 +174,7 @@ def test_keep_alive_is_sent_in_a_form_ollama_accepts(monkeypatch):
 
     import httpx
     monkeypatch.setattr(httpx, "post",
-                        lambda url, json=None, timeout=None: (sent.update(json or {}), _Resp())[1])
+                        lambda url, json=None, timeout=None, **_: (sent.update(json or {}), _Resp())[1])
 
     embedding._embed_ollama("hello", 5.0)
 

@@ -2,9 +2,9 @@
 ; Compile ON Windows: iscc campaign-intelligence.iss  (Inno Setup 6+).
 ; Expects the PyInstaller bundle already built at ..\..\dist\campaign-intelligence\ (build.ps1).
 ;
-; The installer: copies the bundle to Program Files, optionally installs Ollama + pulls the
-; model, wires Claude Desktop automatically (configure-desktop), and can register a background
-; service (Task Scheduler). Uninstall removes all of it.
+; The installer: copies the bundle, which carries its own text embedder (bundled_ollama.py, so
+; nothing is downloaded), wires Claude Desktop automatically (configure-desktop), and can register
+; a background service (Task Scheduler). Uninstall stops the embedder and removes all of it.
 
 ; Supplied by the build: ISCC.exe /DAppVersion=... reads it from version.py, which is the
 ; single source. It was hard-coded here and had already drifted - version.py said 0.3.0
@@ -51,18 +51,21 @@ UsePreviousAppDir=yes
 UninstallDisplayName={#AppName}
 
 [Files]
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "models\*"; Flags: recursesubdirs createallsubdirs
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "models\*,ollama\models\*"; Flags: recursesubdirs createallsubdirs
 ; The CLIP checkpoint is ~303MB of near-random tensor data: LZMA2/max spends minutes on it
 ; for ~0% gain, and in a solid stream every install pays to decompress it in order. Kept
 ; out of the solid block and stored uncompressed.
 Source: "{#SourceDir}\models\*"; DestDir: "{app}\models"; Flags: recursesubdirs createallsubdirs nocompression solidbreak
+; The bundled embedder's model (bundled_ollama.py): 262MB of quantised weights, the same case.
+; skipifsourcedoesntexist so a bundle built without the embedder still compiles.
+Source: "{#SourceDir}\ollama\models\*"; DestDir: "{app}\ollama\models"; Flags: recursesubdirs createallsubdirs nocompression solidbreak skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\{#AppName} (server)"; Filename: "{app}\{#AppExe}"; Parameters: "serve"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 
 [Tasks]
-Name: "ollama";  Description: "Install Ollama and download the embedding model (needs internet)"; GroupDescription: "Dependencies:"
+Name: "ollama";  Description: "If this build has no embedder of its own: install Ollama and download the model (needs internet)"; GroupDescription: "Dependencies:"
 Name: "desktop"; Description: "Connect Claude Desktop automatically (stdio)"; GroupDescription: "Integration:"
 Name: "service"; Description: "Run the server in the background at logon"; GroupDescription: "Startup:"; Flags: unchecked
 
@@ -83,6 +86,9 @@ Filename: "schtasks.exe"; \
   StatusMsg: "Registering background service..."; Tasks: service; Flags: runhidden
 
 [UninstallRun]
+; First: the bundled embedder runs out of {app}, and a running ollama.exe and its model
+; runner hold files there that the uninstaller would otherwise fail to delete.
+Filename: "{app}\{#AppExe}"; Parameters: "stop-embedder"; Flags: runhidden; RunOnceId: "StopEmbedder"
 Filename: "schtasks.exe"; Parameters: "/Delete /F /TN CampaignIntelligenceServer"; Flags: runhidden; RunOnceId: "DelTask"
 ; Both Unix uninstallers remove the Claude Desktop connector entry; this one did not, so a
 ; Windows uninstall left Claude Desktop pointing at a binary that no longer exists. The
@@ -254,6 +260,10 @@ var
   Script: String;
 begin
   if not WizardIsTaskSelected('ollama') then exit;
+  // This build carries its own Ollama and model (bundled_ollama.py). The customer's network
+  // blocks ollama.com and the model registry, so the download below could never finish there;
+  // the product starts the bundled one itself and the self-test proves it answers.
+  if DirExists(ExpandConstant('{app}\ollama\models')) then exit;
   Say('Installing Ollama and the embedding model. This downloads several hundred MB and can take a few minutes...');
   Script := '-NoProfile -ExecutionPolicy Bypass -Command "' +
             'if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) { ' +
@@ -268,6 +278,19 @@ begin
   Exec('powershell.exe', Script, '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
+// The previous install's bundled embedder runs out of {app}; an upgrade cannot replace
+// ollama.exe or the DLLs its model runner holds open while it does. A build from before the
+// embedder was bundled has no such command, and nothing to stop.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Code: Integer;
+begin
+  Result := '';
+  if FileExists(ExpandConstant('{app}\{#AppExe}')) then
+    Exec(ExpandConstant('{app}\{#AppExe}'), 'stop-embedder', '', SW_HIDE,
+         ewWaitUntilTerminated, Code);
+end;
+
 procedure InitData();
 var
   Code: Integer;
@@ -278,6 +301,18 @@ begin
   // installer, which on Windows may be an administrator installing for somebody else.
   Say('Preparing the data directory...');
   Exec(ExpandConstant('{app}\{#AppExe}'), 'init', '', SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
+procedure StopEmbedder();
+var
+  Code: Integer;
+begin
+  // The self-test started the bundled embedder, and it outlives the process that started it.
+  // Left running, the installer is not finished in the eyes of anything that waits for it and
+  // its descendants: `Start-Process -Wait` (CI, and the IT tools that deploy this) hung until
+  // its timeout. The first real use starts it again.
+  Exec(ExpandConstant('{app}\{#AppExe}'), 'stop-embedder', '', SW_HIDE,
+       ewWaitUntilTerminated, Code);
 end;
 
 procedure ConfigureDesktop();
@@ -332,6 +367,7 @@ begin
     InstallOllama();
     InitData();
     SelfTest();
+    StopEmbedder();
     ConfigureDesktop();
   end;
 end;

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import actions
+import bundled_ollama
 import chunking
 import clip_embed
 import commitments
@@ -763,6 +764,19 @@ def _vision_notice(detail: str) -> dict:
     return notices.notice("visual_search_offline", detail=detail,
                           cause=f"clip_weights_{status.source or 'unknown'}",
                           remedy=status.remedy or notices.remedy_for("visual_search_offline"))
+
+
+def _bundled_embedder_remedy() -> str:
+    """What to do when the embedder this build ships with is not answering. "Run `ollama
+    pull`" is advice for an Ollama the user installed, and on the network this bundle exists
+    for, it is advice nobody can follow."""
+    why = f" Last attempt: {bundled_ollama.last_problem}" if bundled_ollama.last_problem else ""
+    return (f"The embedder ships with this install and runs on {config.OLLAMA_URL}; it is "
+            f"started automatically when something needs it (`campaign-intelligence "
+            f"health-check` starts it too). Its own log is {bundled_ollama.log_file()}. If "
+            f"another program holds that port, set CAMPAIGN_POC_BUNDLED_OLLAMA_PORT to a free "
+            f"one. If the log shows missing files under {bundled_ollama.runtime_dir()}, "
+            f"reinstall.{why}")
 
 
 class _WrongDimension(RuntimeError):
@@ -3674,7 +3688,8 @@ def health_check(conn, *, probe: bool = True) -> dict:
     else:
         try:
             started = time.monotonic()
-            vec = embedding.embed("health check", timeout=probe_timeout)
+            with embedding.without_autostart():
+                vec = embedding.embed("health check", timeout=probe_timeout)
             if len(vec) != config.EMBED_DIM:
                 # Answering is not the same as answering usefully: a different model
                 # returns a different width, and every upload then fails deep inside the
@@ -3684,10 +3699,16 @@ def health_check(conn, *, probe: bool = True) -> dict:
                     f"this library stores {config.EMBED_DIM}")
             model = (f" ({config.OLLAMA_EMBED_MODEL})"
                      if config.EMBED_PROVIDER == "ollama" else "")
+            # Which executable answered, for the bundled embedder: the port is shared by
+            # every install on the machine, and "it answered" is not "this install's answered".
+            served_by = ""
+            if bundled_ollama.in_use():
+                found = bundled_ollama._ours()
+                served_by = f"; served by {found[1]}" if found else ""
             components["text_search"] = {
                 "ok": True,
                 "detail": f"{config.EMBED_PROVIDER} responded in "
-                          f"{time.monotonic() - started:.2f}s{model}",
+                          f"{time.monotonic() - started:.2f}s{model}{served_by}",
             }
         except _WrongDimension as exc:
             components["text_search"] = {
@@ -3715,7 +3736,8 @@ def health_check(conn, *, probe: bool = True) -> dict:
                            if missing_model
                            else f"{config.EMBED_PROVIDER} embedder: {exc}"),
                 "affects": "Searching the library, uploading decks and evaluations.",
-                "remedy": (f"If this is Ollama, check it is running at {config.OLLAMA_URL} "
+                "remedy": (_bundled_embedder_remedy() if bundled_ollama.in_use() else
+                           f"If this is Ollama, check it is running at {config.OLLAMA_URL} "
                            f"and that `ollama pull {config.OLLAMA_EMBED_MODEL}` has been "
                            f"run. If it was just started it may still be loading the "
                            f"model — try again in a minute."),

@@ -67,13 +67,14 @@ or `heuristic`, so you always know what kind of thing you are reading.
 |---|---|
 | Database + **vector search** | SQLite + **`sqlite-vec`** (real KNN; pure-Python cosine fallback if the extension is absent) |
 | File processing | `pypdf` (PDF), `python-pptx` (PPTX) |
-| Text embeddings | **Ollama** `nomic-embed-text` — local, free, default. `voyage` (paid) and `hash` (offline testing only) are drop-ins |
+| Text embeddings | **Ollama** `nomic-embed-text` — local, free, default, and **shipped inside the installers** (a CPU-only Ollama on `127.0.0.1:11435`, started by the product). `voyage` (paid) and `hash` (offline testing only) are drop-ins |
 | Image embeddings | **CLIP** ViT-B-32, shipped with the installer |
 | Reasoning | **Claude** — the part you are paying for |
 | Transport | MCP over **stdio** (Claude Desktop) or **Streamable HTTP** `/mcp` (Claude Web) |
 
-No Postgres, no Docker. **Nothing leaves your machine** — Ollama runs locally, the CLIP
-checkpoint ships inside the installer, and the product works on a fully air-gapped machine.
+No Postgres, no Docker. **Nothing leaves your machine** — the text embedder (Ollama and its model)
+and the CLIP checkpoint both ship inside the installer, nothing is downloaded at install time, and
+the product works on a fully air-gapped machine, including one that blocks ollama.com.
 
 ---
 
@@ -100,7 +101,7 @@ The order matters and is the same on all three platforms:
 ```mermaid
 flowchart LR
     S1["1 · copy the bundle<br/><i>staged, not swapped</i>"] --> S2["2 · verify CLIP weights<br/><i>SHA-256 checksum</i>"]
-    S2 --> S3["3 · ensure Ollama<br/><i>install + pull the model</i>"]
+    S2 --> S3["3 · the bundled embedder<br/><i>nothing to download</i>"]
     S3 --> S4["4 · create the<br/>data directory"]
     S4 --> S5["5 · <b>self-test</b>"]
     S5 -- all green --> S6["6 · wire Claude Desktop"]
@@ -121,16 +122,35 @@ swapped in once the self-test passes, so a failed upgrade leaves your working in
 | Program | `~/.local/share/campaign-intelligence` | `~/Library/Application Support/CampaignIntelligence` | `%LOCALAPPDATA%\Programs\CampaignIntelligence` |
 | Data + database | `~/campaign-poc-data/` | `~/campaign-poc-data/` | `%LOCALAPPDATA%\CampaignIntelligence\` |
 | Claude Desktop config | `~/.config/Claude/claude_desktop_config.json` | `~/Library/Application Support/Claude/claude_desktop_config.json` | `%APPDATA%\Claude\claude_desktop_config.json` |
-| Ollama | `/usr/local/bin/ollama` | `/Applications/Ollama.app` | `%LOCALAPPDATA%\Programs\Ollama` |
-| Ollama's model | `~/.ollama/models` (~274 MB) | `~/.ollama/models` | `%USERPROFILE%\.ollama\models` |
+| Text embedder (Ollama + `nomic-embed-text`, ~400 MB) | `<program>/ollama/` | `<program>/ollama/` | `<program>\ollama\` |
+| Embedder log | `~/campaign-poc-data/ollama.log` | `~/campaign-poc-data/ollama.log` | `%LOCALAPPDATA%\CampaignIntelligence\ollama.log` |
 
-No administrator rights are needed for the product itself. Ollama's own installer may ask.
+No administrator rights are needed, and nothing is downloaded. The embedder runs on
+`127.0.0.1:11435`, its own port, so an Ollama you already run on 11434 is never touched. It is
+not a service: the product starts it when it first needs it, it keeps running so the model stays
+loaded, and the installers stop it before an upgrade or uninstall.
 
 ---
 
 ### macOS
 
-**Download `CampaignIntelligence.pkg` and double-click it.** Choose **Install for me only** —
+**One command, in Terminal** (Apple silicon; from the release after v0.4.1, the first that
+publishes the script — nothing to copy out of a guide, no security prompt):
+
+```bash
+curl -fsSL https://github.com/nilubhatt/campaign-poc/releases/latest/download/install-macos.sh | bash
+```
+
+It downloads the macOS bundle, refuses it unless it matches the SHA-256 published beside it,
+unpacks it and runs the bundle's own `install.sh`: weights checked, the bundled embedder used
+(nothing fetched from ollama.com), self-test, then Claude Desktop connected. Run it again to
+upgrade. A specific release (the variable goes on `bash`, not on `curl`):
+
+```bash
+curl -fsSL https://github.com/nilubhatt/campaign-poc/releases/latest/download/install-macos.sh | CAMPAIGN_INTELLIGENCE_VERSION=v0.5.0 bash
+```
+
+**Or download `CampaignIntelligence.pkg` and double-click it.** Choose **Install for me only** —
 the product is per-user and needs no administrator password.
 
 <details>
@@ -151,7 +171,7 @@ Prefer a terminal? The `.tar.gz` carries the same installer:
 ```bash
 tar xzf campaign-intelligence-macos-arm64.tar.gz
 cd campaign-intelligence
-./install.sh                 # --no-ollama to skip the Ollama step
+./install.sh
 ```
 
 If the self-test fails, the full output is at
@@ -169,7 +189,7 @@ cd campaign-intelligence
 
 | Flag | Effect |
 |---|---|
-| `--no-ollama` | skip installing Ollama and pulling the model (use if you already have it) |
+| `--no-ollama` | only for a bundle built without its own embedder: skip installing Ollama and pulling the model |
 | `--service` | also run the HTTP server at login, via `systemd --user` |
 | `--base-url https://<name>` | with `--service`: the public URL Claude Web reaches the service on (a tunnel or your own HTTPS name), written into the unit |
 
@@ -187,12 +207,12 @@ Run **`CampaignIntelligence-Setup.exe`**. Three checkboxes:
 
 | Task | Default | What it does |
 |---|---|---|
-| **Install Ollama and download the embedding model** | ✅ on | downloads and silently installs Ollama, then pulls `nomic-embed-text` (~274 MB) |
+| **If this build has no embedder of its own: install Ollama** | ✅ on | does nothing with a release build, which carries its own; only a build without one downloads Ollama and pulls `nomic-embed-text` |
 | **Connect Claude Desktop automatically** | ✅ on | writes the stdio connector into `claude_desktop_config.json` |
 | **Run the server in the background at logon** | ⬜ off | a scheduled task running `serve`; if you tick it, the next page asks for the public URL Claude Web will reach it on (optional — `/BASEURL=https://…` on a silent install) |
 
-The download step can take several minutes and the installer says so while it runs. Uninstall
-from **Settings → Apps**; it removes the scheduled task and the Claude Desktop entry.
+Uninstall from **Settings → Apps**; it stops the embedder and removes the scheduled task and the
+Claude Desktop entry.
 
 ---
 
@@ -227,18 +247,23 @@ Convenience wrappers exist: `./run.sh --setup` (Linux/macOS, see **[LINUX.md](LI
 
 ## C. Offline / restricted networks
 
-The product itself needs **no network**: the weights ship in the archive and the installers
-verify them by checksum. CI proves this on all three platforms by running the packaged binary's
-full health check — including loading the vision model, the step that would reach for the Hub —
-inside an empty network namespace on Linux and with every HTTP request routed to a closed port
-on macOS and Windows.
+The product itself needs **no network**: the CLIP weights and the text embedder (Ollama and
+`nomic-embed-text`) ship in the archive, and nothing is downloaded at install time. That matters
+because some customer networks block ollama.com and Ollama's model registry as well as
+huggingface.co. CI proves it on all three platforms by running the packaged binary's full health
+check — loading the vision model and embedding text with the bundled Ollama — inside an empty
+network namespace on Linux and with every HTTP request routed to a closed port on macOS and
+Windows, on runners with no Ollama installed.
 
-Two things do want the internet, once:
+The product reaches its own embedder on loopback directly, so a corporate `HTTP_PROXY` does not
+get in the way.
+
+Only a **source checkout** wants the internet, once:
 
 | | Why | How to avoid it |
 |---|---|---|
-| Ollama's installer | to install Ollama and pull the model | install Ollama out of band, then `--no-ollama` / untick the task |
-| CLIP weights **in a source checkout only** | no bundled copy | `python scripts/fetch_weights.py models`, or point at a file (below) |
+| Ollama and its model | a checkout has no bundled embedder | install Ollama and pull `nomic-embed-text` on a network that allows it |
+| CLIP weights | no bundled copy | `python scripts/fetch_weights.py models`, or point at a file (below) |
 
 Resolving the model by tag goes to **huggingface.co**, which plenty of corporate networks block
 outright — often with endpoint filters answering :443 in plaintext, so it fails as a TLS error
@@ -283,7 +308,20 @@ is a service still starting.
 ### Checking each piece by hand
 
 <details open>
-<summary><b>1 · Ollama is running</b></summary>
+<summary><b>1 · The embedder is running</b></summary>
+
+An installed copy runs its own on port **11435**; the product starts it on first use, and
+`health-check` starts it too:
+
+```bash
+curl http://127.0.0.1:11435/api/version
+```
+
+Connection refused right after a reboot is normal until something uses it. If `health-check`
+still says `text_search` is down, the embedder's own account of why is in `ollama.log` in the
+data directory, and `campaign-intelligence stop-embedder` followed by `health-check` restarts it.
+
+A **source checkout** uses the Ollama you run yourself, on 11434:
 
 ```bash
 curl http://localhost:11434/api/tags
@@ -301,8 +339,9 @@ Expect JSON listing your models. Connection refused means Ollama is not running:
 <details open>
 <summary><b>2 · The embedding model is actually pulled</b></summary>
 
-This is the one people miss. **A running Ollama with nothing pulled answers on the socket and
-404s every embed** — so the daemon looks healthy while text search is dead.
+An installed copy ships the model, so this is about a source checkout. **A running Ollama with
+nothing pulled answers on the socket and 404s every embed** — so the daemon looks healthy while
+text search is dead.
 
 ```bash
 ollama list                     # nomic-embed-text should be listed
@@ -381,7 +420,8 @@ In Claude Desktop:
 | Symptom | Cause | Fix |
 |---|---|---|
 | Install refused, names a component | the self-test blocked it — working as designed | fix what it named, re-run the installer |
-| `text_search` fails, Ollama is running | model never pulled | `ollama pull nomic-embed-text` |
+| `text_search` fails on an installed copy | the bundled embedder did not start | read `ollama.log` in the data directory; `stop-embedder`, then `health-check`; reinstall if it names missing files |
+| `text_search` fails, your own Ollama is running (source checkout) | model never pulled | `ollama pull nomic-embed-text` |
 | `visual_search` unavailable | weights missing or corrupt | `check-weights` says which; reinstall, or set `CAMPAIGN_POC_CLIP_WEIGHTS_PATH` |
 | Claude does not see the tools | host cached the old schemas | **fully quit** and reopen the host app |
 | A parameter "does not exist" but should | same cause | `health_check` lists every tool's real parameters |
@@ -564,6 +604,8 @@ Every knob is an environment variable. The ones worth knowing:
 | `CAMPAIGN_POC_DB` | `<data>/campaigns.db` | database file |
 | `CAMPAIGN_POC_EMBED_PROVIDER` | `ollama` | `ollama` · `voyage` · `hash` |
 | `CAMPAIGN_POC_OLLAMA_MODEL` | `nomic-embed-text` | embedding model |
+| `OLLAMA_URL` | the bundled embedder (`http://127.0.0.1:11435`), else `http://localhost:11434` | use an Ollama you run yourself instead |
+| `CAMPAIGN_POC_BUNDLED_OLLAMA_PORT` | `11435` | the port the bundled embedder runs on |
 | `CAMPAIGN_POC_CLIP_WEIGHTS_PATH` | — | supply CLIP weights yourself |
 | `CAMPAIGN_POC_TOOL_BUDGET_SECONDS` | `45` | ceiling on one tool call |
 | `CAMPAIGN_POC_PORT` | `8086` | HTTP port |
@@ -618,7 +660,7 @@ All 65 of them. Claude picks the tool; you speak English.
 - `docs/DEFERRALS.md` — every deferred decision and why
 
 ```bash
-python -m pytest -q          # ~2,950 tests, about 5 minutes
+python -m pytest -q          # ~3,000 tests, about 5 minutes
 ```
 
 ## Roadmap

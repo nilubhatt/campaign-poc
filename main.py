@@ -51,6 +51,10 @@ def main() -> int:
                    help="retry while the only failure is a service still starting up "
                         "(used by the installers, which start Ollama moments earlier)")
 
+    sub.add_parser("stop-embedder",
+                   help="stop the Ollama this build ships with, if this product started it "
+                        "(used by the installers before they replace or remove the install)")
+
     c = sub.add_parser("configure-desktop", help="add this server to Claude Desktop's config (merges, backs up)")
     sub.add_parser("unconfigure-desktop",
                    help="remove this server from Claude Desktop's config (used by uninstall)")
@@ -194,9 +198,15 @@ def main() -> int:
         # and a corrupt checkpoint passed the resolved-only check — precisely the case the
         # post-install self-test exists to catch (item 4.1).
         clip_embed.warm_up()
+        # The bundled embedder is started by whoever needs it first, and on a fresh install
+        # this is that process. Starting it inside the 3-second text_search probe would
+        # report a slow start as an outage.
+        import bundled_ollama
+        bundled_ollama.ensure_running(timeout=30)
         wait = getattr(args, "wait", 0.0)
         if wait:
-            print(f"Waiting up to {wait:g}s for everything to come up...")
+            # stderr: `--wait --json` must print nothing but the JSON on stdout.
+            print(f"Waiting up to {wait:g}s for everything to come up...", file=sys.stderr)
         report = core.wait_until_ready(timeout=wait) if wait else core.health_check_cli()
         if getattr(args, "json", False):
             import json
@@ -215,6 +225,16 @@ def main() -> int:
         return 0 if report["ok"] else 1
     elif cmd == "unconfigure-desktop":
         _unconfigure_desktop()
+
+    elif cmd == "stop-embedder":
+        import bundled_ollama
+        if bundled_ollama.stop():
+            print("Stopped the bundled embedder.")
+        elif bundled_ollama._ours():
+            print("The bundled embedder is still running and could not be stopped.")
+            return 1
+        else:
+            print("The bundled embedder was not running.")
 
     elif cmd == "configure-desktop":
         _configure_desktop(http_url=args.http)

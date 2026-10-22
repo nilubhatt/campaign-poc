@@ -21,13 +21,14 @@ Data lives in `~/campaign-poc-data`. Service logs: `journalctl --user -u campaig
 
 Grab `campaign-intelligence-linux-x86_64.tar.gz` from the repo's Releases (built by CI), then
 either run it directly, or use the bundled **installer** (recommended — it wires Claude Desktop
-and Ollama for you):
+for you). The bundle carries its own text embedder (a CPU-only Ollama and `nomic-embed-text`),
+so nothing is downloaded and a network that blocks ollama.com is not a problem:
 
 ```bash
 tar xzf campaign-intelligence-linux-x86_64.tar.gz
 cd campaign-intelligence
 
-./install.sh                 # install to ~/.local + wire Claude Desktop + ensure Ollama
+./install.sh                 # install to ~/.local + wire Claude Desktop (downloads nothing)
 ./install.sh --service       # also run in the background (systemd --user)
 ./install.sh --service --base-url https://<name>   # ...reached by Claude Web at that public URL
 ./uninstall.sh               # remove it (--purge also deletes data)
@@ -37,9 +38,9 @@ cd campaign-intelligence
 ./campaign-intelligence stdio            # stdio (local Desktop)
 ```
 
-You still need **Ollama** for real semantic search: `curl -fsSL https://ollama.com/install.sh | sh`
-then `ollama pull nomic-embed-text`. (Without it, set `CAMPAIGN_POC_EMBED_PROVIDER=hash` for a
-non-semantic smoke test.)
+The product starts the bundled embedder itself, on `127.0.0.1:11435` (an Ollama you run on 11434
+is left alone), and `uninstall.sh` stops it. Its log is `~/campaign-poc-data/ollama.log`. Set
+`OLLAMA_URL` to use an Ollama of your own instead.
 
 Check health: `curl http://localhost:8086/healthz` — `vector_backend` should read `sqlite-vec`.
 

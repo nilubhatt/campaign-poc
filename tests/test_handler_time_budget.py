@@ -351,7 +351,7 @@ def test_ollama_is_asked_to_keep_the_model_resident(monkeypatch):
         def json(self):
             return {"embedding": [0.0] * config.EMBED_DIM}
 
-    def fake_post(url, json=None, timeout=None):
+    def fake_post(url, json=None, timeout=None, **_):
         sent.update(json or {})
         return _Resp()
 

@@ -16,6 +16,9 @@ DEST="$HOME/Library/Application Support/CampaignIntelligence"
 BIN="$HOME/.local/bin/campaign-intelligence"
 DATA="$HOME/campaign-poc-data"
 
+# The bundled embedder runs out of the directory about to be deleted; stop it first. An
+# install from before it was bundled has no such command and nothing to stop.
+[ -x "$DEST/campaign-intelligence" ] && "$DEST/campaign-intelligence" stop-embedder >/dev/null 2>&1 || true
 rm -f "$BIN"
 rm -rf "$DEST"
 echo "Removed the application."

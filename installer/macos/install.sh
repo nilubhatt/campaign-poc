@@ -3,8 +3,8 @@
 # app itself (Ollama's own installer may ask). Run from an extracted bundle directory, or it
 # will look for ./dist/campaign-intelligence or ./campaign-intelligence next to this script.
 #
-#   ./install.sh              # install + wire Claude Desktop + ensure Ollama
-#   ./install.sh --no-ollama  # skip the Ollama install/pull step
+#   ./install.sh              # install + wire Claude Desktop (the embedder is bundled)
+#   ./install.sh --no-ollama  # a bundle WITHOUT its own embedder: skip the Ollama download
 #
 # macOS previously had no installer at all: the release shipped a tar.gz and left the user to
 # work out where to put it, whether the weights survived the download, and whether Claude
@@ -37,6 +37,13 @@ DEST="$HOME/Library/Application Support/CampaignIntelligence"
 # replaced once the self-test has passed.
 STAGE="$DEST.incoming"
 echo "Installing to $DEST ..."
+# The bundled embedder (bundled_ollama.py) runs out of the install it came with, and nothing
+# may replace or delete files under a running copy. Stop the previous install's, and one a
+# failed earlier attempt left running in $STAGE. A build from before the embedder was bundled
+# has no such command and nothing to stop.
+for prev in "$DEST" "$STAGE"; do
+  [ -x "$prev/campaign-intelligence" ] && "$prev/campaign-intelligence" stop-embedder >/dev/null 2>&1 || true
+done
 rm -rf "$STAGE"; mkdir -p "$STAGE"; cp -a "$BUNDLE"/. "$STAGE"/
 
 # Gatekeeper quarantines anything that arrived through a browser. The flag travels to every
@@ -70,7 +77,12 @@ elif [ ! -f "$weights" ]; then
 fi
 
 
-if [ "$WITH_OLLAMA" = 1 ]; then
+if [ -d "$STAGE/ollama/models" ]; then
+  # This build carries its own Ollama and model (bundled_ollama.py): the customer's network
+  # blocks ollama.com and the model registry, so the download below could never finish
+  # there. The product starts it on demand; the self-test below proves it answers.
+  echo "Using the embedder bundled with this install (nothing to download)."
+elif [ "$WITH_OLLAMA" = 1 ]; then
   # The places Ollama actually installs to, added to PATH before deciding it is absent.
   # `installer` runs a .pkg's scripts with PATH=/usr/bin:/bin:/usr/sbin:/sbin, so
   # `command -v ollama` missed a perfectly good Ollama and the installer downloaded and
@@ -112,6 +124,7 @@ echo "Preparing the data directory..."
 echo
 echo "Running post-install self-test..."
 if ! "$STAGE/campaign-intelligence" health-check --wait 60; then
+  "$STAGE/campaign-intelligence" stop-embedder >/dev/null 2>&1 || true
   echo >&2
   echo "INSTALL FAILED: the self-test above names the component that is not working." >&2
   echo "Claude Desktop has NOT been connected, so nothing will try to use this yet." >&2
@@ -121,6 +134,9 @@ if ! "$STAGE/campaign-intelligence" health-check --wait 60; then
 fi
 
 # Only now is the live directory replaced: everything above ran against the staged copy.
+# The self-test started the bundled embedder out of $STAGE, a path about to stop existing;
+# the first real use starts it again from $DEST.
+"$STAGE/campaign-intelligence" stop-embedder >/dev/null 2>&1 || true
 rm -rf "$DEST"; mv "$STAGE" "$DEST"
 
 echo "Connecting Claude Desktop..."; "$DEST/campaign-intelligence" configure-desktop || true
