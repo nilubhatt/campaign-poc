@@ -616,6 +616,24 @@ jobs:
           Write-Host "visual_search and text_search ok with every request proxied to a closed port"
           exit 0
 
+      # A checksum beside every download, in `shasum -a 256 -c` form. install-macos.sh refuses
+      # an archive that does not match it, and a person checking by hand needs the number
+      # published somewhere other than in their head. The one-command Mac installer itself
+      # ships from the macOS job.
+      - name: Checksums for the release files (and the one-command Mac installer)
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, pathlib
+          for name in ["${{ matrix.asset }}", "CampaignIntelligence-Setup.exe", "CampaignIntelligence.pkg"]:
+              path = pathlib.Path(name)
+              if path.is_file():
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  pathlib.Path(name + ".sha256").write_text(f"{digest}  {name}\n")
+                  print(f"{digest}  {name}")
+          PY
+          if [ "${{ runner.os }}" = "macOS" ]; then cp installer/macos/install-macos.sh .; fi
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -624,6 +642,8 @@ jobs:
             ${{ matrix.asset }}
             CampaignIntelligence-Setup.exe
             CampaignIntelligence.pkg
+            *.sha256
+            install-macos.sh
           if-no-files-found: warn
 
       - name: Attach to release
@@ -634,3 +654,5 @@ jobs:
             ${{ matrix.asset }}
             CampaignIntelligence-Setup.exe
             CampaignIntelligence.pkg
+            *.sha256
+            install-macos.sh

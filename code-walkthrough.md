@@ -4,7 +4,7 @@
 > [`design.md`](design.md) first for *why* it is shaped this way; this document is *where
 > everything is*. [`README.md`](README.md) covers installing and running it.
 
-**39 modules of product code and 111 test files — more lines of test than of product.** The test-to-code ratio is not an accident: almost every rule described below is
+**39 modules of product code and 112 test files — more lines of test than of product.** The test-to-code ratio is not an accident: almost every rule described below is
 pinned by a test that was written to fail first.
 
 ---

@@ -134,7 +134,18 @@ loaded, and the installers stop it before an upgrade or uninstall.
 
 ### macOS
 
-**Download `CampaignIntelligence.pkg` and double-click it.** Choose **Install for me only** —
+**One command, in Terminal** (Apple silicon; nothing to copy out of a guide, no security prompt):
+
+```bash
+curl -fsSL https://github.com/nilubhatt/campaign-poc/releases/latest/download/install-macos.sh | bash
+```
+
+It downloads the macOS bundle, refuses it unless it matches the SHA-256 published beside it,
+unpacks it and runs the bundle's own `install.sh`: weights checked, the bundled embedder used
+(nothing fetched from ollama.com), self-test, then Claude Desktop connected. Run it again to
+upgrade. `CAMPAIGN_INTELLIGENCE_VERSION=v0.5.0` before `bash` installs a specific release.
+
+**Or download `CampaignIntelligence.pkg` and double-click it.** Choose **Install for me only** —
 the product is per-user and needs no administrator password.
 
 <details>
