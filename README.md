@@ -174,8 +174,8 @@ cd campaign-intelligence
 ./install.sh
 ```
 
-If the self-test fails, the full output is at
-`~/Library/Logs/CampaignIntelligence-install.log`.
+If the self-test fails: with the one-line command or `./install.sh`, the full output is in the
+Terminal window; with the `.pkg`, it is at `~/Library/Logs/CampaignIntelligence-install.log`.
 
 ---
 
@@ -288,8 +288,16 @@ all work — only visual similarity is off, and it says so rather than failing q
 Run this first. It checks every component and exits non-zero if anything is wrong:
 
 ```bash
+# macOS (the installer does not put the program on your PATH, so use its full path)
+"$HOME/Library/Application Support/CampaignIntelligence/campaign-intelligence" health-check
+# Linux (the installer links it into ~/.local/bin)
 campaign-intelligence health-check
+# Windows (PowerShell)
+& "$env:LOCALAPPDATA\Programs\CampaignIntelligence\campaign-intelligence.exe" health-check
 ```
+
+Elsewhere in this README, `campaign-intelligence` means that same program: on macOS and
+Windows, type its full path as above.
 
 A healthy install looks like this — five components, each named, each either `ok` or not:
 
