@@ -42,7 +42,10 @@ The product starts the bundled embedder itself, on `127.0.0.1:11435` (an Ollama 
 is left alone), and `uninstall.sh` stops it. Its log is `~/campaign-poc-data/ollama.log`. Set
 `OLLAMA_URL` to use an Ollama of your own instead.
 
-Check health: `curl http://localhost:8086/healthz` — `vector_backend` should read `sqlite-vec`.
+Check health: `campaign-intelligence health-check` (the installer links it into `~/.local/bin`)
+checks every component and exits non-zero if one is not working. With `serve` or `--service`
+running, `curl http://localhost:8086/healthz` also answers; `vector_backend` should read
+`sqlite-vec`.
 
 ## Connect a client
 

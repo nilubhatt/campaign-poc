@@ -134,6 +134,3 @@ means the name is not on the list the startup line `Answers to Host:` prints.
 - **Hardened Windows Service:** the `-Mode service` switch uses Task Scheduler (simple, runs at
   logon). For a true always-on service independent of login, wrap `python -m http_app` with
   **NSSM** or **WinSW** — a Phase-2 upgrade.
-- **Phase 2 (no Python on target):** bundle into a one-folder `.exe` with PyInstaller (must
-  include the `sqlite-vec` DLL). **Phase 3:** an Inno Setup installer that also installs Ollama,
-  pulls the model on first run, and writes the Claude Desktop connector config.
