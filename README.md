@@ -5,6 +5,8 @@ creative and their numbers. When a new brief arrives, Claude judges it against t
 actually resemble it — citing specific campaigns, with their real outcomes attached. After the
 campaign runs, feed the numbers back and the judgment is reconciled against what happened.
 
+> **Using it day to day?** Read [`USER-GUIDE.md`](USER-GUIDE.md), the plain-language guide for marketers.
+>
 > **New here?** This file covers what it is, installing it, and verifying the install.
 > [`design.md`](design.md) explains the technical design.
 > [`code-walkthrough.md`](code-walkthrough.md) walks the code module by module.
